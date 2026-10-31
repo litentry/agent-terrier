@@ -24,7 +24,6 @@ members = [
     "crates/agentkeys-classify-dataset",
     "crates/agentkeys-worker-classify",
     "crates/agentkeys-worker-audit",
-    "crates/agentkeys-worker-email",
     "crates/agentkeys-gate",
     "crates/agentkeys-bundler",
 ]

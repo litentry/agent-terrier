@@ -41,12 +41,6 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 sha2 = "0.10"
 hex = "0.4"
-aws-config = { version = "1", features = ["behavior-version-latest"] }
-# Real SES sender for email-link auth. Optional, gated behind
-# auth-email-link — without the feature the broker has no SES sender at
-# all (StubEmailSender remains for tests). Pulled in by Pass 1 of
-# Option B per docs/archived/issue-74-dev-key-service-plan.md (see commit log).
-aws-sdk-sesv2 = { version = "1", optional = true }
 jsonwebtoken = "9"
 p256 = { version = "0.13", features = ["pkcs8", "pem", "ecdsa"] }
 pkcs8 = { version = "0.10", features = ["pem"] }
@@ -76,11 +70,8 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 # Heima/Solana/Passkey/Apple/GitHub deferred to v1+.
 default              = ["auth-wallet-sig", "wallet-keystore", "audit-sqlite"]
 
-# Auth methods. Per-method external deps land in subsequent stories:
-# US-006 adds k256+sha3 to auth-wallet-sig; Phase A.1 adds lettre+aws-sdk-sesv2
-# to auth-email-link; Phase A.2's OAuth2 reuses unconditional jsonwebtoken+reqwest.
 auth-wallet-sig      = ["dep:k256"]
-auth-email-link      = ["dep:aws-sdk-sesv2"]
+auth-email-link      = []
 auth-oauth2          = ["dep:url"]
 auth-oauth2-google   = ["auth-oauth2"]
 auth-oauth2-github   = ["auth-oauth2"]            # v1+
@@ -95,7 +86,7 @@ audit-evm            = []                          # Phase C; alloy deps land in
 audit-solana         = []                          # v1; deferred
 
 # Test infrastructure.
-test-stub            = []                          # existing — stubs STS/SES/RPC for offline tests
+test-stub            = []                          # existing — injected transport fixtures for offline tests
 
 [dev-dependencies]
 agentkeys-web-core = { workspace = true }
@@ -104,7 +95,4 @@ agentkeys-mock-server = { path = "../agentkeys-mock-server" }
 tower = { version = "0.4", features = ["util"] }
 http-body-util = "0.1"
 tempfile = "3"
-# Integration test only — receiver side of the SES → S3 round-trip in
-# tests/ses_email_flow.rs. Not needed at runtime.
-aws-sdk-s3 = "1"
 uuid = { version = "1", features = ["v4"] }

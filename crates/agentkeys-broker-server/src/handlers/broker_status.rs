@@ -37,7 +37,7 @@ pub async fn readyz(State(state): State<SharedState>) -> impl IntoResponse {
     let (overall_plugin_state, plugin_checks) = state.registry.aggregate_readiness();
 
     // Tier-2 reachability flags (set by spawn_tier2_probes in main.rs).
-    let ses_verified = state.tier2.ses_verified.load(Ordering::Relaxed);
+    let email_sender_ready = state.tier2.email_sender_ready.load(Ordering::Relaxed);
     let evm_rpc_reachable = state.tier2.evm_rpc_reachable.load(Ordering::Relaxed);
     let evm_fee_payer_funded = state.tier2.evm_fee_payer_funded.load(Ordering::Relaxed);
 
@@ -66,16 +66,16 @@ pub async fn readyz(State(state): State<SharedState>) -> impl IntoResponse {
         }
     }
 
-    // Tier-2 SES probe — only reported when email-link auth is enabled.
+    // Tier-2 email readiness probe — only reported when email-link auth is enabled.
     if state.registry.auth.contains_key("email_link") {
-        if ses_verified {
-            ready_names.push("tier2/ses".into());
+        if email_sender_ready {
+            ready_names.push("tier2/email".into());
         } else {
             unready = true;
             checks.push(json!({
-                "name": "tier2/ses",
+                "name": "tier2/email",
                 "status": "unready",
-                "reason": "SES sender identity not yet verified since boot",
+                "reason": "Email sender not ready since boot",
                 "docs": local_service_guide(),
             }));
         }

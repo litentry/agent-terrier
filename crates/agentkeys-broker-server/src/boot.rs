@@ -11,7 +11,7 @@
 //!   runbook §<anchor>`.
 //!
 //! - **Tier 2 (async, after listener bound):** external reachability.
-//!   Backend reachable, SES sender verified (when email-link enabled),
+//!   Backend reachable, Email sender ready (when email-link enabled),
 //!   EVM RPC reachable + chain_id matches (when audit-evm enabled), EVM
 //!   fee-payer balance ≥ floor. These are *not* refuse-to-boot — the
 //!   broker binds the port and serves /healthz=200 + /readyz=503 with
@@ -407,7 +407,7 @@ fn build_registry(
             #[cfg(feature = "auth-email-link")]
             "email_link" => {
                 use crate::plugins::auth::{
-                    EmailLinkAuth, EmailSender, SesEmailSender, StubEmailSender,
+                    local_outbox::LocalEmailOutbox, EmailLinkAuth, EmailSender,
                 };
                 use crate::storage::{EmailRateLimitStore, EmailTokenStore};
                 // No HMAC key — magic-link is stateful (CSPRNG token →
@@ -459,69 +459,36 @@ fn build_registry(
                     .ok()
                     .and_then(|s| s.parse::<i64>().ok())
                     .unwrap_or(30);
-                // Landing URL base: BROKER_EMAIL_LANDING_URL_BASE when set,
-                // else oidc_issuer. The issuer default is only correct when
-                // the issuer IS the broker's public host (AWS stacks); on VE
-                // the issuer is the TOS-bucket JWKS URL, which serves no
-                // landing page, so the unit sets the base to the broker vhost.
                 let landing_base = email_landing_base(
                     std::env::var(env::BROKER_EMAIL_LANDING_URL_BASE).ok(),
                     &config.oidc_issuer,
                 );
-                // SES verify cache path.
                 let data_dir = std::env::var(env::BROKER_DATA_DIR)
                     .map(std::path::PathBuf::from)
                     .unwrap_or_else(|_| parent.clone());
-                let ses_cache_path = data_dir.join("ses-verify.json");
-                // Email sender backend selector — `BROKER_EMAIL_SENDER` env var.
-                //   "stub" (default, in-process Vec — same as v0.1)
-                //   "ses"  (real aws-sdk-sesv2 SendEmail; requires verified FROM
-                //          identity per scripts/operator/cloud/ses-verify-sender.sh)
-                let sender_backend =
-                    std::env::var(env::BROKER_EMAIL_SENDER).unwrap_or_else(|_| "stub".to_string());
-                let sender: Arc<dyn EmailSender> = match sender_backend.as_str() {
-                    "stub" => {
-                        tracing::info!("email_link sender backend: stub (in-process)");
-                        Arc::new(StubEmailSender::new())
-                    }
-                    "ses" => {
-                        // SesEmailSender::new takes &SdkConfig (sync), but
-                        // aws_config::defaults().load() is async. We're in a
-                        // sync fn called from #[tokio::main] (multi-thread),
-                        // so block_in_place + block_on is the legal escape.
-                        let region = std::env::var(env::BROKER_AWS_REGION)
-                            .unwrap_or_else(|_| "us-east-1".to_string());
-                        tracing::info!(
-                            from = %from_address,
-                            region = %region,
-                            "email_link sender backend: ses (aws-sdk-sesv2)"
-                        );
-                        let sdk_config = tokio::task::block_in_place(|| {
-                            tokio::runtime::Handle::current().block_on(async {
-                                aws_config::defaults(aws_config::BehaviorVersion::latest())
-                                    .region(aws_config::Region::new(region))
-                                    .load()
-                                    .await
-                            })
-                        });
-                        Arc::new(SesEmailSender::new(&sdk_config, from_address.clone()))
-                    }
-                    other => {
-                        return Err(boot_fail(
-                            env::BROKER_EMAIL_SENDER,
-                            other,
-                            "must be 'stub' or 'ses'",
-                            "email-sender-backend",
-                        ));
-                    }
-                };
+                let sender_cache_path = data_dir.join("sender-verify.json");
+                let sender: Arc<dyn EmailSender> = Arc::new(
+                    LocalEmailOutbox::from_configuration(
+                        config.dev_mode,
+                        std::env::var(env::BROKER_EMAIL_SENDER).ok().as_deref(),
+                        std::env::var(env::BROKER_EMAIL_OUTBOX_DIR).ok().as_deref(),
+                    )
+                    .map_err(|error| {
+                        boot_fail(
+                            env::BROKER_EMAIL_OUTBOX_DIR,
+                            "(configured)",
+                            error,
+                            "email-outbox",
+                        )
+                    })?,
+                );
                 let plugin = EmailLinkAuth::new(
                     sender,
                     Arc::clone(&token_store),
                     Arc::clone(&rl_store),
                     from_address.clone(),
                     landing_base,
-                    ses_cache_path,
+                    sender_cache_path,
                     per_email,
                     per_ip,
                 )

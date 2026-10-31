@@ -217,33 +217,33 @@ async fn main() -> anyhow::Result<()> {
 /// on `Tier2State` as each external dependency becomes reachable.
 ///
 /// Currently spawns, when email-link auth is compiled in and enabled, the
-/// SES sender-verify probe that also persists `SesVerifyCache` to disk so
+/// Email sender-verify probe that also persists `SenderVerificationCache` to disk so
 /// the email-link plug-in's `Readiness::ready()` flips from `Degraded` to
 /// `Ready`. The EVM probe lands in Phase C.
 fn spawn_tier2_probes(state: Arc<AppState>, profile: agentkeys_broker_server::boot::Tier2Profile) {
     let _ = (&state, &profile);
     #[cfg(feature = "auth-email-link")]
     if profile.email_link_enabled {
-        spawn_ses_verify_probe(Arc::clone(&state), profile.strict);
+        spawn_sender_verify_probe(Arc::clone(&state), profile.strict);
     }
 }
 
-/// SES sender-verify probe. Calls `verify_sender_ready()` on the
-/// configured `EmailSender`, persists `SesVerifyCache` on success so the
-/// plug-in's `Readiness` flips to `Ready`, and flips the `tier2/ses`
+/// Email sender-verify probe. Calls `verify_sender_ready()` on the
+/// configured `EmailSender`, persists `SenderVerificationCache` on success so the
+/// plug-in's `Readiness` flips to `Ready`, and flips the `tier2/email`
 /// `AtomicBool`. Retries with exponential backoff on failure (capped at
 /// 5 minutes); after a success, re-verifies every 12h so the cache stays
 /// under the plug-in's 24h freshness TTL.
 #[cfg(feature = "auth-email-link")]
-fn spawn_ses_verify_probe(state: Arc<AppState>, strict: bool) {
+fn spawn_sender_verify_probe(state: Arc<AppState>, strict: bool) {
     use std::sync::atomic::Ordering;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use agentkeys_broker_server::plugins::auth::SesVerifyCache;
+    use agentkeys_broker_server::plugins::auth::SenderVerificationCache;
 
     let Some(email_link) = state.email_link.clone() else {
         tracing::error!(
-            "Tier-2 SES probe: email_link is in BROKER_AUTH_METHODS but the \
+            "Tier-2 Email probe: email_link is in BROKER_AUTH_METHODS but the \
              concrete plug-in handle is missing from AppState — /readyz will \
              stay degraded. Indicates a build/config bug."
         );
@@ -259,24 +259,27 @@ fn spawn_ses_verify_probe(state: Arc<AppState>, strict: bool) {
                         .duration_since(UNIX_EPOCH)
                         .map(|d| d.as_secs() as i64)
                         .unwrap_or(0);
-                    let cache = SesVerifyCache {
+                    let cache = SenderVerificationCache {
                         last_verified_at: now,
                         sender_email: email_link.from_address.clone(),
                     };
-                    match cache.save(&email_link.ses_verify_cache_path) {
+                    match cache.save(&email_link.sender_verify_cache_path) {
                         Ok(()) => {
-                            state.tier2.ses_verified.store(true, Ordering::Relaxed);
+                            state
+                                .tier2
+                                .email_sender_ready
+                                .store(true, Ordering::Relaxed);
                             tracing::info!(
                                 sender = %email_link.from_address,
-                                path = %email_link.ses_verify_cache_path.display(),
-                                "Tier-2 SES probe: sender verified; cache persisted"
+                                path = %email_link.sender_verify_cache_path.display(),
+                                "Tier-2 Email probe: sender verified; cache persisted"
                             );
                         }
                         Err(e) => {
                             tracing::error!(
                                 error = %e,
-                                path = %email_link.ses_verify_cache_path.display(),
-                                "Tier-2 SES probe: verify succeeded but cache save failed; auth/email_link readiness will stay degraded"
+                                path = %email_link.sender_verify_cache_path.display(),
+                                "Tier-2 Email probe: verify succeeded but cache save failed; auth/email_link readiness will stay degraded"
                             );
                         }
                     }
@@ -287,14 +290,14 @@ fn spawn_ses_verify_probe(state: Arc<AppState>, strict: bool) {
                     if strict {
                         tracing::error!(
                             error = %e,
-                            "BROKER_REFUSE_TO_BOOT_STRICT=true and SES sender verify failed; exiting"
+                            "BROKER_REFUSE_TO_BOOT_STRICT=true and Email sender verify failed; exiting"
                         );
                         std::process::exit(1);
                     }
                     tracing::warn!(
                         error = %e,
                         retry_seconds = backoff_seconds,
-                        "Tier-2 SES probe: sender verify failed; /readyz will report unready until verified"
+                        "Tier-2 Email probe: sender verify failed; /readyz will report unready until verified"
                     );
                     tokio::time::sleep(std::time::Duration::from_secs(backoff_seconds)).await;
                     backoff_seconds = (backoff_seconds * 2).min(300);

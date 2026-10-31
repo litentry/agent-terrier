@@ -38,6 +38,15 @@ async fn unavailable_exchange_refuses_every_operation() {
 
 #[tokio::test]
 async fn local_binary_starts_without_cloud_roles_and_retains_authentication() {
+    check_local_binary(false).await;
+}
+
+#[tokio::test]
+async fn local_binary_wires_the_private_email_outbox() {
+    check_local_binary(true).await;
+}
+
+async fn check_local_binary(email_enabled: bool) {
     let directory = tempfile::tempdir().unwrap();
     let binary = env!("CARGO_BIN_EXE_agentkeys-broker-server");
     for purpose in ["oidc", "session"] {
@@ -58,6 +67,16 @@ async fn local_binary_starts_without_cloud_roles_and_retains_authentication() {
             .env_clear()
             .env("BROKER_OIDC_ISSUER", &endpoint)
             .env("BROKER_DEV_MODE", "true")
+            .env(
+                "BROKER_AUTH_METHODS",
+                if email_enabled {
+                    "wallet_sig,email_link"
+                } else {
+                    "wallet_sig"
+                },
+            )
+            .env("BROKER_EMAIL_FROM_ADDRESS", "sender@example.test")
+            .env("BROKER_EMAIL_OUTBOX_DIR", directory.path().join("outbox"))
             .env(
                 "BROKER_AUDIT_DB_PATH",
                 directory.path().join("audit.sqlite"),
@@ -91,13 +110,23 @@ async fn local_binary_starts_without_cloud_roles_and_retains_authentication() {
     loop {
         assert!(process.0.try_wait().unwrap().is_none(), "broker exited");
         if let Ok(response) = client.get(format!("{endpoint}/readyz")).send().await {
-            assert_eq!(response.status(), 200);
-            let readiness: serde_json::Value = response.json().await.unwrap();
-            assert_eq!(readiness["status"], "ready");
-            break;
+            if response.status() == 200 {
+                let readiness: serde_json::Value = response.json().await.unwrap();
+                assert_eq!(readiness["status"], "ready");
+                break;
+            }
+            assert!(email_enabled && response.status() == 503);
         }
         assert!(Instant::now() < deadline, "broker did not become ready");
         tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    if email_enabled {
+        for path in [
+            directory.path().join("outbox/.readiness.json"),
+            directory.path().join("sender-verify.json"),
+        ] {
+            assert!(agentkeys_core::protected_file::read_text(path.to_str().unwrap()).is_ok());
+        }
     }
     let refused = client
         .post(format!("{endpoint}/v1/cap/cred-store"))

@@ -20,7 +20,7 @@ use crate::sts::StsClient;
 /// returned 200/503 status.
 #[derive(Default, Debug)]
 pub struct Tier2State {
-    pub ses_verified: std::sync::atomic::AtomicBool,
+    pub email_sender_ready: std::sync::atomic::AtomicBool,
     pub evm_rpc_reachable: std::sync::atomic::AtomicBool,
     pub evm_fee_payer_funded: std::sync::atomic::AtomicBool,
 }

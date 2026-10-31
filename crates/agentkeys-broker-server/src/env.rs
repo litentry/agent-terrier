@@ -188,23 +188,17 @@ pub const BROKER_EVM_PER_IDENTITY_DAILY_TX_BUDGET: &str = "BROKER_EVM_PER_IDENTI
 // Email auth (Phase A.1)
 // ---------------------------------------------------------------------------
 
-/// Required when `email_link` is in `BROKER_AUTH_METHODS`. Verified SES sender email address.
+/// Required when `email_link` is in `BROKER_AUTH_METHODS`. Sender identity for development sign-in messages.
 ///
 /// **No HMAC key var.** Magic-link tokens are stateful (CSPRNG → SHA256 → SQLite EmailTokenStore →
 /// single-use within TTL). See `crates/agentkeys-broker-server/src/plugins/auth/email_link.rs`
 /// `EmailLinkAuth::new` doc + `docs/arch.md` §5a.1.M Stage 1.
 pub const BROKER_EMAIL_FROM_ADDRESS: &str = "BROKER_EMAIL_FROM_ADDRESS";
-/// Optional. Email sender backend selector — `stub` (default, in-process Vec) or `ses`
-/// (real `aws-sdk-sesv2` SendEmail). When `ses`, the FROM identity must be SES-verified
-/// (see `scripts/operator/cloud/ses-verify-sender.sh`). Picks the SES region from `BROKER_AWS_REGION`
-/// (or AWS SDK default chain).
+/// Optional. The public binary supports only the development local outbox.
 pub const BROKER_EMAIL_SENDER: &str = "BROKER_EMAIL_SENDER";
-/// Optional. Public base URL the magic-link landing page is reachable at
-/// (scheme + host, no path — the broker appends `/auth/email/landing`).
-/// Defaults to `BROKER_OIDC_ISSUER`, which is correct when the issuer IS the
-/// broker's public host (the AWS stacks). Set it when the two diverge: on the
-/// VE stack the issuer is the TOS-bucket JWKS URL, which serves no landing
-/// page — there it must point at the broker vhost (`https://broker.<zone>`).
+/// Required absolute owner-private directory for development sign-in messages.
+pub const BROKER_EMAIL_OUTBOX_DIR: &str = "BROKER_EMAIL_OUTBOX_DIR";
+/// Optional public landing-page base URL; defaults to the OIDC issuer.
 pub const BROKER_EMAIL_LANDING_URL_BASE: &str = "BROKER_EMAIL_LANDING_URL_BASE";
 /// Optional. Operator URL the broker redirects to after a successful email-link verification.
 /// If unset, the broker shows a minimal built-in "Verified — return to your terminal" page.
@@ -424,12 +418,17 @@ pub const fn all() -> &'static [(&'static str, &'static str, Group)] {
         // Auth / email
         (
             BROKER_EMAIL_FROM_ADDRESS,
-            "Verified SES sender email.",
+            "Sender identity for development sign-in messages.",
             Group::AuthEmail,
         ),
         (
             BROKER_EMAIL_SENDER,
-            "Email backend: 'stub' (default) or 'ses' (real aws-sdk-sesv2).",
+            "Email backend: local-outbox (development only).",
+            Group::AuthEmail,
+        ),
+        (
+            BROKER_EMAIL_OUTBOX_DIR,
+            "Absolute owner-private directory for local sign-in messages.",
             Group::AuthEmail,
         ),
         (
