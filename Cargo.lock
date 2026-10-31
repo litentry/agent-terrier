@@ -609,6 +609,7 @@ dependencies = [
  "agentkeys-types",
  "agentkeys-worker-audit",
  "agentkeys-worker-config",
+ "agentkeys-worker-memory",
  "anyhow",
  "async-trait",
  "aws-config",
@@ -663,19 +664,12 @@ dependencies = [
  "agentkeys-protocol",
  "agentkeys-worker-creds",
  "anyhow",
- "aws-config",
- "aws-sdk-s3",
  "axum",
  "base64 0.22.1",
  "clap",
- "hex",
- "reqwest",
  "serde",
  "serde_json",
- "thiserror 2.0.18",
  "tokio",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]

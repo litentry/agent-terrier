@@ -10034,6 +10034,7 @@ async fn mint_master_cap(
     let op = match route {
         "memory-put" => CapMintOp::MemoryPut,
         "memory-get" => CapMintOp::MemoryGet,
+        "memory-inbox-delete" => CapMintOp::MemoryInboxDelete,
         "config-store" => CapMintOp::ConfigStore,
         "config-fetch" => CapMintOp::ConfigFetch,
         "cred-store" => CapMintOp::CredStore,
@@ -11221,10 +11222,7 @@ async fn reconcile_taxonomy(
 #[cfg(test)]
 use agentkeys_web_core::console_inbox::SKILL_MAX_BYTES;
 
-/// Mint a master-self inbox cap (Fetch op, `service = "inbox"`,
-/// `operator == actor == O_master` so the broker skips the on-chain scope check)
-/// and POST it to a worker inbox endpoint, reusing the master's memory-role STS
-/// creds. `extra` is merged into the request body alongside `cap`.
+/// Owner inbox reads use Fetch; deletion uses an explicit Teardown capability.
 async fn inbox_worker_post(
     http: &reqwest::Client,
     ctx: &RealMemoryCtx,
@@ -11237,7 +11235,11 @@ async fn inbox_worker_post(
         &ctx.j1,
         &ctx.omni,
         &ctx.device_key_hash,
-        "memory-get",
+        if path == "/v1/memory/inbox-delete" {
+            "memory-inbox-delete"
+        } else {
+            "memory-get"
+        },
         "inbox",
     )
     .await

@@ -144,10 +144,11 @@ pub fn authorize_key(
         ) => {
             owner
                 && matches!(action, ObjectAction::Delete | ObjectAction::List)
-                && (key.starts_with(&actor_prefix)
-                    || (payload.data_class == DataClass::Memory
-                        && service == "inbox"
-                        && key.starts_with(&format!("bots/{operator}/inbox/"))))
+                && if payload.data_class == DataClass::Memory && service == "inbox" {
+                    key.starts_with(&format!("bots/{operator}/inbox/"))
+                } else {
+                    key.starts_with(&actor_prefix)
+                }
         }
         _ => false,
     };

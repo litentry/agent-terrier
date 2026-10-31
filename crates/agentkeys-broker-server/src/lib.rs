@@ -112,6 +112,10 @@ pub fn create_router(state: SharedState) -> Router {
         // memory worker accepts and the cred worker rejects.
         .route("/v1/cap/memory-put", post(handlers::cap::cap_memory_put))
         .route("/v1/cap/memory-get", post(handlers::cap::cap_memory_get))
+        .route(
+            agentkeys_protocol::CapMintOp::MemoryInboxDelete.broker_path(),
+            post(handlers::cap::cap_memory_inbox_delete),
+        )
         // #295 P1 — delegated canonical-memory READ (the master-hub
         // distribution channel): mints a CanonicalFetch/Memory cap, gated by
         // the on-chain knowledge:<ns> grant when operator != actor.

@@ -43,6 +43,7 @@ pub enum CapMintOp {
     CredFetch,
     MemoryPut,
     MemoryGet,
+    MemoryInboxDelete,
     /// #295 P1 — delegated READ of the master's CANONICAL memory (master-hub
     /// distribution). Mints `CapOp::CanonicalFetch`/`DataClass::Memory` at
     /// `/v1/cap/memory-canonical-get`; `op_str` is `"canonical_fetch"` so the
@@ -89,6 +90,7 @@ impl CapMintOp {
             "cred_fetch" => Some(Self::CredFetch),
             "memory_put" => Some(Self::MemoryPut),
             "memory_get" => Some(Self::MemoryGet),
+            "memory_inbox_delete" => Some(Self::MemoryInboxDelete),
             "memory_canonical_get" => Some(Self::MemoryCanonicalGet),
             "memory_append" => Some(Self::MemoryAppend),
             "config_store" => Some(Self::ConfigStore),
@@ -106,6 +108,7 @@ impl CapMintOp {
             Self::CredFetch => "/v1/cap/cred-fetch",
             Self::MemoryPut => "/v1/cap/memory-put",
             Self::MemoryGet => "/v1/cap/memory-get",
+            Self::MemoryInboxDelete => "/v1/cap/memory-inbox-delete",
             Self::MemoryCanonicalGet => "/v1/cap/memory-canonical-get",
             Self::MemoryAppend => "/v1/cap/memory-append",
             Self::ConfigStore => "/v1/cap/config-store",
@@ -124,9 +127,11 @@ impl CapMintOp {
         use capability::DataClass;
         match self {
             Self::CredStore | Self::CredFetch => DataClass::Credentials,
-            Self::MemoryPut | Self::MemoryGet | Self::MemoryCanonicalGet | Self::MemoryAppend => {
-                DataClass::Memory
-            }
+            Self::MemoryPut
+            | Self::MemoryGet
+            | Self::MemoryCanonicalGet
+            | Self::MemoryAppend
+            | Self::MemoryInboxDelete => DataClass::Memory,
             Self::ConfigStore | Self::ConfigFetch => DataClass::Config,
             Self::ChannelPublish | Self::ChannelSubscribe => DataClass::Channel,
             Self::SpeechUse => DataClass::Speech,
@@ -144,6 +149,7 @@ impl CapMintOp {
             Self::CredFetch | Self::MemoryGet | Self::ConfigFetch => CapOp::Fetch,
             Self::MemoryCanonicalGet => CapOp::CanonicalFetch,
             Self::MemoryAppend => CapOp::Append,
+            Self::MemoryInboxDelete => CapOp::Teardown,
             Self::ChannelPublish => CapOp::ChannelPublish,
             Self::ChannelSubscribe => CapOp::ChannelSubscribe,
             Self::SpeechUse => CapOp::SpeechUse,
@@ -253,8 +259,8 @@ pub type CapToken = Value;
 /// The authority is identical either way — the signed cap `service` — the key
 /// only subdivides storage WITHIN it (the sandbox-checkpoint use case).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MemoryPutBody {
-    pub cap: CapToken,
+pub struct MemoryPutBody<T = CapToken> {
+    pub cap: T,
     pub plaintext_b64: String,
     pub namespace: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -271,8 +277,8 @@ pub struct MemoryPutBody {
 /// `agentkeys_worker_memory::handlers::GetRequest`. `object_key` as on
 /// [`MemoryPutBody`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MemoryGetBody {
-    pub cap: CapToken,
+pub struct MemoryGetBody<T = CapToken> {
+    pub cap: T,
     pub namespace: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub object_key: Option<String>,
@@ -308,7 +314,7 @@ pub struct CheckpointEnvelope {
     pub snapshot: Value,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryPutResp {
     pub ok: bool,
     pub s3_key: String,
@@ -320,7 +326,7 @@ pub struct MemoryPutResp {
     pub audit_envelope_hash: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryGetResp {
     pub ok: bool,
     pub plaintext_b64: String,
@@ -2450,19 +2456,19 @@ pub fn persona_soul_key(delegate_omni: &str) -> String {
 /// content-hash and writes the envelope to
 /// `bots/<operator>/inbox/<delegate>/<ns>/<content_hash>.enc`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MemoryInboxAppendBody {
-    pub cap: CapToken,
+pub struct MemoryInboxAppendBody<T = CapToken> {
+    pub cap: T,
     pub key: String,
     pub plaintext_b64: String,
     #[serde(default)]
     pub kind: ContextKind,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryInboxAppendResp {
     pub ok: bool,
     pub s3_key: String,
-    /// sha256 over (ns || key || body) — the dedup key + the curate watermark.
+    /// keccak256 over namespace, key and body separated by 0x7c.
     pub content_hash: String,
     /// Durable-audit receipt (#229) — see [`MemoryPutResp::audit_envelope_hash`].
     #[serde(default)]
@@ -2559,11 +2565,11 @@ pub struct InboxItemMeta {
 /// queue. The handler rejects a non-master-self cap so no delegate can read
 /// another delegate's proposals (hub-and-spoke, never mesh — §7).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct InboxListBody {
-    pub cap: CapToken,
+pub struct InboxListBody<T = CapToken> {
+    pub cap: T,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InboxListResp {
     pub ok: bool,
     pub items: Vec<InboxItemMeta>,
@@ -2571,12 +2577,12 @@ pub struct InboxListResp {
 
 /// Master → worker `POST /v1/memory/inbox-get` — read one proposal to review.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct InboxGetBody {
-    pub cap: CapToken,
+pub struct InboxGetBody<T = CapToken> {
+    pub cap: T,
     pub s3_key: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InboxGetResp {
     pub ok: bool,
     pub item: InboxItem,
@@ -2585,12 +2591,12 @@ pub struct InboxGetResp {
 /// Master → worker `POST /v1/memory/inbox-delete` — GC after curation
 /// (delete-on-accept / discard-on-reject). Master-self.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct InboxDeleteBody {
-    pub cap: CapToken,
+pub struct InboxDeleteBody<T = CapToken> {
+    pub cap: T,
     pub s3_key: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InboxDeleteResp {
     pub ok: bool,
     pub deleted: bool,
@@ -4031,6 +4037,12 @@ mod tests {
         // with agentkeys_worker_creds::verify::CapOp::Append.as_str() ("append").
         assert_eq!(CapMintOp::MemoryAppend.op_str(), "append");
         assert_eq!(CapMintOp::MemoryCanonicalGet.op_str(), "canonical_fetch");
+        assert_eq!(CapMintOp::MemoryInboxDelete.op_str(), "teardown");
+        assert_eq!(CapMintOp::MemoryInboxDelete.data_class(), "memory");
+        assert_eq!(
+            CapMintOp::parse("memory_inbox_delete"),
+            Some(CapMintOp::MemoryInboxDelete)
+        );
     }
 
     #[test]

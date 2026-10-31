@@ -131,6 +131,31 @@ pub async fn cap_memory_get(
         .map(Json)
 }
 
+pub async fn cap_memory_inbox_delete(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(req): Json<CapRequest>,
+) -> Result<Json<CapToken>, CapError> {
+    enforce_inbox_delete_owner(&req)?;
+    mint_cap(state, headers, req, CapOp::Teardown, DataClass::Memory)
+        .await
+        .map(Json)
+}
+
+fn enforce_inbox_delete_owner(req: &CapRequest) -> Result<(), CapError> {
+    let operator = normalize_hex32(&req.operator_omni)
+        .map_err(|error| CapError::InvalidInput(error.to_string()))?;
+    let actor = normalize_hex32(&req.actor_omni)
+        .map_err(|error| CapError::InvalidInput(error.to_string()))?;
+    if operator != actor || req.service != "inbox" {
+        return Err(CapError::Forbidden(
+            "inbox deletion requires owner-self authority for inbox".into(),
+            "inbox_delete_not_owner",
+        ));
+    }
+    Ok(())
+}
+
 /// Delegated READ of the master's CANONICAL memory (master-hub #295 P1).
 /// Mints a `CanonicalFetch`/`Memory` cap. When the requester is a delegate
 /// (`operator != actor`), `mint_cap`'s scope check consults the on-chain
@@ -1165,6 +1190,25 @@ mod tests {
             client_ts: Some(client_ts),
             delegation_path: None,
         }
+    }
+
+    #[test]
+    fn inbox_delete_mint_requires_owner_and_inbox_scope() {
+        let mut request = cap_req_with(&"11".repeat(32), String::new(), String::new(), 0);
+        request.actor_omni = request.operator_omni.clone();
+        request.service = "inbox".into();
+        assert!(enforce_inbox_delete_owner(&request).is_ok());
+        request.actor_omni = "22".repeat(32);
+        assert!(matches!(
+            enforce_inbox_delete_owner(&request),
+            Err(CapError::Forbidden(_, "inbox_delete_not_owner"))
+        ));
+        request.actor_omni = request.operator_omni.clone();
+        request.service = "knowledge:notes".into();
+        assert!(matches!(
+            enforce_inbox_delete_owner(&request),
+            Err(CapError::Forbidden(_, "inbox_delete_not_owner"))
+        ));
     }
 
     #[test]
