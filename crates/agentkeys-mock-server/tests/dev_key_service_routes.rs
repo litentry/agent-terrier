@@ -464,6 +464,40 @@ async fn signer_only_session_endpoint_absent() {
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
+#[tokio::test]
+async fn signer_only_has_no_external_credential_exchange() {
+    let (encoding_key, decoding_key) = gen_ec_keypair();
+    let omni = "ab".repeat(32);
+    let bearer = format!("Bearer {}", mint_test_jwt(&encoding_key, &omni));
+    let router = router_signer_only_with_auth([0x42u8; 32], decoding_key);
+    let message = serde_json::to_value(agentkeys_protocol::auth::SignMessageRequest {
+        omni_account: omni.clone(),
+        message_hex: hex::encode(b"local signing control"),
+    })
+    .unwrap();
+    let before = post_json_with_header(
+        router.clone(),
+        "/dev/sign-message",
+        message.clone(),
+        Some(&bearer),
+    )
+    .await;
+    assert_eq!(before.0, StatusCode::OK);
+    let exchange = serde_json::to_value(agentkeys_protocol::SignStsBody {
+        omni_account: omni,
+        data_class: "config".into(),
+        verbs: vec!["get".into()],
+        ttl_seconds: 60,
+        oidc_token: "untrusted-token".into(),
+    })
+    .unwrap();
+    let rejected =
+        post_json_with_header(router.clone(), "/dev/sign-sts", exchange, Some(&bearer)).await;
+    assert_eq!(rejected.0, StatusCode::NOT_FOUND);
+    let after = post_json_with_header(router, "/dev/sign-message", message, Some(&bearer)).await;
+    assert_eq!(after, before);
+}
+
 // ── /dev/sign-typed-data tests (issue #82) ────────────────────────────────
 
 fn usdc_permit_typed_data(value: &str) -> Value {

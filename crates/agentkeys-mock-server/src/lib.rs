@@ -32,9 +32,6 @@ pub fn create_signer_router(state: SharedState) -> Router {
             "/dev/sign-typed-data",
             post(handlers::dev_keys::sign_typed_data),
         )
-        // #512 — intent-based STS mint (ADR docs/spec/stacks/
-        // ve-sts-signing-split.md). Same JWT auth path as /dev/sign-message;
-        // 503 until AGENTKEYS_SIGNER_STS_PROVIDER arms it.
         // #552 — DELEGATE K10 device-domain endpoints (derive + cap-PoP).
         // Fail-closed: refuse without a broker session pubkey.
         .route(
@@ -45,7 +42,6 @@ pub fn create_signer_router(state: SharedState) -> Router {
             "/dev/sign-device-cap-pop",
             post(handlers::dev_device::sign_device_cap_pop),
         )
-        .route("/dev/sign-sts", post(handlers::sign_sts::sign_sts))
         .route("/healthz", get(|| async { "ok" }))
         .with_state(state)
 }

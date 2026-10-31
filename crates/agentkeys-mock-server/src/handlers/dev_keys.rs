@@ -39,29 +39,17 @@ struct SessionClaims {
 #[derive(Debug, Serialize, Deserialize)]
 struct AgentKeysClaims {
     omni_account: String,
-    /// Agent J1 only (#144): the master omni this child was HDKD-derived from.
-    #[serde(default)]
-    parent_omni: Option<String>,
-    /// Agent J1 only: the K10 device address whose pop_sig redeemed the link
-    /// code. #513's chain gate re-checks this binding on chain.
-    #[serde(default)]
-    device_pubkey: Option<String>,
 }
 
-/// Claims the signer trusts after JWT verification (#512/#513): the actor, and
-/// — agent sessions only — the lineage fields the chain gate re-verifies.
+/// Actor identity from the verified session JWT.
 #[derive(Debug, Clone)]
 pub(crate) struct VerifiedSession {
     pub omni_account: String,
-    pub parent_omni: Option<String>,
-    pub device_pubkey: Option<String>,
 }
 
 /// Verify the bearer JWT (ES256 signature + expiry + `agentkeys:broker`
 /// audience) and return its verified `agentkeys` claims. `Ok(None)` = auth
-/// disabled (no broker pubkey loaded — legacy/test mode). #512's `sign-sts`
-/// reads the actor FROM these claims; the body-omni cross-check wrapper below
-/// keeps the historical `/dev/*` contract byte-identical.
+/// disabled (no broker pubkey loaded — legacy/test mode).
 pub(crate) fn verify_session_jwt_claims(
     state: &SharedState,
     headers: &HeaderMap,
@@ -100,8 +88,6 @@ pub(crate) fn verify_session_jwt_claims(
     let c = token_data.claims.agentkeys;
     Ok(Some(VerifiedSession {
         omni_account: c.omni_account,
-        parent_omni: c.parent_omni,
-        device_pubkey: c.device_pubkey,
     }))
 }
 
