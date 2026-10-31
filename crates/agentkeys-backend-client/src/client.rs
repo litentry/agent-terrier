@@ -320,14 +320,8 @@ impl BackendClient {
             .map_err(|e| BackendError::Parse(e.to_string()))
     }
 
-    pub async fn cap_revoke(&self, cap_id: &str) -> Result<RevokeResult, BackendError> {
-        Ok(RevokeResult {
-            ok: true,
-            revocation: "local_only".into(),
-            note: Some(format!(
-                "broker revoke endpoint scheduled for M4; cap_id={cap_id} recorded locally only"
-            )),
-        })
+    pub async fn cap_revoke(&self, _cap_id: &str) -> Result<RevokeResult, BackendError> {
+        Err(BackendError::NotConfigured("capability_revocation"))
     }
 
     pub async fn memory_put(&self, input: MemoryPutInput) -> Result<MemoryPutResult, BackendError> {
@@ -782,5 +776,15 @@ mod local_transport_tests {
             .await
             .unwrap_err();
         assert!(matches!(error, BackendError::NotConfigured("device_key")));
+    }
+
+    #[tokio::test]
+    async fn unsupported_capability_revocation_never_reports_success() {
+        let client = BackendClient::new(None, None, None, None);
+        let result = client.cap_revoke("synthetic-capability-id").await;
+        assert!(matches!(
+            result,
+            Err(BackendError::NotConfigured("capability_revocation"))
+        ));
     }
 }
