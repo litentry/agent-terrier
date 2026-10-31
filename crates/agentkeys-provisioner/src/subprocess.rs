@@ -30,6 +30,15 @@ pub struct SubprocessOutcome {
     pub stderr: String,
 }
 
+fn inherited_tool_environment(
+    get: impl Fn(&str) -> Option<std::ffi::OsString>,
+) -> Vec<(&'static str, std::ffi::OsString)> {
+    ["PATH", "TMPDIR", "LANG", "LC_ALL"]
+        .into_iter()
+        .filter_map(|name| get(name).map(|value| (name, value)))
+        .collect()
+}
+
 pub async fn spawn_and_collect(
     command: &[&str],
     env: HashMap<String, String>,
@@ -44,6 +53,8 @@ pub async fn spawn_and_collect(
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
     cmd.stdin(Stdio::null());
+    cmd.env_clear();
+    cmd.envs(inherited_tool_environment(|name| std::env::var_os(name)));
     cmd.envs(env.iter());
     if let Some(dir) = cwd {
         cmd.current_dir(dir);
@@ -139,6 +150,43 @@ mod tests {
 
     fn shell_command(script: &str) -> [&str; 3] {
         ["sh", "-c", Box::leak(script.to_string().into_boxed_str())]
+    }
+
+    #[test]
+    fn inherited_environment_only_requests_tool_settings() {
+        let requested = std::cell::RefCell::new(Vec::new());
+        let settings = inherited_tool_environment(|name| {
+            requested.borrow_mut().push(name.to_string());
+            Some(std::ffi::OsString::from("synthetic-setting"))
+        });
+        assert_eq!(*requested.borrow(), ["PATH", "TMPDIR", "LANG", "LC_ALL"]);
+        assert_eq!(settings.len(), 4);
+    }
+
+    #[tokio::test]
+    async fn child_uses_only_explicit_credentials_and_tool_environment() {
+        let script = r#"
+test -z "${HOME+x}" || exit 17
+test "$SYNTHETIC_CREDENTIAL" = "explicit-test-input" || exit 18
+printf '{"type":"success","api_key":"synthetic-result"}\n'
+"#;
+        let environment = HashMap::from([(
+            "SYNTHETIC_CREDENTIAL".to_string(),
+            "explicit-test-input".to_string(),
+        )]);
+        let outcome = spawn_and_collect(
+            &shell_command(script),
+            environment,
+            None,
+            SubprocessConfig::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome.exit_code, Some(0));
+        assert!(matches!(
+            outcome.events.last(),
+            Some(ProvisionEvent::Success { .. })
+        ));
     }
 
     #[tokio::test]

@@ -5,7 +5,6 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-agentkeys-protocol = { workspace = true }
 agentkeys-types = { workspace = true }
 agentkeys-core = { workspace = true }
 serde = { workspace = true }
@@ -15,14 +14,6 @@ async-trait = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
 tracing = "0.1"
-reqwest = { version = "0.12", features = ["json"] }
-
-# Stage 7 issue #71 Option A: provisioner does AssumeRoleWithWebIdentity
-# client-side using a JWT minted by the broker. Anonymous SDK config — the
-# JWT authenticates the call, no AWS credentials required on the daemon side.
-aws-config = { version = "1", features = ["behavior-version-latest"] }
-aws-credential-types = "1"
-aws-sdk-sts = "1"
 
 [dev-dependencies]
 tempfile = "3"

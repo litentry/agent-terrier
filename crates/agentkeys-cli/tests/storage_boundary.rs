@@ -35,5 +35,10 @@ fn removed_storage_backends_and_flags_fail_before_loading_state() {
             .failure()
             .stderr(contains("unexpected argument"));
     }
+    isolated_command(directory.path())
+        .args(["speech", "creds"])
+        .assert()
+        .failure()
+        .stderr(contains("unrecognized subcommand 'speech'"));
     assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
 }
