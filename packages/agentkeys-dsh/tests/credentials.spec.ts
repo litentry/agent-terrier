@@ -75,7 +75,7 @@ describe('AgentKeys credential provider (dsh seam)', () => {
     mode = 'ok';
   });
 
-  it('an unmapped ref falls through to the process env (#631: the gate ARK_API_KEY transport)', async () => {
+  it('an unmapped ref falls through to the process env (#631: the gate AGENTKEYS_MODEL_API_KEY transport)', async () => {
     const name = 'AGENTKEYS_TEST_ENV_FALLTHROUGH_631';
     process.env[name] = 'env-held-key';
     try {

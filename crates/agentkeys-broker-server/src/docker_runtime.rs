@@ -654,6 +654,7 @@ fn environment_input(
     let allowed_names: Vec<&str> = sandbox_env::CHAT_COMMON
         .into_iter()
         .chain(sandbox_env::CHAT_CREDENTIAL_ANY)
+        .chain(agentkeys_protocol::model_runtime::ENVIRONMENT_NAMES)
         .chain([
             sandbox_env::MGMT_TOKEN,
             sandbox_env::BRIDGE_TOKEN,
@@ -680,6 +681,10 @@ fn environment_input(
             ensure!(previous == value, "conflicting sandbox environment entries");
         }
     }
+    agentkeys_protocol::model_runtime::validate_environment(|name| {
+        environment.get(name).map(String::as_str)
+    })
+    .map_err(anyhow::Error::msg)?;
     for name in sandbox_env::CHAT_COMMON
         .into_iter()
         .chain([sandbox_env::MGMT_TOKEN, sandbox_env::BRIDGE_TOKEN])
@@ -1370,6 +1375,48 @@ mod tests {
                 .get(key)
                 .map(|value| value.to_string()))
             .is_err());
+        }
+    }
+
+    #[test]
+    fn provisioned_model_environment_reaches_the_runtime() {
+        let provisioned = agentkeys_protocol::model_runtime::relay_environment(
+            "http://localhost:8077/v1",
+            "synthetic-relay-key".into(),
+        );
+        let output =
+            environment_input(&actor(), &test_identity_environment(), provisioned).unwrap();
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("AGENTKEYS_MODEL_API_KEY=synthetic-relay-key\n"));
+        assert!(output.contains("AGENTKEYS_MODEL_BASE_URL=http://localhost:8077/v1\n"));
+    }
+
+    #[tokio::test]
+    async fn incomplete_model_pair_never_changes_a_runtime() {
+        for name in agentkeys_protocol::model_runtime::ENVIRONMENT_NAMES {
+            let engine = Arc::new(FakeEngine::default());
+            *engine.container.lock().unwrap() =
+                Some(container("test-runtime", &actor(), None, false));
+            let mut environment = test_identity_environment();
+            environment.push((name.into(), "synthetic-canary".into()));
+            let error = runtime(engine.clone())
+                .ensure_for_delegate_with_envs(
+                    &device(),
+                    &actor(),
+                    &environment,
+                    crate::sandbox_backend::no_create_envs(),
+                )
+                .await
+                .unwrap_err();
+            assert!(!error.to_string().contains("synthetic-canary"));
+            assert_eq!(
+                error.to_string(),
+                "model endpoint and credential must be supplied together"
+            );
+            assert!(engine.container.lock().unwrap().is_some());
+            assert!(engine.calls.lock().unwrap().iter().all(|(arguments, _)| {
+                !["create", "start", "rm"].contains(&arguments[1].as_str())
+            }));
         }
     }
 

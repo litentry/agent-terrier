@@ -60,14 +60,9 @@ pub struct ChatLoopConfig {
     pub signer_url: Option<String>,
     pub bridge_url: String,
     pub bridge_token: Option<String>,
-    /// #519 — the gate speech-relay base (`AGENTKEYS_GATE_SPEECH_URL`, injected
-    /// by the gate-provisioned spawn path together with the gk_ relay key).
-    /// `None` = voice turns are refused with a LOUD text reply — never routed
-    /// to a base that lacks the speech endpoints (direct-ark boots).
+    /// Optional speech relay; absent configuration refuses voice turns.
     pub speech_url: Option<String>,
-    /// The gk_ relay key (`ARK_API_KEY` in a gate-provisioned sandbox) — the
-    /// ONLY credential the voice pipeline holds; speech app tokens stay on the
-    /// gate (#386).
+    /// Per-delegate model relay credential; adapter credentials stay on the relay.
     pub speech_bearer: Option<String>,
     /// #563 — streamed-reply delta coalescing window (ms). Every flush is one
     /// channel publish (an S3 object + an encrypt), so this trades feed churn
@@ -117,6 +112,19 @@ impl ChatLoopConfig {
             + usize::from(device_key_hex.is_some())
             + usize::from(session_jwt.is_some());
         if present == 0 {
+            return None;
+        }
+        let model_environment: HashMap<_, _> = agentkeys_protocol::model_runtime::ENVIRONMENT_NAMES
+            .iter()
+            .filter_map(|name| read(name).map(|value| (*name, value)))
+            .collect();
+        if let Err(error) = agentkeys_protocol::model_runtime::validate_environment(|name| {
+            model_environment.get(name).map(String::as_str)
+        }) {
+            tracing::warn!(
+                error,
+                "invalid model relay configuration; chat loop not started"
+            );
             return None;
         }
         let mut missing: Vec<&str> = env_names::CHAT_COMMON
@@ -190,10 +198,10 @@ impl ChatLoopConfig {
             bridge_token: std::env::var("AGENTKEYS_BRIDGE_TOKEN")
                 .ok()
                 .filter(|t| !t.is_empty()),
-            speech_url: std::env::var("AGENTKEYS_GATE_SPEECH_URL")
+            speech_url: std::env::var(agentkeys_protocol::model_runtime::SPEECH_URL)
                 .ok()
                 .filter(|v| !v.trim().is_empty()),
-            speech_bearer: std::env::var("ARK_API_KEY")
+            speech_bearer: std::env::var(agentkeys_protocol::model_runtime::API_KEY)
                 .ok()
                 .filter(|v| !v.trim().is_empty()),
             wake_since_ms: read(env_names::WAKE_SINCE_MS)
@@ -601,15 +609,7 @@ async fn run(cfg: ChatLoopConfig) {
     let perception_prompt = bundle
         .as_ref()
         .and_then(|b| b.perception_prompt().map(str::to_string));
-    // The template's persona, skills and knowledge belong to the RUNTIME, not
-    // to a console click: a sandbox the broker wakes (a scheduled tick, a
-    // lease rotation) has no console apply behind it, and a checkpoint that
-    // never landed restores nothing — measured 2026-09-22 on VE prod: both
-    // live sandboxes ran bare (no SOUL.md, no skills, no knowledge), and chef
-    // improvised free-form JSON instead of the card contract its plan skill
-    // spells out. The seed fills only what is MISSING on the bridge (a console
-    // apply that raced ahead, or a restored home, is never clobbered), and
-    // never restarts the agent (a turn in flight survives).
+    // Seed missing context without replacing restored files or interrupting a turn.
     if let Some(b) = &bundle {
         tokio::spawn(crate::app_runtime::seed_bundle_context_when_bridge_up(
             http.clone(),
@@ -1776,11 +1776,7 @@ async fn bridge_chat(
     .await
 }
 
-/// The line every turn opens with: the household's local date, weekday, time
-/// and UTC offset — the only date the agent may write down or plan by. No
-/// turn used to carry a year: on 2026-09-28 (VE prod) chef filed the family's
-/// lunch and dinner under a date it invented (`events/2024-05-20/`), and its
-/// Morning plan read "today" as 2024-09-28 and published "no meals recorded".
+/// The household local date and UTC offset included in every turn.
 pub(crate) fn turn_clock_line(now_unix: i64, tz_offset_minutes: i64) -> String {
     let local =
         chrono::DateTime::from_timestamp(now_unix + tz_offset_minutes * 60, 0).unwrap_or_default();

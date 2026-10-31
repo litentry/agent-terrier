@@ -37,6 +37,7 @@ import { mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'n
 import { join } from 'node:path';
 import type { Context } from '@deepseek-ai/cordis';
 import z from '@deepseek-ai/schemastery';
+import { MODEL_ID } from './generated/model-runtime.js';
 import { SessionId } from '@deepseek-ai/dsh-session';
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session';
 import { createUserMessage } from '@deepseek-ai/dsh-llm';
@@ -76,7 +77,7 @@ export const Config: z<Config> = z.object({
   cwd: z.string().default('/opt/agentkeys'),
   engine: z.string().default('dsh'),
   provider: z.string().default('gate'),
-  model: z.string().default(process.env.LLM_ENDPOINT_ID ?? '(unset)'),
+  model: z.string().default(process.env[MODEL_ID] ?? '(unset)'),
   homeDir: z.string().default(process.env.DSH_HOME ?? '/root/.dsh'),
   mgmtToken: z.string(),
   bridgeToken: z.string(),

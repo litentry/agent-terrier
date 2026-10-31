@@ -1,32 +1,14 @@
-/**
- * @module @agentkeys/dsh-suite/web-search — the gate-backed SEARCH PROVIDER
- * (#653) for dsh's own `web_search` tool.
- *
- * dsh ships the model-facing tool in `@deepseek-ai/dsh-tool-web` and routes it
- * through the `ctx.web` capability seam (`@deepseek-ai/dsh-web`), which is a
- * PROVIDER REGISTRY — registering a second global `web_search` tool is refused
- * at boot ("already registered", the 2026-08-31 pod crashloop). So this plugin
- * plugs the seam instead: it registers the `agentkeys-gate` search provider,
- * which POSTs the gate's `/v1/search` relay (SearXNG behind the gate, engine
- * set gate-pinned — Bing by deployment default) with the injected
- * `ARK_BASE_URL`+`ARK_API_KEY` pair (#572 rule: base + key travel together).
- * Selection: dsh-base PINS `web.config.searchProvider: deepseek-official`
- * (config beats the DSH_WEB_SEARCH_PROVIDER env), so the profile's
- * cordis.patch.yml overrides that entry's config to `agentkeys-gate` — the
- * registration here only matters together with that selection patch. The
- * tool stays `tool:web`-classed for the #611 guard (mapping.ts).
- * NO default export (dsh postmortem 0001).
- */
+/** Optional relay-backed provider for the existing web-search tool. */
 import type { Context } from '@deepseek-ai/cordis';
 import z from '@deepseek-ai/schemastery';
+import { API_KEY, BASE_URL } from './generated/model-runtime.js';
 
 export const name = 'agentkeys-web-search';
 export const inject = ['web'];
 
 export interface Config {
-  /** Full search endpoint. Default: `${ARK_BASE_URL}/search` (the gate base). */
+  /** An explicit endpoint and credential must be configured together. */
   searchUrl?: string;
-  /** Bearer for the gate. Default: env ARK_API_KEY (the gk_ relay key). */
   apiKey?: string;
   maxResults?: number;
   timeoutMs?: number;
@@ -43,7 +25,7 @@ export const Config: z<Config> = z.object({
  *  spawn carries no gate base (unprovisioned) — the provider then reports
  *  unavailable and the seam surfaces its structured error, never a crash. */
 export function searchEndpoint(env: Record<string, string | undefined>): string {
-  const base = (env.ARK_BASE_URL ?? '').trim().replace(/\/+$/, '');
+  const base = (env[BASE_URL] ?? '').trim().replace(/\/+$/, '');
   return base ? `${base}/search` : '';
 }
 
@@ -98,9 +80,24 @@ interface WebSeam {
   }): unknown;
 }
 
+export function searchConfiguration(config: Config, environment: Record<string, string | undefined>) {
+  const explicit = Boolean(config.searchUrl?.trim() || config.apiKey?.trim());
+  const endpoint = explicit ? (config.searchUrl ?? '').trim() : searchEndpoint(environment);
+  const apiKey = explicit ? (config.apiKey ?? '').trim() : (environment[API_KEY] ?? '').trim();
+  if (Boolean(endpoint) !== Boolean(apiKey)) throw new Error('search endpoint and credential must be supplied together');
+  if (endpoint) {
+    let parsed: URL;
+    try { parsed = new URL(endpoint); } catch { throw new Error('invalid search endpoint'); }
+    if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password || parsed.search || parsed.hash) {
+      throw new Error('invalid search endpoint');
+    }
+    if (/[\x00-\x20\x7f]/.test(apiKey)) throw new Error('invalid search credential');
+  }
+  return { endpoint, apiKey };
+}
+
 export function apply(ctx: Context, config: Config): void {
-  const endpoint = (config.searchUrl ?? '').trim() || searchEndpoint(process.env);
-  const apiKey = (config.apiKey ?? '').trim() || (process.env.ARK_API_KEY ?? '').trim();
+  const { endpoint, apiKey } = searchConfiguration(config, process.env);
   const maxResults = config.maxResults ?? 5;
   const timeoutMs = config.timeoutMs ?? 25000;
 
@@ -111,12 +108,14 @@ export function apply(ctx: Context, config: Config): void {
       request: { query: string; maxResults?: number },
       signal?: AbortSignal,
     ): Promise<WebSearchResult> => {
+      if (!endpoint || !apiKey) throw new Error('web_search is not configured');
       const q = String(request.query ?? '').trim();
       if (!q) throw new Error('web_search: empty query');
       const count = Math.min(Math.max(Math.trunc(request.maxResults ?? maxResults), 1), 10);
       const timeout = AbortSignal.timeout(timeoutMs);
       const resp = await fetch(endpoint, {
         method: 'POST',
+        redirect: 'error',
         headers: {
           'content-type': 'application/json',
           authorization: `Bearer ${apiKey}`,
@@ -125,10 +124,7 @@ export function apply(ctx: Context, config: Config): void {
         signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
       });
       if (!resp.ok) {
-        const detail = (await resp.text().catch(() => '')).slice(0, 300);
-        throw new Error(
-          `agentkeys-gate search failed: HTTP ${resp.status}${detail ? ` — ${detail}` : ''}`,
-        );
+        throw new Error(`agentkeys-gate search failed: HTTP ${resp.status}`);
       }
       return toSeamResult(await resp.json());
     },

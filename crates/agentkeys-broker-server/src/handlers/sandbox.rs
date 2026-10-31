@@ -97,14 +97,10 @@ pub async fn provision_delegate_envs(
         .await
         {
             Ok(key) => GateProvision {
-                envs: vec![
-                    ("ARK_BASE_URL".into(), cfg.turn_url.clone()),
-                    // #519 — the chat loop's voice + photo branches need the
-                    // gate EXPLICITLY or they refuse; they append `/v1/...`
-                    // themselves, so they get the origin, not the `/v1` base.
-                    ("AGENTKEYS_GATE_SPEECH_URL".into(), cfg.origin()),
-                    ("ARK_API_KEY".into(), key.secret),
-                ],
+                envs: agentkeys_protocol::model_runtime::relay_environment(
+                    &cfg.turn_url,
+                    key.secret,
+                ),
                 status: "provisioned".into(),
                 error: None,
             },
@@ -112,8 +108,7 @@ pub async fn provision_delegate_envs(
                 tracing::error!(
                     device_key_hash = %device_key_hash,
                     error = %e,
-                    "gate provisioning FAILED — the sandbox create fails closed unless \
-                     AGENTKEYS_ALLOW_DIRECT_ARK=1 (#543)"
+                    "gate provisioning failed; runtime creation will be refused"
                 );
                 GateProvision {
                     envs: Vec::new(),
@@ -361,8 +356,8 @@ pub(crate) fn chat_link_env_sources() -> (Option<String>, Option<String>) {
 /// This is the resolve/poll re-spawn path (a delegate whose runtime must be
 /// (re)created — legacy create-on-pair, or a future wake-on-event cold start).
 /// #543: a create here is now METERED — the gate relay key is minted ON CREATE
-/// via [`provision_delegate_envs`], so a respawn never boots on the direct-ark
-/// path (it fails closed on VE if the gate can't provision). Lazy by design: a
+/// via [`provision_delegate_envs`]; a configured relay must provision successfully.
+/// Lazy by design: a
 /// REUSED live instance never triggers a provision, so its relay key is never
 /// rotated out from under it (the #543 correctness point).
 ///

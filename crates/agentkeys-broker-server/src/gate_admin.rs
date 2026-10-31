@@ -1,22 +1,4 @@
-//! #427 (epic #425 decision 6) — the broker→gate provisioning client.
-//!
-//! The gate (`agentkeys-gate`, #384/#332) is the USAGE plane of the two-plane
-//! delegate entitlement model: every delegate LLM turn flows through it,
-//! budgets are enforced deterministically (`429 budget_exceeded`, no LLM in
-//! the decision), and usage rolls up per user via `GET /v1/usage` +
-//! `GateTurn` (op_kind 90) audit rows. This module is the broker-side client
-//! for the gate's admin surface: SPAWN provisions a per-delegate relay key
-//! (+ budget from the tier entitlement), ARCHIVE disables it — a delegate
-//! *exists* by the chain (the slot allowance, the existence plane) but is
-//! *usable* only while gate-provisioned. The gate stays custody + metering,
-//! never a control point (arch.md §22d).
-//!
-//! Deploy posture: the gate is VE-resident today (#384 deferred the AWS
-//! deploy wiring). `AGENTKEYS_GATE_ADMIN_URL` unset ⇒ provisioning is a
-//! DOCUMENTED no-op skip (the sandbox keeps the direct ark-key injection —
-//! today's behavior, logged as `skip gate-not-configured`); set but
-//! unreachable/refusing ⇒ a LOUD error surfaced in the ceremony summary
-//! (never silent — an unmetered delegate bypasses the usage plane).
+//! Broker client for provisioning and disabling per-delegate model relay credentials.
 
 use serde::{Deserialize, Serialize};
 
@@ -24,7 +6,7 @@ use serde::{Deserialize, Serialize};
 /// - `AGENTKEYS_GATE_ADMIN_URL` — the gate's admin base (e.g. `http://127.0.0.1:8077`).
 /// - `AGENTKEYS_GATE_ADMIN_TOKEN` — the gate's `AGENTKEYS_GATE_ADMIN_TOKEN` bearer.
 /// - `AGENTKEYS_GATE_TURN_URL` — the SANDBOX-visible turn base injected as the
-///   delegate's `ARK_BASE_URL` (e.g. `https://gate.<zone>/v1`); the admin URL is
+///   delegate's `AGENTKEYS_MODEL_BASE_URL` (e.g. `https://gate.<zone>/v1`); the admin URL is
 ///   broker-local and often not what a sandbox can reach.
 /// - `AGENTKEYS_GATE_DELEGATE_BUDGET_TOKENS` — optional per-delegate token
 ///   budget applied at provision time (the tier default; unset ⇒ the gate's
@@ -36,21 +18,7 @@ pub struct GateAdminConfig {
     pub delegate_budget_tokens: Option<u64>,
 }
 
-impl GateAdminConfig {
-    /// The gate's origin for the sandbox daemon's own gate calls (photo
-    /// perception, voice ASR/TTS), which append `/v1/...` themselves. `turn_url`
-    /// is the OpenAI-style base (`https://gate.<zone>/v1`) that `ARK_BASE_URL`
-    /// carries; handing it over as-is made every such call `/v1/v1/...` → 404
-    /// on VE (measured 2026-09-26: `gate completion HTTP 404`).
-    pub fn origin(&self) -> String {
-        let base = self.turn_url.trim_end_matches('/');
-        base.strip_suffix("/v1").unwrap_or(base).to_string()
-    }
-}
-
-/// `None` = gate not configured on this stack (the documented no-op skip).
-/// `Some(Err)` never happens here — partial config (URL without token/turn
-/// URL) is a hard error string so a half-wired stack fails loud, not silent.
+/// Absent relay configuration is optional; partial configuration is an error.
 pub fn load_gate_admin_config() -> Option<Result<GateAdminConfig, String>> {
     let admin_url = std::env::var("AGENTKEYS_GATE_ADMIN_URL").ok()?;
     let admin_url = admin_url.trim().trim_end_matches('/').to_string();
@@ -72,11 +40,14 @@ pub fn load_gate_admin_config() -> Option<Result<GateAdminConfig, String>> {
         _ => {
             return Some(Err(
                 "AGENTKEYS_GATE_ADMIN_URL is set but AGENTKEYS_GATE_TURN_URL is not — \
-                 the sandbox needs the gate's turn base as its ARK_BASE_URL; set both"
+                 the sandbox needs the gate's turn base as its AGENTKEYS_MODEL_BASE_URL; set both"
                     .to_string(),
             ))
         }
     };
+    if let Err(error) = agentkeys_protocol::model_config::base_url(&turn_url) {
+        return Some(Err(error.into()));
+    }
     let delegate_budget_tokens = std::env::var("AGENTKEYS_GATE_DELEGATE_BUDGET_TOKENS")
         .ok()
         .and_then(|s| s.trim().parse::<u64>().ok());
@@ -178,36 +149,4 @@ pub async fn deprovision_delegate(
         .await
         .map(|r| r.disabled)
         .map_err(|e| format!("gate deprovision decode: {e}"))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn cfg(turn_url: &str) -> GateAdminConfig {
-        GateAdminConfig {
-            admin_url: "http://127.0.0.1:8077".into(),
-            admin_token: "t".into(),
-            turn_url: turn_url.into(),
-            delegate_budget_tokens: None,
-        }
-    }
-
-    #[test]
-    fn the_sandbox_gate_origin_drops_the_openai_v1_base() {
-        // The VE stack's turn URL: the daemon appends `/v1/chat/completions`.
-        assert_eq!(
-            cfg("https://gate.secondary.example/v1").origin(),
-            "https://gate.secondary.example"
-        );
-        assert_eq!(
-            cfg("https://gate.secondary.example/v1/").origin(),
-            "https://gate.secondary.example"
-        );
-        // A turn URL without the `/v1` base is already the origin.
-        assert_eq!(
-            cfg("http://127.0.0.1:8077").origin(),
-            "http://127.0.0.1:8077"
-        );
-    }
 }
