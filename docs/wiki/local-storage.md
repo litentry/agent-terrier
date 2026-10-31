@@ -2,6 +2,8 @@ The local object service is a qualified storage component. The credential, confi
 
 The browser data library and shared native client now call storage workers directly with signed capabilities. No cloud credential exchange or cloud headers are required. Browser configuration and credential encryption still uses the explicitly configured key-derivation signer; the complete local signer and broker-session setup remains in progress.
 
+The broker executable now defaults to loopback and starts without cloud roles or a credential startup probe. It uses the existing session and capability authentication; local mode does not grant anonymous data access. Explicit external provider selection is rejected by this binary. Run `cargo test -p agentkeys-broker-server --test local_boot` locally from the public checkout to verify real-process readiness and unauthenticated rejection. This startup check is separate from real-chain login and complete application acceptance.
+
 ## Client commands
 
 `cred fetch`, `cred store` and `memory inbox-push` use `--device-key-file` (or `AGENTKEYS_DEVICE_KEY_FILE`) for the actor's existing registered key. They derive its hash instead of accepting a manually supplied hash. Missing key files fail without creating replacement identities. `memory canonical-get` accepts either that key file or an explicit `--delegation-file`, never both. It signs the canonical `knowledge:<namespace>` service using the shared service-name builder.

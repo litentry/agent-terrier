@@ -10,8 +10,7 @@ use agentkeys_broker_server::{
     jwt::session::SessionKeypair,
     oidc::OidcKeypair,
     state::{AppState, Tier2State},
-    sts::{AwsStsClient, StsClient},
-    ve_sts::VeStsClient,
+    sts::UnavailableStsClient,
 };
 use clap::{Parser, Subcommand, ValueEnum};
 
@@ -27,13 +26,8 @@ struct Args {
     #[arg(long, default_value = "8091")]
     port: u16,
 
-    #[arg(long, default_value = "0.0.0.0")]
+    #[arg(long, default_value = "127.0.0.1")]
     bind: String,
-
-    /// Skip the startup STS sanity check. Useful for offline development.
-    /// In production, leave this off so misconfigured creds fail fast.
-    #[arg(long)]
-    skip_startup_check: bool,
 
     /// On boot, write the broker's session keypair **public key** (SPKI PEM,
     /// mode 0644) to this path. The signer service (`--signer-only`) reads
@@ -131,58 +125,6 @@ async fn main() -> anyhow::Result<()> {
     // /v1/mint-oidc-jwt writes success/failure rows here via record_mint.
     let audit = AuditLog::open(&config.audit_db_path)?;
 
-    // Issue #71 OIDC-only migration: the broker mint flow uses
-    // AssumeRoleWithWebIdentity, which is JWT-authenticated. The broker no
-    // longer needs ANY AWS credentials at runtime for credential minting.
-    // The default-chain config below is consulted only by the optional
-    // `caller_identity_ok` startup probe; if no creds are configured (the
-    // post-migration recommended posture), the probe logs a soft warning
-    // instead of refusing to boot.
-    // STS provider selection (docs/spec/ve-broker-runtime-port.md). Default =
-    // AWS (SDK default chain; creds optional post-#71 — the JWT authenticates
-    // the mint). AGENTKEYS_STS_PROVIDER=ve swaps in the Volcano Engine client:
-    // VE's gateway signature-authenticates EVERY request, so on VE the mint is
-    // broker-side, signed with the broker's least-priv VE identity, and each
-    // session carries a per-actor scope-down Policy. Unknown values fail loud
-    // — never a silent fallback to a different cloud's credential plane.
-    let sts: Arc<dyn StsClient> = match config.sts_provider.as_str() {
-        "aws" => {
-            tracing::info!("STS client: AWS SDK default chain (creds optional after issue #71 — only the GetCallerIdentity startup probe consults them)");
-            Arc::new(AwsStsClient::with_default_chain(&config.aws_region).await)
-        }
-        "ve" => {
-            tracing::info!("STS client: Volcano Engine AssumeRoleWithOIDC (AGENTKEYS_STS_PROVIDER=ve) — broker-signed mint + per-actor session policy");
-            Arc::new(VeStsClient::from_env().map_err(|e| {
-                std::io::Error::other(format!(
-                    "AGENTKEYS_STS_PROVIDER=ve but the VE STS client cannot boot: {e}"
-                ))
-            })?)
-        }
-        other => {
-            return Err(std::io::Error::other(format!(
-                "unknown AGENTKEYS_STS_PROVIDER={other:?} (expected \"aws\" or \"ve\") — refusing to guess a credential plane"
-            ))
-            .into());
-        }
-    };
-
-    if !args.skip_startup_check {
-        match sts.caller_identity_ok().await {
-            Ok(()) => tracing::info!("startup STS check passed"),
-            Err(e) => {
-                // Soft-fail: the mint flow doesn't need broker creds.
-                // Operators running creds-free will see this warning at every
-                // boot — pass --skip-startup-check to silence it.
-                tracing::warn!(
-                    error = %e,
-                    "startup STS GetCallerIdentity probe failed — broker has no AWS credentials in its environment. \
-                    This is the expected post-migration posture (mint flow is JWT-authenticated, see issue #71). \
-                    Pass --skip-startup-check to silence this warning."
-                );
-            }
-        }
-    }
-
     let sandbox = agentkeys_broker_server::sandbox_backend::SandboxBackend::from_env()
         .await
         .map_err(|e| std::io::Error::other(format!("sandbox lifecycle config: {e}")))?
@@ -210,7 +152,7 @@ async fn main() -> anyhow::Result<()> {
         config,
         http,
         audit,
-        sts,
+        sts: Arc::new(UnavailableStsClient),
         oidc: boot_artifacts.oidc_keypair,
         session_keypair: boot_artifacts.session_keypair,
         registry: boot_artifacts.registry,

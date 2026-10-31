@@ -22,6 +22,9 @@ pub enum BrokerError {
     #[error("sts error: {0}")]
     StsError(String),
 
+    #[error("unavailable: {0}")]
+    Unavailable(String),
+
     #[error("audit error: {0}")]
     AuditError(String),
 
@@ -39,6 +42,7 @@ impl BrokerError {
             BrokerError::Forbidden(_) => (StatusCode::FORBIDDEN, "forbidden"),
             BrokerError::BackendUnreachable(_) => (StatusCode::BAD_GATEWAY, "backend_unreachable"),
             BrokerError::StsError(_) => (StatusCode::BAD_GATEWAY, "sts_error"),
+            BrokerError::Unavailable(_) => (StatusCode::SERVICE_UNAVAILABLE, "unavailable"),
             BrokerError::AuditError(_) => (StatusCode::INTERNAL_SERVER_ERROR, "audit_error"),
             BrokerError::BadRequest(_) => (StatusCode::BAD_REQUEST, "bad_request"),
             BrokerError::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal"),

@@ -50,6 +50,8 @@ The source tree still contains runtime-specific integrations that must be replac
 
 The complete CLI and light manager must call these owners rather than duplicate their implementation. Release acceptance requires a public-only clean install and an offline core journey after downloads. Existing inherited documentation is not the new local setup contract.
 
+The public broker binary defaults to a loopback listener and local storage capabilities. It no longer requires a cloud role, constructs no external storage credential client and runs no cloud credential startup probe. External exchange is explicitly unavailable; embedding applications can inject their own implementation through the existing state interface. Provider selection is not forwarded to actor runtimes. This startup change does not complete source separation: inherited provider implementations, configuration fields and optional email integrations remain under #3 and must be removed before the local release.
+
 | Remaining overlap | Owner | Removal gate |
 |---|---|---|
 | Remaining storage, signing and model provider integration | Shared neutral interfaces | #3 and local adapter issues remove remaining provider implementations before release |
