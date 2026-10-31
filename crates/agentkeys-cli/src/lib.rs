@@ -13,7 +13,6 @@ pub mod k11_intent;
 pub mod k11_webauthn;
 pub mod local_data;
 pub mod local_owner;
-pub mod speech;
 
 use agentkeys_core::actor_omni::actor_omni_hex;
 use agentkeys_core::backend::{BackendError, CredentialBackend};
@@ -23,38 +22,7 @@ use agentkeys_core::mock_client::MockHttpClient;
 pub use agentkeys_core::session_store;
 use agentkeys_core::session_store::SessionStore;
 use agentkeys_core::signer_client::{HttpSignerClient, SignerClient, SignerClientError};
-use agentkeys_provisioner::{
-    aws_creds::fetch_via_broker_default_ttl, run_provision, ProvisionError, Provisioner,
-};
-
-/// Stage-7 phase-2 helper: when a broker URL is configured, fetch 1-hour
-/// scoped AWS creds and return them as an env-var map ready to merge into the
-/// scraper subprocess. With no broker URL, returns an empty map and the
-/// subprocess inherits whatever the operator already has in its environment
-/// (legacy pre-Stage-7 path: operator sources AWS_* manually).
-///
-/// Issue #71 Option A: this helper does the JWT-fetch + AssumeRoleWithWebIdentity
-/// client-side. The broker holds zero AWS principals at runtime.
-/// `AGENTKEYS_DATA_ROLE_ARN` env must be set when `broker_url.is_some()`.
-async fn broker_env_for_provision(
-    broker_url: Option<&str>,
-    session_token: &str,
-) -> Result<HashMap<String, String>> {
-    let Some(url) = broker_url else {
-        return Ok(HashMap::new());
-    };
-    let role_arn = std::env::var("AGENTKEYS_DATA_ROLE_ARN").map_err(|_| {
-        anyhow!(
-            "AGENTKEYS_DATA_ROLE_ARN env var must be set when --broker-url is configured (issue #71 Option A)"
-        )
-    })?;
-    let region = std::env::var("AWS_REGION")
-        .ok()
-        .or_else(|| std::env::var("AWS_DEFAULT_REGION").ok())
-        .unwrap_or_else(|| "us-east-1".to_string());
-    let creds = fetch_via_broker_default_ttl(url, session_token, &role_arn, &region).await?;
-    Ok(creds.to_env(Some(&region)))
-}
+use agentkeys_provisioner::{run_provision, ProvisionError, Provisioner};
 use agentkeys_types::{AuthToken, Scope, ServiceName, Session, WalletAddress};
 use anyhow::{anyhow, Context, Result};
 use serde_json::json;
@@ -125,9 +93,6 @@ pub struct CommandContext {
     /// to point at a tempdir in file-only mode without mutating
     /// process-global `$HOME` / `AGENTKEYS_SESSION_STORE` (issue #34).
     pub session_store_override: Option<SessionStore>,
-    /// Stage-7 phase-2 wiring: when set, `agentkeys provision` fetches AWS
-    /// temp creds from this broker URL and injects them into the scraper
-    /// subprocess env (no manual `AWS_*` env wiring required).
     pub broker_url: Option<String>,
     /// Issue #85: which `CredentialBackend` impl handles credential CRUD.
     /// Defaults to `Http` for backwards-compat during the migration window.
@@ -1141,21 +1106,11 @@ pub async fn cmd_provision(
 
     let mut stderr_lines: Vec<String> = Vec::new();
 
-    let env = match broker_env_for_provision(ctx.broker_url.as_deref(), &session.token).await {
-        Ok(env) => env,
-        Err(e) => {
-            return Err(anyhow!(
-                "Problem: Could not fetch AWS credentials from broker.\nCause: {}.\nFix: Verify --broker-url / AGENTKEYS_BROKER_URL is reachable, your session token is current, and the broker's /readyz endpoint returns 200.\nDocs: https://github.com/litentry/agent-terrier/blob/main/CONTRIBUTING.md",
-                e
-            ));
-        }
-    };
-
     let result = run_provision(
         &provisioner,
         service,
         &cmd_refs,
-        env,
+        HashMap::new(),
         Some(&repo_root),
         backend,
         &session,

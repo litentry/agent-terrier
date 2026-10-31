@@ -13,11 +13,6 @@ name = "agentkeys_cli"
 path = "src/lib.rs"
 
 [dependencies]
-# #441 speech plane — the delegate-side ASR/TTS probe (`agentkeys speech`).
-aws-config = "1"
-aws-sdk-polly = "1"
-aws-sdk-transcribestreaming = "1"
-futures-util = "0.3"
 agentkeys-types = { workspace = true }
 agentkeys-core = { workspace = true }
 agentkeys-provisioner = { path = "../agentkeys-provisioner" }
@@ -29,9 +24,6 @@ serde_json = { workspace = true }
 serde = { workspace = true }
 anyhow = { workspace = true }
 reqwest = { version = "0.12", features = ["json"] }
-
-# Explicit credentials for the remaining speech adapter.
-aws-credential-types = "1"
 
 # K11 stub helpers (deterministic — for CI / no-authenticator environments).
 sha2 = "0.10"
