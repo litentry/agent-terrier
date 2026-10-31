@@ -26,3 +26,12 @@ npm --prefix apps/parent-control test
 The component suite runs without a browser. Use `--release` when building the browser client for distribution. Both build modes remove personal source paths from the binary; run the privacy check again after generating artifacts.
 
 See [architecture and ownership](docs/arch.md) and [contributing](CONTRIBUTING.md). Never use production wallet keys or credentials in development examples.
+
+For contract development, install Python 3 and Foundry, then run locally from the repository root:
+
+```sh
+./terrier contracts setup
+./terrier contracts test
+```
+
+See the fresh [contract development wiki source](docs/wiki/contract-development.md) for offline tests, focused checks and cache configuration.

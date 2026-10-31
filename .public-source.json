@@ -1,12 +1,28 @@
 {
   "files": [
-    ".gitignore", ".gitmodules", ".public-source.json", ".public-test-fixtures.json",
-    "AGENTS.md", "CLAUDE.md", "CONTRIBUTING.md", "Cargo.lock", "Cargo.toml",
-    "README.md", "rust-toolchain.toml"
+    ".gitignore",
+    ".public-source.json",
+    ".public-test-fixtures.json",
+    "AGENTS.md",
+    "CLAUDE.md",
+    "CONTRIBUTING.md",
+    "Cargo.lock",
+    "Cargo.toml",
+    "README.md",
+    "rust-toolchain.toml",
+    "terrier"
   ],
   "directories": [
-    ".github", "apps/parent-control", "apps/device-display", "crates",
-    "design-system", "docs", "e2e/fixtures", "packages/agentkeys-dsh",
-    "presets", "provisioner-scripts", "scripts"
+    ".github",
+    "apps/parent-control",
+    "apps/device-display",
+    "crates",
+    "design-system",
+    "docs",
+    "e2e/fixtures",
+    "packages/agentkeys-dsh",
+    "presets",
+    "provisioner-scripts",
+    "scripts"
   ]
 }
