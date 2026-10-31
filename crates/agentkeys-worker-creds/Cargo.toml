@@ -37,11 +37,6 @@ zeroize = "1"
 rand_core = { version = "0.6", features = ["std"] }
 # AES-256-GCM envelope (per arch.md §15 + §17).
 aes-gcm = "0.10"
-# S3 PUT/GET via aws-sdk-s3 — worker uses the IAM role of the Lambda
-# / pod it runs as.
-aws-config = { version = "1", features = ["behavior-version-latest"] }
-aws-credential-types = "1"
-aws-sdk-s3 = "1"
 clap = { version = "4", features = ["derive", "env"] }
 
 [dev-dependencies]
