@@ -51,6 +51,8 @@ The renderer requests text embeddings with float encoding. These fields and keyl
 
 This config renderer is covered by deterministic tests. Actual OpenViking server startup, its distribution licensing and storage-backed agent recall remain release qualification work; the model capability evidence below does not establish those results.
 
+The daemon writes generated memory configuration as an owner-only file through the shared atomic writer. Keep one daemon per configuration path. Symlinks, hard links, permissive existing files and writable-by-others destination directories are refused. Invalid settings remove a validated owned stale config and stop startup; explicit `disabled` removes that config without starting memory. A write or cleanup failure also stops startup before the chat loop/listener. Correct the reported configuration or permissions, then restart; the daemon does not reuse an old config after reporting successful recovery.
+
 ## Offline qualification
 
 The checked-in macOS qualifier launches its own temporary runner with an isolated home directory, cloud features disabled and OS-level outbound network denial. It verifies an external socket gets `PermissionError`, then runs the real CLI under the same restriction; successful loopback inference is the positive control. Existing model files are reused without download or pruning, exact runtime/model identities are checked, and only the qualifier's processes and temporary files are removed afterward.
