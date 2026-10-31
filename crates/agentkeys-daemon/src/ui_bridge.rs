@@ -203,14 +203,6 @@ pub struct UiBridgeState {
     /// *attests* the managed wallet it derives (no user wallet / MetaMask).
     /// `None` ⇒ email verify holds an identity-only session (no EVM J1 / actor omni).
     pub signer_url: Option<String>,
-    /// #514 — which credential plane mints data-class STS creds. `Some("ve")`
-    /// routes every data mint through the SIGNER's `/dev/sign-sts` (the signer
-    /// holds the AK/SK and independently validates — ADR
-    /// `docs/spec/stacks/ve-sts-signing-split.md`); `None`/anything else keeps
-    /// the AWS anonymous relay unchanged. Read ONCE at boot from
-    /// `AGENTKEYS_STS_PROVIDER` — the SAME env var the broker reads, never a
-    /// second source of truth (no-silent-override policy).
-    pub sts_provider: Option<String>,
     /// Chain id for the managed-wallet attestation (mirrors `--init-chain-id`).
     pub chain_id: u64,
     /// #418 — the WeChat gateway worker base URL (`AGENTKEYS_WORKER_WEIXIN_URL`).
@@ -224,17 +216,12 @@ pub struct UiBridgeState {
     /// W3 real-memory chain — the memory worker base URL (e.g. `https://memory.example.invalid`).
     /// `None` ⇒ master-memory plant/list fall back to the in-memory store (dev/no-infra).
     pub memory_url: Option<String>,
-    /// Per-actor memory IAM role ARN for the STS relay (`MEMORY_ROLE_ARN`). Required
-    /// alongside `memory_url` for the real chain; a partial config fails loud (issue #90 discipline).
-    pub memory_role_arn: Option<String>,
+    pub cred_url: Option<String>,
     /// #201 config data class — the config worker base URL (e.g. `https://config.example.invalid`).
     /// `None` ⇒ the memory-types taxonomy is read/written from the in-memory fallback (dev/no-infra),
     /// and the master-memory list derives categories from the cache instead of the durable,
     /// master-only Config-class taxonomy object (`config/memory-taxonomy.enc`).
     pub config_url: Option<String>,
-    /// #201 config data class — per-actor config IAM role ARN for the STS relay (`CONFIG_ROLE_ARN`).
-    /// Required alongside `config_url`; a partial config fails loud (issue #90 discipline).
-    pub config_role_arn: Option<String>,
     /// #207 classifier-service — the classify worker base URL. `Some` ⇒ the
     /// cap-gated, audited worker TAG path (mint a `Classify` cap → `/v1/classify/tag`);
     /// `None` ⇒ the daemon classifies against the bundled `agentkeys-catalog` tier-0
@@ -256,8 +243,6 @@ pub struct UiBridgeState {
     /// (by the submit receipt hashes on feed events). `None` ⇒ the decode
     /// stays a synthesized preview (dev / no-infra / tests).
     pub audit_worker_url: Option<String>,
-    /// AWS region for the STS relay (`REGION`).
-    pub region: String,
     /// The on-chain-registered master device key hash, sent as `device_key_hash` in
     /// memory cap-mint. Must match the device registered via the W3 bootstrap
     /// (`docs/plan/web-flow/w3-real-memory.md` §4). `None` ⇒ real chain disabled.
@@ -953,18 +938,14 @@ pub fn build_state(
     rp_name: &str,
     broker_url: Option<String>,
     signer_url: Option<String>,
-    // #514 — `AGENTKEYS_STS_PROVIDER` ("ve" ⇒ mint through the signer).
-    sts_provider: Option<String>,
     chain_id: u64,
     memory_url: Option<String>,
-    memory_role_arn: Option<String>,
+    cred_url: Option<String>,
     config_url: Option<String>,
-    config_role_arn: Option<String>,
     classify_url: Option<String>,
     sandbox_bridge_url: Option<String>,
     sandbox_bridge_token: Option<String>,
     audit_worker_url: Option<String>,
-    region: String,
     master_device_key_hash: Option<String>,
     register_master_script: Option<String>,
     master_session_store: Option<MasterSessionStore>,
@@ -1050,19 +1031,16 @@ pub fn build_state(
         pending_email: RwLock::new(HashMap::new()),
         onboarding_session: RwLock::new(None),
         signer_url,
-        sts_provider,
         chain_id,
         memory_url,
-        memory_role_arn,
+        cred_url,
         config_url,
-        config_role_arn,
         classify_url,
         sandbox_bridge_url,
         sandbox_bridge_token,
         audit_worker_url,
         weixin_gateway_url,
         weixin_admin_token,
-        region,
         master_device_key_hash,
         device_key,
         registered_master: RwLock::new(None),
@@ -7362,18 +7340,9 @@ async fn master_knowledge_history(
                 .into_response()
         }
     };
-    let creds = match mint_data_creds(&ctx.mint_coords(), "memory", &["get", "put", "list"]).await {
-        Ok(c) => c,
-        Err(e) => {
-            return (
-                StatusCode::BAD_GATEWAY,
-                Json(serde_json::json!({ "error": format!("STS relay: {e}") })),
-            )
-                .into_response()
-        }
-    };
+
     let client = reqwest::Client::new();
-    match history_index_read(&client, &ctx, &creds, &q.ns, &q.key).await {
+    match history_index_read(&client, &ctx, &q.ns, &q.key).await {
         Ok(index) => {
             let mut versions = index.versions;
             versions.reverse();
@@ -7425,18 +7394,9 @@ async fn master_knowledge_version(
                 .into_response()
         }
     };
-    let creds = match mint_data_creds(&ctx.mint_coords(), "memory", &["get", "put", "list"]).await {
-        Ok(c) => c,
-        Err(e) => {
-            return (
-                StatusCode::BAD_GATEWAY,
-                Json(serde_json::json!({ "error": format!("STS relay: {e}") })),
-            )
-                .into_response()
-        }
-    };
+
     let client = reqwest::Client::new();
-    let index = match history_index_read(&client, &ctx, &creds, &q.ns, &q.key).await {
+    let index = match history_index_read(&client, &ctx, &q.ns, &q.key).await {
         Ok(i) => i,
         Err(e) => {
             return (
@@ -7456,7 +7416,6 @@ async fn master_knowledge_version(
     let body = match memory_get_object_real(
         &client,
         &ctx,
-        &creds,
         &q.ns,
         &crate::knowledge_history::slot_key(&q.key, meta.slot),
     )
@@ -9527,7 +9486,7 @@ async fn list_master_memory(State(state): State<SharedUiBridgeState>) -> axum::r
 
 /// Resolve the category set. Cache fallback is returned ONLY for the two benign
 /// cases — Config unconfigured, or the taxonomy object confirmed missing (404 /
-/// never planted). Every OTHER Config failure (partial config, cap-mint/STS,
+/// never planted). Every OTHER Config failure (partial config, cap-mint,
 /// worker 5xx, decrypt/parse) is propagated as `Err` so the list 502s instead of
 /// silently masking it as an empty store (codex finding 2).
 async fn resolve_categories(state: &SharedUiBridgeState) -> Result<Vec<MemoryCategory>, String> {
@@ -9547,7 +9506,7 @@ async fn resolve_categories(state: &SharedUiBridgeState) -> Result<Vec<MemoryCat
                 // invisible in the surfaced error.
                 Err(e) => Err(format!(
                     "config taxonomy unavailable (config worker {}, broker {}): {e}",
-                    ctx.config_url, ctx.broker
+                    ctx.worker_url, ctx.broker
                 )),
             }
         }
@@ -9615,12 +9574,10 @@ async fn get_master_memory_entry_inner(
         .map_err(|reason| (StatusCode::CONFLICT, reason))?;
     if let Some(ctx) = ctx {
         let client = reqwest::Client::new();
-        let creds = mint_data_creds(&ctx.mint_coords(), "memory", &["get", "list"])
-            .await
-            .map_err(|e| (StatusCode::BAD_GATEWAY, format!("STS relay: {e}")))?;
+
         // Ok(None) → the namespace has no durable blob (nothing to show); a real
         // worker error surfaces as 502 (not an empty list masking a failure).
-        let stored = memory_get_ns_real(&client, &ctx, &creds, &q.ns)
+        let stored = memory_get_ns_real(&client, &ctx, &q.ns)
             .await
             .map_err(|e| (StatusCode::BAD_GATEWAY, e))?
             .unwrap_or_default();
@@ -9641,23 +9598,10 @@ async fn get_master_memory_entry_inner(
     }
 }
 
-// ─── W3: real memory chain (cap-mint → STS relay → worker → S3) ─────────────
-//
-// When the daemon has --memory-url + --memory-role-arn + --master-device-key-hash
-// AND a master onboarding session, the master plants its OWN memory under its
-// actor_omni (operator == actor == O_master) via the same cap-mint → STS →
-// worker chain the agent path uses. Otherwise plant falls back to the
-// in-memory store. Per-actor by construction (cap-mint binds device.actor_omni
-// == req.actor_omni); see docs/plan/web-flow/w3-real-memory.md §1.
-
-/// The session-scoped coordinates shared by every real-chain worker call
-/// (memory + config): the broker, the master J1, the (normalized) master omni,
-/// the on-chain device hash, and the region. Resolved once; the per-data-class
-/// contexts add the worker URL + IAM role on top.
+/// Session coordinates; storage contexts add an explicit worker URL and signing key.
 #[derive(Clone)]
 pub(crate) struct SessionCoords {
     pub(crate) broker: String,
-    pub(crate) region: String,
     pub(crate) j1: String,
     pub(crate) omni: String,
     pub(crate) device_key_hash: String,
@@ -9732,243 +9676,50 @@ pub(crate) async fn resolve_session_coords(state: &UiBridgeState) -> Result<Sess
         };
     Ok(SessionCoords {
         broker,
-        region: state.region.clone(),
         j1: session.j1,
         omni,
         device_key_hash,
     })
 }
 
-struct RealMemoryCtx {
+pub(crate) struct StorageContext {
     broker: String,
-    memory_url: String,
-    role_arn: String,
-    region: String,
+    worker_url: String,
     j1: String,
     omni: String,
     device_key: Arc<DeviceKey>,
-    /// #514/#582 — the memory plane rides the SAME signer decision point as
-    /// config/cred: `Some("ve")` mints through the signer (`role_arn` is then
-    /// carried but unused — the signer selects the role by data class, #511).
     signer_url: Option<String>,
-    sts_provider: Option<String>,
 }
 
-/// `Ok(None)` → real chain not configured (in-memory fallback). `Ok(Some)` →
-/// fully configured + a master session present. `Err` → configured but a
-/// required piece is missing (partial config / not logged in) — fail loud
-/// rather than silently degrade per-actor isolation (issue #90 discipline).
-async fn real_memory_ctx(state: &UiBridgeState) -> Result<Option<RealMemoryCtx>, String> {
-    let Some(memory_url) = state.memory_url.clone() else {
+async fn storage_context(
+    state: &UiBridgeState,
+    worker_url: Option<&str>,
+) -> Result<Option<StorageContext>, String> {
+    let Some(worker_url) = worker_url else {
         return Ok(None);
     };
-    let role_arn = state
-        .memory_role_arn
-        .clone()
-        .ok_or("real memory: --memory-url set but MEMORY_ROLE_ARN missing")?;
-    let c = resolve_session_coords(state).await?;
-    Ok(Some(RealMemoryCtx {
-        broker: c.broker,
-        memory_url,
-        role_arn,
-        region: c.region,
-        j1: c.j1,
-        omni: c.omni,
+    let session = resolve_session_coords(state).await?;
+    Ok(Some(StorageContext {
+        broker: session.broker,
+        worker_url: worker_url.into(),
+        j1: session.j1,
+        omni: session.omni,
         device_key: state
             .device_key
             .clone()
             .ok_or("worker calls require an existing registered device key file")?,
         signer_url: state.signer_url.clone(),
-        sts_provider: state.sts_provider.clone(),
     }))
 }
 
-impl RealMemoryCtx {
-    fn mint_coords(&self) -> DataPlaneMint<'_> {
-        DataPlaneMint {
-            broker: &self.broker,
-            j1: &self.j1,
-            omni: &self.omni,
-            role_arn: &self.role_arn,
-            region: &self.region,
-            signer_url: self.signer_url.as_deref(),
-            sts_provider: self.sts_provider.as_deref(),
-        }
-    }
+async fn real_memory_ctx(state: &UiBridgeState) -> Result<Option<StorageContext>, String> {
+    storage_context(state, state.memory_url.as_deref()).await
 }
 
-pub(crate) struct RealConfigCtx {
-    broker: String,
-    config_url: String,
-    role_arn: String,
-    region: String,
-    j1: String,
-    omni: String,
-    device_key: Arc<DeviceKey>,
-    /// Signer base URL (#372 item 2): the taxonomy is CLIENT-encrypted under
-    /// the signer-derived per-actor KEK (v3 envelopes) before it reaches the
-    /// config worker. `None` fails LOUD at store/fetch time — never a silent
-    /// fallback to worker-side plaintext.
-    signer_url: Option<String>,
-    /// #514 — `AGENTKEYS_STS_PROVIDER`; `Some("ve")` mints through the signer.
-    sts_provider: Option<String>,
-}
-
-/// Same `Ok(None)`/`Ok(Some)`/`Err` contract as `real_memory_ctx`, gated on
-/// `config_url` (#201 Config data class). When `None`, the taxonomy lives only
-/// in the in-memory fallback and the list derives categories from the cache.
 pub(crate) async fn real_config_ctx(
     state: &UiBridgeState,
-) -> Result<Option<RealConfigCtx>, String> {
-    let Some(config_url) = state.config_url.clone() else {
-        return Ok(None);
-    };
-    let role_arn = state
-        .config_role_arn
-        .clone()
-        .ok_or("real config: --config-url set but CONFIG_ROLE_ARN missing")?;
-    let c = resolve_session_coords(state).await?;
-    Ok(Some(RealConfigCtx {
-        broker: c.broker,
-        config_url,
-        role_arn,
-        region: c.region,
-        j1: c.j1,
-        omni: c.omni,
-        device_key: state
-            .device_key
-            .clone()
-            .ok_or("worker calls require an existing registered device key file")?,
-        signer_url: state.signer_url.clone(),
-        sts_provider: state.sts_provider.clone(),
-    }))
-}
-
-/// Data-plane credentials for one worker call. Only the three header fields
-/// the workers read — deliberately NOT `AwsTempCreds`, because the #514 VE
-/// path mints through the signer and never sees an AWS SDK type.
-struct DataCreds {
-    access_key_id: String,
-    secret_access_key: String,
-    session_token: String,
-}
-
-/// The per-plane coordinates [`mint_data_creds`] needs — one borrowed view so
-/// the CONFIG plane and the CRED plane share the SAME #514 decision point
-/// (AWS relay vs signer `/dev/sign-sts`) instead of growing a second relay
-/// path per data class.
-struct DataPlaneMint<'a> {
-    broker: &'a str,
-    j1: &'a str,
-    omni: &'a str,
-    role_arn: &'a str,
-    region: &'a str,
-    signer_url: Option<&'a str>,
-    sts_provider: Option<&'a str>,
-}
-
-impl RealConfigCtx {
-    fn mint_coords(&self) -> DataPlaneMint<'_> {
-        DataPlaneMint {
-            broker: &self.broker,
-            j1: &self.j1,
-            omni: &self.omni,
-            role_arn: &self.role_arn,
-            region: &self.region,
-            signer_url: self.signer_url.as_deref(),
-            sts_provider: self.sts_provider.as_deref(),
-        }
-    }
-}
-
-impl RealCredCtx {
-    fn mint_coords(&self) -> DataPlaneMint<'_> {
-        DataPlaneMint {
-            broker: &self.broker,
-            j1: &self.j1,
-            omni: &self.omni,
-            role_arn: &self.role_arn,
-            region: &self.region,
-            signer_url: self.signer_url.as_deref(),
-            sts_provider: self.sts_provider.as_deref(),
-        }
-    }
-}
-
-/// #514 — mint scoped, short-TTL data-plane credentials for one data class.
-///
-/// Two planes, ONE decision point (the ADR's "the platform is a resource
-/// provider, never the authorizer"):
-///   - **VE** (`sts_provider == "ve"`): broker mints the OIDC JWT, then the
-///     SIGNER's `/dev/sign-sts` validates the intent and performs the
-///     SigV4 `AssumeRoleWithOIDC` with its OWN AK/SK. The daemon names only
-///     the INTENT (`data_class` + `verbs`) — never a role, never a policy —
-///     so a compromised daemon cannot widen its own scope.
-///   - **AWS** (anything else): the anonymous relay, byte-identical to
-///     pre-#514 behaviour.
-///
-/// Fails LOUD when the VE plane is selected without a signer URL — never a
-/// silent fallback to the AWS relay, which would mint against the wrong cloud.
-async fn mint_data_creds(
-    dp: &DataPlaneMint<'_>,
-    data_class: &str,
-    verbs: &[&str],
-) -> Result<DataCreds, String> {
-    let (broker, j1, omni) = (dp.broker, dp.j1, dp.omni);
-    if dp.sts_provider != Some("ve") {
-        let c =
-            agentkeys_provisioner::fetch_via_broker_default_ttl(broker, j1, dp.role_arn, dp.region)
-                .await
-                .map_err(|e| format!("STS relay ({data_class}): {e}"))?;
-        return Ok(DataCreds {
-            access_key_id: c.access_key_id,
-            secret_access_key: c.secret_access_key,
-            session_token: c.session_token,
-        });
-    }
-    let signer = dp.signer_url.ok_or_else(|| {
-        format!(
-            "AGENTKEYS_STS_PROVIDER=ve but no --signer-url / AGENTKEYS_SIGNER_URL — the VE \
-             data plane mints through the signer ({data_class}); refusing to fall back to the \
-             AWS relay"
-        )
-    })?;
-    // The broker still mints the OIDC JWT (it owns identity); the signer
-    // decides whether it becomes a credential (ADR: authorizer ≠ issuer).
-    let jwt = agentkeys_provisioner::fetch_oidc_jwt(broker, j1)
-        .await
-        .map_err(|e| format!("broker OIDC mint ({data_class}): {e}"))?;
-    let body = agentkeys_backend_client::protocol::SignStsBody {
-        omni_account: omni.to_string(),
-        data_class: data_class.to_string(),
-        verbs: verbs.iter().map(|v| v.to_string()).collect(),
-        ttl_seconds: 900,
-        oidc_token: jwt.jwt,
-    };
-    let resp = reqwest::Client::new()
-        .post(format!("{}/dev/sign-sts", signer.trim_end_matches('/')))
-        .header("Authorization", format!("Bearer {j1}"))
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| format!("signer sign-sts transport ({data_class}): {e}"))?;
-    let status = resp.status();
-    if !status.is_success() {
-        // Surface the signer's own error code verbatim — `grant_not_found`,
-        // `role_class_mismatch`, `ttl_too_long` and friends are the ADR's
-        // loud refusals and must never be flattened into a generic 502.
-        let text = resp.text().await.unwrap_or_default();
-        return Err(format!("signer sign-sts {status} ({data_class}): {text}"));
-    }
-    let out: agentkeys_backend_client::protocol::SignStsResult = resp
-        .json()
-        .await
-        .map_err(|e| format!("signer sign-sts parse ({data_class}): {e}"))?;
-    Ok(DataCreds {
-        access_key_id: out.access_key_id,
-        secret_access_key: out.secret_access_key,
-        session_token: out.session_token,
-    })
+) -> Result<Option<StorageContext>, String> {
+    storage_context(state, state.config_url.as_deref()).await
 }
 
 /// Derive the per-(actor, service) config KEK via the signer (#372 item 2 —
@@ -9976,7 +9727,7 @@ async fn mint_data_creds(
 /// session J1 authenticates the `/dev/sign-message` call (the signer-only
 /// listener requires a broker-session bearer, issue #74). Fails loud when the
 /// signer is unconfigured — config confidentiality now DEPENDS on it.
-async fn derive_config_kek(ctx: &RealConfigCtx, service: &str) -> Result<[u8; 32], String> {
+async fn derive_config_kek(ctx: &StorageContext, service: &str) -> Result<[u8; 32], String> {
     derive_actor_kek(
         ctx.signer_url.as_deref(),
         &ctx.j1,
@@ -10029,7 +9780,7 @@ async fn derive_actor_kek(
 /// for memory AND the #201 config data class — can't drift its shape or omni
 /// from the agent/MCP path (the #200 bug locus). Worker put/get bodies use the
 /// crate's body types too (see callers); the raw worker POST stays here to reuse
-/// the once-minted STS creds across namespaces.
+/// the shared protocol schemas across namespaces.
 async fn mint_master_cap(
     broker: &str,
     j1: &str,
@@ -10070,12 +9821,10 @@ async fn mint_master_cap(
 }
 
 /// Per-namespace memory-put (#201 Phase 4): cap-mint(`knowledge:<ns>`) → worker
-/// `/v1/memory/put` with the JSON array as plaintext. STS creds are minted once
-/// by the caller and reused across namespaces. Returns the worker's S3 key.
+/// `/v1/memory/put` with the JSON array as plaintext. Returns the stored object key.
 async fn memory_put_ns_real(
     client: &reqwest::Client,
-    ctx: &RealMemoryCtx,
-    creds: &DataCreds,
+    ctx: &StorageContext,
     ns: &str,
     entries: &[StoredMemoryEntry],
     expected_content_hash: Option<&str>,
@@ -10092,10 +9841,7 @@ async fn memory_put_ns_real(
     .await?;
     let plaintext = serde_json::to_vec(entries).map_err(|e| format!("ns array serialize: {e}"))?;
     let put_resp = client
-        .post(format!("{}/v1/memory/put", ctx.memory_url))
-        .header("x-aws-access-key-id", &creds.access_key_id)
-        .header("x-aws-secret-access-key", &creds.secret_access_key)
-        .header("x-aws-session-token", &creds.session_token)
+        .post(format!("{}/v1/memory/put", ctx.worker_url))
         // Crate-owned body shape (issue #203) — a drifted field is a compile error.
         .json(&agentkeys_backend_client::MemoryPutBody {
             cap,
@@ -10132,11 +9878,10 @@ async fn memory_put_ns_real(
 /// read-modify-write plant tell "new namespace" (write fresh) from "transient
 /// error" (abort — never overwrite durable data) per codex finding 1.
 /// Store one KEYED object in a namespace (#594 objects) — an uploaded
-/// resource's raw bytes (`files/<id>`). Same cap + creds as the namespace put.
+/// resource's raw bytes (`files/<id>`). Uses the namespace's scoped capability.
 async fn memory_put_object_real(
     client: &reqwest::Client,
-    ctx: &RealMemoryCtx,
-    creds: &DataCreds,
+    ctx: &StorageContext,
     ns: &str,
     object_key: &str,
     bytes: &[u8],
@@ -10153,10 +9898,7 @@ async fn memory_put_object_real(
     )
     .await?;
     let put_resp = client
-        .post(format!("{}/v1/memory/put", ctx.memory_url))
-        .header("x-aws-access-key-id", &creds.access_key_id)
-        .header("x-aws-secret-access-key", &creds.secret_access_key)
-        .header("x-aws-session-token", &creds.session_token)
+        .post(format!("{}/v1/memory/put", ctx.worker_url))
         .json(&agentkeys_backend_client::MemoryPutBody {
             cap,
             plaintext_b64: STANDARD.encode(bytes),
@@ -10179,8 +9921,7 @@ async fn memory_put_object_real(
 /// worker has never stored it (404), the decrypted bytes otherwise.
 async fn memory_get_object_real(
     client: &reqwest::Client,
-    ctx: &RealMemoryCtx,
-    creds: &DataCreds,
+    ctx: &StorageContext,
     ns: &str,
     object_key: &str,
 ) -> Result<Option<Vec<u8>>, String> {
@@ -10195,10 +9936,7 @@ async fn memory_get_object_real(
     )
     .await?;
     let get_resp = client
-        .post(format!("{}/v1/memory/get", ctx.memory_url))
-        .header("x-aws-access-key-id", &creds.access_key_id)
-        .header("x-aws-secret-access-key", &creds.secret_access_key)
-        .header("x-aws-session-token", &creds.session_token)
+        .post(format!("{}/v1/memory/get", ctx.worker_url))
         .json(&agentkeys_backend_client::MemoryGetBody {
             cap,
             namespace: ns.to_string(),
@@ -10232,31 +9970,22 @@ async fn memory_get_object_real(
 /// The history index of one item (`versions/<key>/index`); never stored = empty.
 async fn history_index_read(
     client: &reqwest::Client,
-    ctx: &RealMemoryCtx,
-    creds: &DataCreds,
+    ctx: &StorageContext,
     ns: &str,
     key: &str,
 ) -> Result<crate::knowledge_history::VersionIndex, String> {
-    history_index_read_versioned(client, ctx, creds, ns, key)
+    history_index_read_versioned(client, ctx, ns, key)
         .await
         .map(|document| document.document)
 }
 
 async fn history_index_read_versioned(
     client: &reqwest::Client,
-    ctx: &RealMemoryCtx,
-    creds: &DataCreds,
+    ctx: &StorageContext,
     ns: &str,
     key: &str,
 ) -> Result<VersionedConfig<crate::knowledge_history::VersionIndex>, String> {
-    match memory_get_object_real(
-        client,
-        ctx,
-        creds,
-        ns,
-        &crate::knowledge_history::index_key(key),
-    )
-    .await?
+    match memory_get_object_real(client, ctx, ns, &crate::knowledge_history::index_key(key)).await?
     {
         None => Ok(VersionedConfig::default()),
         Some(bytes) => serde_json::from_slice(&bytes)
@@ -10274,14 +10003,13 @@ async fn history_index_read_versioned(
 /// (a retried write, a re-plant) = nothing to add. `Ok(None)` = skipped.
 async fn history_stash(
     client: &reqwest::Client,
-    ctx: &RealMemoryCtx,
-    creds: &DataCreds,
+    ctx: &StorageContext,
     ns: &str,
     old: &StoredMemoryEntry,
     by: &str,
 ) -> Result<Option<crate::knowledge_history::KnowledgeVersion>, String> {
     let keep = crate::knowledge_history::history_keep();
-    let mut index = history_index_read_versioned(client, ctx, creds, ns, &old.key).await?;
+    let mut index = history_index_read_versioned(client, ctx, ns, &old.key).await?;
     let hash = content_hash_for(ns, &old.key, &old.body);
     if index
         .newest()
@@ -10299,7 +10027,7 @@ async fn history_stash(
         &old.version,
     );
     let slot_key = crate::knowledge_history::slot_key(&old.key, meta.slot);
-    let slot_base = memory_get_object_real(client, ctx, creds, ns, &slot_key)
+    let slot_base = memory_get_object_real(client, ctx, ns, &slot_key)
         .await?
         .as_deref()
         .map(blob_hash)
@@ -10307,7 +10035,6 @@ async fn history_stash(
     memory_put_object_real(
         client,
         ctx,
-        creds,
         ns,
         &slot_key,
         old.body.as_bytes(),
@@ -10318,7 +10045,6 @@ async fn history_stash(
     memory_put_object_real(
         client,
         ctx,
-        creds,
         ns,
         &crate::knowledge_history::index_key(&old.key),
         &json,
@@ -10348,21 +10074,19 @@ pub(crate) async fn resource_entry_remove(
     let mut removed_durable = 0usize;
     if let Some(ctx) = ctx {
         let client = reqwest::Client::new();
-        let creds = mint_data_creds(&ctx.mint_coords(), "memory", &["get", "put", "list"])
-            .await
-            .map_err(|e| (StatusCode::BAD_GATEWAY, format!("STS relay: {e}")))?;
+
         // D-K5: the write names the blob it read; a stale base is re-read once.
         let mut attempt = 0u8;
         loop {
             attempt += 1;
-            let durable = memory_get_ns_hashed_real(&client, &ctx, &creds, ns)
+            let durable = memory_get_ns_hashed_real(&client, &ctx, ns)
                 .await
                 .map_err(|e| (StatusCode::BAD_GATEWAY, format!("knowledge:{ns} read: {e}")))?;
             let Some((entries, base)) = durable else {
                 break;
             };
             if let Some(old) = entries.iter().find(|e| e.key == key) {
-                history_stash(&client, &ctx, &creds, ns, old, by)
+                history_stash(&client, &ctx, ns, old, by)
                     .await
                     .map_err(|e| {
                         (
@@ -10380,7 +10104,7 @@ pub(crate) async fn resource_entry_remove(
             if removed_durable == 0 {
                 break;
             }
-            match memory_put_ns_real(&client, &ctx, &creds, ns, &kept, Some(&base)).await {
+            match memory_put_ns_real(&client, &ctx, ns, &kept, Some(&base)).await {
                 Ok(_) => break,
                 Err(e) if e.contains("stale_base") && attempt < 2 => continue,
                 Err(e) => {
@@ -10415,10 +10139,8 @@ pub(crate) async fn resource_object_put(
         return Ok(false);
     };
     let client = reqwest::Client::new();
-    let creds = mint_data_creds(&ctx.mint_coords(), "memory", &["put"])
-        .await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("STS relay: {e}")))?;
-    memory_put_object_real(&client, &ctx, &creds, ns, object_key, bytes, None)
+
+    memory_put_object_real(&client, &ctx, ns, object_key, bytes, None)
         .await
         .map_err(|e| {
             (
@@ -10431,11 +10153,10 @@ pub(crate) async fn resource_object_put(
 
 async fn memory_get_ns_real(
     client: &reqwest::Client,
-    ctx: &RealMemoryCtx,
-    creds: &DataCreds,
+    ctx: &StorageContext,
     ns: &str,
 ) -> Result<Option<Vec<StoredMemoryEntry>>, String> {
-    Ok(memory_get_ns_hashed_real(client, ctx, creds, ns)
+    Ok(memory_get_ns_hashed_real(client, ctx, ns)
         .await?
         .map(|(entries, _)| entries))
 }
@@ -10444,8 +10165,7 @@ async fn memory_get_ns_real(
 /// of the stored plaintext, which the write that follows this read names.
 async fn memory_get_ns_hashed_real(
     client: &reqwest::Client,
-    ctx: &RealMemoryCtx,
-    creds: &DataCreds,
+    ctx: &StorageContext,
     ns: &str,
 ) -> Result<Option<(Vec<StoredMemoryEntry>, String)>, String> {
     use base64::{engine::general_purpose::STANDARD, Engine};
@@ -10459,10 +10179,7 @@ async fn memory_get_ns_hashed_real(
     )
     .await?;
     let get_resp = client
-        .post(format!("{}/v1/memory/get", ctx.memory_url))
-        .header("x-aws-access-key-id", &creds.access_key_id)
-        .header("x-aws-secret-access-key", &creds.secret_access_key)
-        .header("x-aws-session-token", &creds.session_token)
+        .post(format!("{}/v1/memory/get", ctx.worker_url))
         // Crate-owned body shape (issue #203).
         .json(&agentkeys_backend_client::MemoryGetBody {
             cap,
@@ -10500,11 +10217,9 @@ pub(crate) use agentkeys_web_core::data::VersionedConfig;
 
 /// Config-store the master-only memory-types taxonomy (#201): cap-mint
 /// (`config-store`, service `memory-taxonomy`) → config worker `/v1/config/put`.
-/// Mints its own STS creds under the CONFIG role (distinct from the memory role
-/// per arch.md §17.2 per-data-class bucket separation).
 async fn config_store_taxonomy(
     client: &reqwest::Client,
-    ctx: &RealConfigCtx,
+    ctx: &StorageContext,
     taxonomy: &MemoryTaxonomy,
     expected_revision: &str,
 ) -> Result<(), String> {
@@ -10513,13 +10228,13 @@ async fn config_store_taxonomy(
 }
 
 /// Generic Config-class doc STORE (#201/#372 shape, service-parameterized):
-/// master-self cap (`config-store`, `service`) → STS under the CONFIG role →
+/// master-self cap (`config-store`, `service`) →
 /// client-side v3 encrypt under the signer-derived per-(actor, service) KEK →
 /// config worker `/v1/config/put`. Used by the taxonomy (`memory-taxonomy`)
 /// and the #404 channel registry (`channel-registry`).
 pub(crate) async fn config_store_doc(
     client: &reqwest::Client,
-    ctx: &RealConfigCtx,
+    ctx: &StorageContext,
     service: &str,
     plaintext: &[u8],
     expected_revision: &str,
@@ -10534,7 +10249,7 @@ pub(crate) async fn config_store_doc(
         service,
     )
     .await?;
-    let creds = mint_data_creds(&ctx.mint_coords(), "config", &["get", "put"]).await?;
+
     // #372 item 2: CLIENT-side encrypt under the signer-derived per-actor KEK
     // (v3 envelope). The worker stores the envelope verbatim — plaintext never
     // reaches it, and neither the storage plane nor any worker env can decrypt.
@@ -10543,10 +10258,7 @@ pub(crate) async fn config_store_doc(
     let envelope = agentkeys_core::envelope_v3::encrypt_v3(&kek, plaintext, &aad)
         .map_err(|e| format!("config v3 encrypt: {e}"))?;
     let resp = client
-        .post(format!("{}/v1/config/put", ctx.config_url))
-        .header("x-aws-access-key-id", creds.access_key_id)
-        .header("x-aws-secret-access-key", creds.secret_access_key)
-        .header("x-aws-session-token", creds.session_token)
+        .post(format!("{}/v1/config/put", ctx.worker_url))
         // Crate-owned body shape (issue #203) — config worker put body.
         .json(&agentkeys_backend_client::ConfigPutBody {
             cap,
@@ -10575,13 +10287,13 @@ pub(crate) async fn config_store_doc(
 /// Config-fetch the taxonomy (#201). `Ok(None)` ONLY when the object is
 /// confirmed MISSING (HTTP 404 / `NoSuchKey` — never planted), so the list may
 /// legitimately fall back to cache-derived categories. Any OTHER failure
-/// (cap-mint, STS, config worker 5xx, decrypt/parse) is an `Err` that the caller
+/// (cap-mint, config worker 5xx, decrypt/parse) is an `Err` that the caller
 /// MUST surface — never silently downgrade to the cache, which would hide a
 /// configured-but-broken Config behind a stale "looks empty" view (codex
 /// finding 2).
 async fn config_fetch_taxonomy(
     client: &reqwest::Client,
-    ctx: &RealConfigCtx,
+    ctx: &StorageContext,
 ) -> Result<Option<VersionedConfig<MemoryTaxonomy>>, String> {
     let Some(bytes) = config_fetch_doc(client, ctx, TAXONOMY_SERVICE).await? else {
         return Ok(None);
@@ -10596,7 +10308,7 @@ async fn config_fetch_taxonomy(
 /// failure is an `Err` the caller must surface (never silently downgrade).
 pub(crate) async fn config_fetch_doc(
     client: &reqwest::Client,
-    ctx: &RealConfigCtx,
+    ctx: &StorageContext,
     service: &str,
 ) -> Result<Option<VersionedConfig<Vec<u8>>>, String> {
     use base64::{engine::general_purpose::STANDARD, Engine};
@@ -10609,12 +10321,9 @@ pub(crate) async fn config_fetch_doc(
         service,
     )
     .await?;
-    let creds = mint_data_creds(&ctx.mint_coords(), "config", &["get"]).await?;
+
     let resp = client
-        .post(format!("{}/v1/config/get", ctx.config_url))
-        .header("x-aws-access-key-id", creds.access_key_id)
-        .header("x-aws-secret-access-key", creds.secret_access_key)
-        .header("x-aws-session-token", creds.session_token)
+        .post(format!("{}/v1/config/get", ctx.worker_url))
         // Crate-owned body shape (issue #203) — config worker get body.
         .json(&agentkeys_backend_client::ConfigGetBody { cap })
         .send()
@@ -11198,7 +10907,7 @@ async fn clear_orphaned_channels(
 /// (preset categories, #207 item 1A) so both compose without clobbering.
 async fn reconcile_taxonomy(
     client: &reqwest::Client,
-    cfg: &RealConfigCtx,
+    cfg: &StorageContext,
     new_categories: &[MemoryCategory],
 ) -> Result<Vec<MemoryCategory>, String> {
     let (existing, revision) = match config_fetch_taxonomy(client, cfg).await {
@@ -11223,8 +10932,7 @@ use agentkeys_web_core::console_inbox::SKILL_MAX_BYTES;
 /// Owner inbox reads use Fetch; deletion uses an explicit Teardown capability.
 async fn inbox_worker_post(
     http: &reqwest::Client,
-    ctx: &RealMemoryCtx,
-    creds: &DataCreds,
+    ctx: &StorageContext,
     path: &str,
     extra: serde_json::Value,
 ) -> Result<serde_json::Value, (axum::http::StatusCode, String)> {
@@ -11249,10 +10957,7 @@ async fn inbox_worker_post(
         }
     }
     let resp = http
-        .post(format!("{}{}", ctx.memory_url, path))
-        .header("x-aws-access-key-id", &creds.access_key_id)
-        .header("x-aws-secret-access-key", &creds.secret_access_key)
-        .header("x-aws-session-token", &creds.session_token)
+        .post(format!("{}{}", ctx.worker_url, path))
         .json(&body)
         .send()
         .await
@@ -11301,25 +11006,8 @@ async fn list_master_inbox(State(state): State<SharedUiBridgeState>) -> axum::re
         }
     };
     let http = reqwest::Client::new();
-    let creds = match mint_data_creds(&ctx.mint_coords(), "memory", &["get", "list"]).await {
-        Ok(c) => c,
-        Err(e) => {
-            return (
-                axum::http::StatusCode::BAD_GATEWAY,
-                Json(serde_json::json!({ "error": format!("STS relay: {e}") })),
-            )
-                .into_response()
-        }
-    };
-    match inbox_worker_post(
-        &http,
-        &ctx,
-        &creds,
-        "/v1/memory/inbox-list",
-        serde_json::json!({}),
-    )
-    .await
-    {
+
+    match inbox_worker_post(&http, &ctx, "/v1/memory/inbox-list", serde_json::json!({})).await {
         Ok(v) => {
             let items: Vec<ApiInboxItem> = v
                 .get("items")
@@ -11359,20 +11047,10 @@ async fn get_master_inbox_entry(
         }
     };
     let http = reqwest::Client::new();
-    let creds = match mint_data_creds(&ctx.mint_coords(), "memory", &["get", "list"]).await {
-        Ok(c) => c,
-        Err(e) => {
-            return (
-                axum::http::StatusCode::BAD_GATEWAY,
-                Json(serde_json::json!({ "error": format!("STS relay: {e}") })),
-            )
-                .into_response()
-        }
-    };
+
     match inbox_worker_post(
         &http,
         &ctx,
-        &creds,
         "/v1/memory/inbox-get",
         serde_json::json!({ "s3_key": req.s3_key }),
     )
@@ -11470,28 +11148,11 @@ async fn accept_master_inbox(
         }
     };
     let http = reqwest::Client::new();
-    let creds = match mint_data_creds(
-        &ctx.mint_coords(),
-        "memory",
-        &["get", "put", "delete", "list"],
-    )
-    .await
-    {
-        Ok(c) => c,
-        Err(e) => {
-            return (
-                axum::http::StatusCode::BAD_GATEWAY,
-                Json(serde_json::json!({ "error": format!("STS relay: {e}") })),
-            )
-                .into_response()
-        }
-    };
 
     // 1. Read the proposal (worker-stamped provenance + the proposed body).
     let item = match inbox_worker_post(
         &http,
         &ctx,
-        &creds,
         "/v1/memory/inbox-get",
         serde_json::json!({ "s3_key": req.s3_key }),
     )
@@ -11512,7 +11173,7 @@ async fn accept_master_inbox(
                 .into_response()
         }
     };
-    let durable = match memory_get_ns_hashed_real(&http, &ctx, &creds, &item.ns).await {
+    let durable = match memory_get_ns_hashed_real(&http, &ctx, &item.ns).await {
         Ok(Some((entries, revision))) => VersionedConfig::new(entries, revision),
         Ok(None) => VersionedConfig::default(),
         Err(error) => {
@@ -11552,8 +11213,7 @@ async fn accept_master_inbox(
         }
     }
     for old in &prepared.replaced {
-        if let Err(error) = history_stash(&http, &ctx, &creds, &ns, old, &prepared.history_by).await
-        {
+        if let Err(error) = history_stash(&http, &ctx, &ns, old, &prepared.history_by).await {
             return (
                 StatusCode::BAD_GATEWAY,
                 Json(serde_json::json!({"error":format!("history write failed: {error}")})),
@@ -11565,7 +11225,6 @@ async fn accept_master_inbox(
         if let Err(error) = memory_put_ns_real(
             &http,
             &ctx,
-            &creds,
             &ns,
             &prepared.document,
             Some(&prepared.document.revision),
@@ -11598,7 +11257,6 @@ async fn accept_master_inbox(
     if let Err((status, reason)) = inbox_worker_post(
         &http,
         &ctx,
-        &creds,
         "/v1/memory/inbox-delete",
         serde_json::json!({ "s3_key": req.s3_key }),
     )
@@ -11646,26 +11304,10 @@ async fn reject_master_inbox(
         }
     };
     let http = reqwest::Client::new();
-    let creds = match mint_data_creds(
-        &ctx.mint_coords(),
-        "memory",
-        &["get", "put", "delete", "list"],
-    )
-    .await
-    {
-        Ok(c) => c,
-        Err(e) => {
-            return (
-                axum::http::StatusCode::BAD_GATEWAY,
-                Json(serde_json::json!({ "error": format!("STS relay: {e}") })),
-            )
-                .into_response()
-        }
-    };
+
     match inbox_worker_post(
         &http,
         &ctx,
-        &creds,
         "/v1/memory/inbox-delete",
         serde_json::json!({ "s3_key": req.s3_key }),
     )
@@ -11702,7 +11344,7 @@ fn now_date_utc() -> String {
 /// The persona storage backend: the real per-ns worker chain when configured,
 /// else the in-memory cache (dev / headless CI — same split as the plant).
 enum PersonaBackend {
-    Real(Box<RealMemoryCtx>, DataCreds),
+    Real(Box<StorageContext>),
     Cache,
 }
 
@@ -11710,17 +11352,7 @@ async fn persona_backend(
     state: &SharedUiBridgeState,
 ) -> Result<PersonaBackend, (axum::http::StatusCode, String)> {
     match real_memory_ctx(state).await {
-        Ok(Some(ctx)) => {
-            let creds = mint_data_creds(&ctx.mint_coords(), "memory", &["get", "put", "list"])
-                .await
-                .map_err(|e| {
-                    (
-                        axum::http::StatusCode::BAD_GATEWAY,
-                        format!("STS relay: {e}"),
-                    )
-                })?;
-            Ok(PersonaBackend::Real(Box::new(ctx), creds))
-        }
+        Ok(Some(ctx)) => Ok(PersonaBackend::Real(Box::new(ctx))),
         Ok(None) => Ok(PersonaBackend::Cache),
         Err(reason) => Err((axum::http::StatusCode::CONFLICT, reason)),
     }
@@ -11733,9 +11365,9 @@ async fn persona_load(
     backend: &PersonaBackend,
 ) -> Result<VersionedConfig<Vec<StoredMemoryEntry>>, (axum::http::StatusCode, String)> {
     match backend {
-        PersonaBackend::Real(ctx, creds) => {
+        PersonaBackend::Real(ctx) => {
             let client = reqwest::Client::new();
-            memory_get_ns_hashed_real(&client, ctx, creds, PERSONA_NAMESPACE)
+            memory_get_ns_hashed_real(&client, ctx, PERSONA_NAMESPACE)
                 .await
                 .map(|document| {
                     document
@@ -11773,12 +11405,11 @@ async fn persona_store(
     expected_hash: &str,
 ) -> Result<(), (axum::http::StatusCode, String)> {
     match backend {
-        PersonaBackend::Real(ctx, creds) => {
+        PersonaBackend::Real(ctx) => {
             let client = reqwest::Client::new();
             memory_put_ns_real(
                 &client,
                 ctx,
-                creds,
                 PERSONA_NAMESPACE,
                 entries,
                 Some(expected_hash),
@@ -12520,16 +12151,6 @@ pub(crate) async fn plant_master_memory_with_history(
             by_ns.entry(e.ns.clone()).or_default().push(e);
         }
 
-        // STS creds (memory role) minted once, reused across namespaces.
-        let creds = mint_data_creds(&ctx.mint_coords(), "memory", &["get", "put", "list"])
-            .await
-            .map_err(|e| {
-                (
-                    axum::http::StatusCode::BAD_GATEWAY,
-                    format!("STS relay: {e}"),
-                )
-            })?;
-
         let mut committed: Vec<ApiMemoryEntry> = Vec::new();
         for (ns, entries) in &by_ns {
             // Read the durable blob FIRST. Ok(None) = brand-new namespace;
@@ -12541,9 +12162,7 @@ pub(crate) async fn plant_master_memory_with_history(
             let mut attempt = 0u8;
             let newly = loop {
                 attempt += 1;
-                let (durable, base) = match memory_get_ns_hashed_real(&client, &ctx, &creds, ns)
-                    .await
-                {
+                let (durable, base) = match memory_get_ns_hashed_real(&client, &ctx, ns).await {
                     Ok(Some((d, h))) => (d, h),
                     Ok(None) => {
                         // The worker knows no blob for this namespace. A brand-new
@@ -12605,8 +12224,7 @@ pub(crate) async fn plant_master_memory_with_history(
                     .cloned()
                     .collect();
                 for old in &replaced {
-                    if let Err(e) = history_stash(&client, &ctx, &creds, ns, old, history_by).await
-                    {
+                    if let Err(e) = history_stash(&client, &ctx, ns, old, history_by).await {
                         return Err((
                             axum::http::StatusCode::BAD_GATEWAY,
                             format!(
@@ -12617,7 +12235,7 @@ pub(crate) async fn plant_master_memory_with_history(
                     }
                 }
                 let (merged, newly) = merge_stored_entries(ns, durable, entries);
-                match memory_put_ns_real(&client, &ctx, &creds, ns, &merged, Some(&base)).await {
+                match memory_put_ns_real(&client, &ctx, ns, &merged, Some(&base)).await {
                     Ok(_) => break newly,
                     Err(e) if e.contains("stale_base") && attempt < 2 => {
                         tracing::info!(ns = %ns, "plant: stale base — re-reading and re-applying");
@@ -13089,52 +12707,8 @@ async fn classify_propose(
 // list-then-categorize over the master's own real data. Real data or a loud
 // failure — no in-memory stand-in (the unconfigured dev case is an honest empty).
 
-struct RealCredCtx {
-    broker: String,
-    cred_url: String,
-    role_arn: String,
-    region: String,
-    j1: String,
-    omni: String,
-    device_key: Arc<DeviceKey>,
-    /// Signer base URL — required on the VE posture for BOTH the #514 STS
-    /// mint and the #372 client-side v3 KEK derivation.
-    signer_url: Option<String>,
-    /// #514 — `AGENTKEYS_STS_PROVIDER`; `Some("ve")` mints through the signer
-    /// AND flips the store to client-encrypted v3 envelopes (nothing reaches
-    /// the worker in plaintext on VE).
-    sts_provider: Option<String>,
-}
-
-/// Resolve the cred-worker context from env (`AGENTKEYS_WORKER_CRED_URL` +
-/// `VAULT_ROLE_ARN`, which the daemon's launcher sources from
-/// operator-workstation.env) + the master session. `Ok(None)` when the cred
-/// worker isn't configured (dev/no-infra). A partial config (URL set but role
-/// missing) fails loud (issue #90 discipline).
-async fn real_cred_ctx(state: &UiBridgeState) -> Result<Option<RealCredCtx>, String> {
-    let cred_url = match std::env::var("AGENTKEYS_WORKER_CRED_URL") {
-        Ok(u) if !u.is_empty() => u,
-        _ => return Ok(None),
-    };
-    let role_arn = std::env::var("VAULT_ROLE_ARN")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .ok_or("real cred: AGENTKEYS_WORKER_CRED_URL set but VAULT_ROLE_ARN missing")?;
-    let c = resolve_session_coords(state).await?;
-    Ok(Some(RealCredCtx {
-        broker: c.broker,
-        cred_url,
-        role_arn,
-        region: c.region,
-        j1: c.j1,
-        omni: c.omni,
-        device_key: state
-            .device_key
-            .clone()
-            .ok_or("worker calls require an existing registered device key file")?,
-        signer_url: state.signer_url.clone(),
-        sts_provider: state.sts_provider.clone(),
-    }))
+async fn real_cred_ctx(state: &UiBridgeState) -> Result<Option<StorageContext>, String> {
+    storage_context(state, state.cred_url.as_deref()).await
 }
 
 /// `GET /v1/master/credentials` — list the master's stored credential services
@@ -13175,18 +12749,10 @@ async fn list_master_credentials_inner(
     )
     .await
     .map_err(|e| (StatusCode::BAD_GATEWAY, format!("cred cap-mint: {e}")))?;
-    // #514: the SAME provider-aware decision point the config plane uses —
-    // AWS relay, or the signer's /dev/sign-sts on the VE posture ("vault" is
-    // the signer's per-class binding for the cred plane, #511).
-    let creds = mint_data_creds(&ctx.mint_coords(), "vault", &["get", "list"])
-        .await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, e))?;
+
     let resp = client
-        .post(format!("{}/v1/cred/list", ctx.cred_url))
-        .header("x-aws-access-key-id", creds.access_key_id)
-        .header("x-aws-secret-access-key", creds.secret_access_key)
-        .header("x-aws-session-token", creds.session_token)
-        .json(&serde_json::json!({ "cap": cap }))
+        .post(format!("{}/v1/cred/list", ctx.worker_url))
+        .json(&agentkeys_backend_client::CredFetchBody { cap })
         .send()
         .await
         .map_err(|e| (StatusCode::BAD_GATEWAY, format!("cred list transport: {e}")))?;
@@ -13228,7 +12794,7 @@ async fn list_master_credentials_inner(
 }
 
 /// `POST /v1/master/credentials/store` — vault a master credential (mint a
-/// master-self `cred-store` cap → STS → cred worker `/v1/cred/store`). The
+/// master-self `cred-store` cap → cred worker `/v1/cred/store`). The
 /// credential parallel to the memory plant. Real durable write or a loud failure.
 async fn store_master_credential(
     State(state): State<SharedUiBridgeState>,
@@ -13283,7 +12849,7 @@ async fn store_master_credential(
 }
 
 async fn store_master_credential_inner(
-    ctx: &RealCredCtx,
+    ctx: &StorageContext,
     service: &str,
     secret: &str,
 ) -> Result<String, (StatusCode, String)> {
@@ -13299,19 +12865,7 @@ async fn store_master_credential_inner(
     )
     .await
     .map_err(|e| (StatusCode::BAD_GATEWAY, format!("cred cap-mint: {e}")))?;
-    // #514: the SAME provider-aware decision point the config plane uses.
-    let creds = mint_data_creds(&ctx.mint_coords(), "vault", &["get", "put"])
-        .await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, e))?;
-    // Envelope mode follows the SAME posture line (#514): on VE nothing may
-    // reach the worker in plaintext (that gap is WHY dev.sh gated this plane),
-    // so the secret is client-encrypted v3 under the signer-derived KEK (the
-    // #372 config recipe — worker stores it verbatim, holds no opening key).
-    // Elsewhere (AWS) the legacy worker-side stage-1 K3 mode stays: it is what
-    // keeps the delegated agent cred-fetch flow working until the #91
-    // KEK-release lands (a v3 blob is master-readable only — the signer binds
-    // sign-message to the session omni, so agents cannot derive the KEK).
-    let body = if ctx.sts_provider.as_deref() == Some("ve") {
+    let body = {
         let kek = derive_actor_kek(
             ctx.signer_url.as_deref(),
             &ctx.j1,
@@ -13334,18 +12888,9 @@ async fn store_master_credential_inner(
             plaintext_b64: None,
             envelope_b64: Some(STANDARD.encode(&envelope)),
         }
-    } else {
-        agentkeys_backend_client::CredStoreBody {
-            cap,
-            plaintext_b64: Some(STANDARD.encode(secret.as_bytes())),
-            envelope_b64: None,
-        }
     };
     let resp = client
-        .post(format!("{}/v1/cred/store", ctx.cred_url))
-        .header("x-aws-access-key-id", creds.access_key_id)
-        .header("x-aws-secret-access-key", creds.secret_access_key)
-        .header("x-aws-session-token", creds.session_token)
+        .post(format!("{}/v1/cred/store", ctx.worker_url))
         // Crate-owned body shape (#204) — a drifted field is a compile error.
         .json(&body)
         .send()
@@ -13364,6 +12909,18 @@ async fn store_master_credential_inner(
                 "cred store {status}: {}",
                 resp.text().await.unwrap_or_default()
             ),
+        ));
+    }
+    let receipt: agentkeys_backend_client::CredStoreResp = resp.json().await.map_err(|error| {
+        (
+            StatusCode::BAD_GATEWAY,
+            format!("cred store receipt: {error}"),
+        )
+    })?;
+    if !receipt.ok {
+        return Err((
+            StatusCode::BAD_GATEWAY,
+            "credential worker did not confirm write".into(),
         ));
     }
     Ok(bundled_catalog().tag(service).category)
@@ -13510,14 +13067,25 @@ mod tests {
             serde_json::json!({"ok":true,"s3_key":"fixture","envelope_size":32}),
         ])));
         let replies = responses.clone();
+        let cloud_requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let cloud_observer = cloud_requests.clone();
+        let unavailable_cloud = move || {
+            let calls = cloud_observer.clone();
+            async move {
+                calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                StatusCode::SERVICE_UNAVAILABLE
+            }
+        };
         let router = Router::new()
             .route("/v1/cap/config-store", post(|| async { Json(serde_json::json!({"fixture":"cap"})) }))
-            .route("/v1/mint-oidc-jwt", post(|| async { Json(serde_json::json!({"jwt":"fixture","wallet":"fixture","expiration":9999999999_i64})) }))
-            .route("/dev/sign-sts", post(|| async { Json(serde_json::json!({"access_key_id":"fixture","secret_access_key":"fixture","session_token":"fixture","expiration_unix":9999999999_i64})) }))
+            .route("/v1/mint-oidc-jwt", post(unavailable_cloud.clone()))
+            .route("/dev/sign-sts", post(unavailable_cloud))
             .route("/dev/sign-message", post(|| async { Json(serde_json::json!({"address":"fixture","signature":hex::encode([7u8;65]),"key_version":1})) }))
-            .route("/v1/config/put", post(move |Json(body): Json<agentkeys_backend_client::ConfigPutBody>| {
+            .route("/v1/config/put", post(move |headers: HeaderMap, Json(body): Json<agentkeys_backend_client::ConfigPutBody>| {
                 let replies = replies.clone();
                 async move {
+                    assert!(!headers.contains_key("authorization"));
+                    assert!(!headers.keys().any(|name| name.as_str().starts_with("x-aws-")));
                     assert_eq!(body.expected_revision.as_deref(), Some("revision-before-edit"));
                     assert!(body.envelope_b64.is_some());
                     Json(replies.lock().unwrap().pop_front().unwrap())
@@ -13526,16 +13094,13 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = format!("http://{}", listener.local_addr().unwrap());
         let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
-        let context = RealConfigCtx {
+        let context = StorageContext {
             broker: endpoint.clone(),
-            config_url: endpoint.clone(),
-            role_arn: String::new(),
-            region: String::new(),
+            worker_url: endpoint.clone(),
             j1: "fixture".into(),
             omni: "0xab".into(),
             device_key: key,
             signer_url: Some(endpoint),
-            sts_provider: Some("ve".into()),
         };
         let client = reqwest::Client::new();
         let rejected = config_store_doc(
@@ -13572,7 +13137,74 @@ mod tests {
         .await
         .unwrap();
         assert!(responses.lock().unwrap().is_empty());
+        assert_eq!(cloud_requests.load(std::sync::atomic::Ordering::SeqCst), 0);
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn credential_store_encrypts_and_requires_signer_and_worker_confirmation() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        let directory = tempfile::tempdir().unwrap();
+        let key = Arc::new(
+            DeviceKey::load_or_generate(directory.path().join("device").to_str().unwrap(), false)
+                .unwrap(),
+        );
+        let denied = Arc::new(AtomicBool::new(false));
+        let signer_denied = denied.clone();
+        let writes = Arc::new(AtomicUsize::new(0));
+        let observed_writes = writes.clone();
+        let router = Router::new()
+            .route("/v1/cap/cred-store", post(|| async { Json(serde_json::json!({"synthetic":"cap"})) }))
+            .route("/dev/sign-message", post(move || {
+                let denied = signer_denied.clone();
+                async move {
+                    if denied.load(Ordering::SeqCst) {
+                        (StatusCode::FORBIDDEN, Json(serde_json::json!({"error":"actor_mismatch"})))
+                    } else {
+                        (StatusCode::OK, Json(serde_json::json!({"address":"fixture","signature":hex::encode([7u8;65]),"key_version":1})))
+                    }
+                }
+            }))
+            .route("/v1/cred/store", post(move |headers: HeaderMap, Json(body): Json<agentkeys_backend_client::CredStoreBody>| {
+                let writes = observed_writes.clone();
+                async move {
+                    assert!(!headers.contains_key("authorization"));
+                    assert!(!headers.keys().any(|name| name.as_str().starts_with("x-aws-")));
+                    assert!(body.plaintext_b64.is_none());
+                    assert!(body.envelope_b64.is_some());
+                    Json(serde_json::json!({"ok":writes.fetch_add(1, Ordering::SeqCst)>0,"s3_key":"fixture","envelope_size":32}))
+                }
+            }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let task = tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+        let context = StorageContext {
+            broker: endpoint.clone(),
+            worker_url: endpoint.clone(),
+            j1: "synthetic-session".into(),
+            omni: "0xab".into(),
+            device_key: key,
+            signer_url: Some(endpoint),
+        };
+        assert!(
+            store_master_credential_inner(&context, "example", "synthetic-value")
+                .await
+                .is_err(),
+            "ok=false cannot confirm a write"
+        );
+        store_master_credential_inner(&context, "example", "synthetic-value")
+            .await
+            .unwrap();
+        denied.store(true, Ordering::SeqCst);
+        assert!(
+            store_master_credential_inner(&context, "example", "must-not-write")
+                .await
+                .is_err()
+        );
+        assert_eq!(writes.load(Ordering::SeqCst), 2);
+        task.abort();
     }
 
     #[test]
@@ -13756,7 +13388,6 @@ mod tests {
             "AgentKeys Test",
             Some("https://broker.example".into()),
             None,
-            None, // sts_provider — #514 (AWS relay path) // signer_url — none, the VE case
             84532,
             None,
             None,
@@ -13765,8 +13396,6 @@ mod tests {
             None,
             None,
             None,
-            None,
-            "us-east-1".into(),
             None,
             None,
             None,
@@ -13811,7 +13440,6 @@ mod tests {
             "AgentKeys Test",
             Some("https://broker.example".into()),
             None,
-            None, // sts_provider — #514, AWS relay path in unit tests
             84532,
             None,
             None,
@@ -13820,8 +13448,6 @@ mod tests {
             None,
             None,
             None,
-            None,
-            "us-east-1".into(),
             None,
             None,
             None,
@@ -14553,20 +14179,17 @@ mod tests {
             "AgentKeys Test",
             None,
             None,
-            None, // sts_provider — #514, AWS relay path in unit tests
             84532,
             None,
             None,
             None,
             None,
             None,
-            None, // sandbox_bridge_url — #390, no sandbox in unit tests
-            None, // sandbox_bridge_token
-            None, // audit_worker_url — tests never fetch real envelopes by default
-            "us-east-1".into(),
             None,
             None,
-            None, // #220 master_session_store — tests never persist to $HOME
+            None,
+            None,
+            None,
             None,
         )
         .unwrap()
@@ -14584,17 +14207,14 @@ mod tests {
             "AgentKeys Test",
             None,
             None,
-            None, // sts_provider — #514, AWS relay path in unit tests
             84532,
             None,
             None,
             None,
             None,
             None,
-            None, // sandbox_bridge_url — #390, no sandbox in unit tests
-            None, // sandbox_bridge_token
-            None, // audit_worker_url — tests never fetch real envelopes by default
-            "us-east-1".into(),
+            None,
+            None,
             None,
             Some(register_master_script),
             None,
@@ -14612,18 +14232,15 @@ mod tests {
             "AgentKeys Test",
             Some("https://broker.example".into()),
             None,
-            None, // sts_provider — #514 (AWS relay path)
             84532,
             None,
             None,
             None,
             None,
             None,
-            None, // sandbox_bridge_url — #390, no sandbox in unit tests
-            None, // sandbox_bridge_token
-            None, // audit_worker_url — tests never fetch real envelopes by default
-            "us-east-1".into(),
-            None, // master_device_key_hash — deliberately UNSET (derivation path)
+            None,
+            None,
+            None,
             None,
             store,
             None,
@@ -14977,17 +14594,14 @@ mod tests {
             "AgentKeys Test",
             Some(format!("http://{addr}")),
             None,
-            None, // sts_provider — #514 (AWS relay path)
             84532,
             None,
             None,
             None,
             None,
             None,
-            None, // sandbox_bridge_url — #390, no sandbox in unit tests
-            None, // sandbox_bridge_token
-            None, // audit_worker_url — tests never fetch real envelopes by default
-            "us-east-1".into(),
+            None,
+            None,
             None,
             None,
             Some(store),
@@ -15380,37 +14994,52 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn real_memory_ctx_errs_on_partial_config() {
-        // --memory-url set but MEMORY_ROLE_ARN missing ⇒ fail loud (issue #90),
-        // never a silent per-actor-isolation downgrade.
-        let state = build_state(
-            "localhost",
-            "http://localhost:3113",
-            "AgentKeys Test",
-            Some("https://broker.example".into()),
-            None,
-            None, // sts_provider — #514 (AWS relay path)
-            84532,
-            Some("https://memory.example".into()),
-            None,
-            None,
-            None,
-            None,
-            None, // sandbox_bridge_url — #390, no sandbox in unit tests
-            None, // sandbox_bridge_token
-            None, // audit_worker_url — tests never fetch real envelopes by default
-            "us-east-1".into(),
-            Some("0xdkh".into()),
-            None,
-            None, // #220 master_session_store
-            None,
-        )
-        .unwrap();
-        let err = match real_memory_ctx(&state).await {
-            Err(e) => e,
-            Ok(_) => panic!("expected real_memory_ctx to return Err"),
-        };
-        assert!(err.contains("MEMORY_ROLE_ARN"), "got: {err}");
+    async fn storage_contexts_require_keys_without_cloud_configuration() {
+        let mut state = make_state_real(None);
+        let mutable = Arc::get_mut(&mut state).unwrap();
+        mutable.memory_url = Some("http://127.0.0.1:1/memory".into());
+        mutable.config_url = Some("http://127.0.0.1:1/config".into());
+        mutable.cred_url = Some("http://127.0.0.1:1/credential".into());
+        *state.onboarding_session.write().await = Some(OnboardingSession {
+            email: "synthetic@example.test".into(),
+            omni: "11".repeat(32),
+            j1: "synthetic-session".into(),
+            wallet: "fixture".into(),
+            identity_only_reason: None,
+        });
+        assert!(real_memory_ctx(&state)
+            .await
+            .err()
+            .unwrap()
+            .contains("existing registered device key"));
+        assert!(real_config_ctx(&state)
+            .await
+            .err()
+            .unwrap()
+            .contains("existing registered device key"));
+        assert!(real_cred_ctx(&state)
+            .await
+            .err()
+            .unwrap()
+            .contains("existing registered device key"));
+        let directory = tempfile::tempdir().unwrap();
+        let key = Arc::new(
+            DeviceKey::load_or_generate(directory.path().join("device").to_str().unwrap(), false)
+                .unwrap(),
+        );
+        Arc::get_mut(&mut state).unwrap().device_key = Some(key.clone());
+        for (context, path) in [
+            (real_memory_ctx(&state).await, "memory"),
+            (real_config_ctx(&state).await, "config"),
+            (real_cred_ctx(&state).await, "credential"),
+        ] {
+            let context = context.unwrap().unwrap();
+            assert_eq!(context.worker_url, format!("http://127.0.0.1:1/{path}"));
+            assert_eq!(
+                context.device_key.device_key_hash().unwrap(),
+                key.device_key_hash().unwrap()
+            );
+        }
     }
 
     #[tokio::test]
@@ -15423,20 +15052,17 @@ mod tests {
             "AgentKeys Test",
             Some("https://broker.example".into()),
             None,
-            None, // sts_provider — #514 (AWS relay path)
             84532,
             Some("https://memory.example".into()),
-            Some("arn:aws:iam::1:role/memory".into()),
             None,
             None,
             None,
-            None, // sandbox_bridge_url — #390, no sandbox in unit tests
-            None, // sandbox_bridge_token
-            None, // audit_worker_url — tests never fetch real envelopes by default
-            "us-east-1".into(),
+            None,
+            None,
+            None,
             Some("0xdkh".into()),
             None,
-            None, // #220 master_session_store
+            None,
             None,
         )
         .unwrap();
@@ -16217,17 +15843,14 @@ mod tests {
             "AgentKeys Test",
             Some(format!("http://{addr}")),
             None,
-            None, // sts_provider — #514 (AWS relay path)
             84532,
             None,
             None,
             None,
             None,
             None,
-            None, // sandbox_bridge_url — #390, no sandbox in unit tests
-            None, // sandbox_bridge_token
-            None, // audit_worker_url — tests never fetch real envelopes by default
-            "us-east-1".into(),
+            None,
+            None,
             None,
             Some(tmp.path().join("master.sh").to_string_lossy().into_owned()),
             None,
@@ -16332,17 +15955,14 @@ mod tests {
             "AgentKeys Test",
             Some(format!("http://{addr}")),
             None,
-            None, // sts_provider — #514 (AWS relay path)
             84532,
             None,
             None,
             None,
             None,
             None,
-            None, // sandbox_bridge_url
-            None, // sandbox_bridge_token
-            None, // audit_worker_url
-            "us-east-1".into(),
+            None,
+            None,
             None,
             None,
             None,
@@ -16670,17 +16290,14 @@ mod tests {
             "AgentKeys Test",
             None,
             None,
-            None, // sts_provider — #514 (AWS relay path)
             84532,
             None,
             None,
             None,
             None,
             None,
-            None, // sandbox_bridge_url — #390, no sandbox in unit tests
-            None, // sandbox_bridge_token
-            None, // audit_worker_url — tests never fetch real envelopes by default
-            "us-east-1".into(),
+            None,
+            None,
             None,
             Some(tmp.path().join("master.sh").to_string_lossy().into_owned()),
             None,
@@ -16740,17 +16357,14 @@ mod tests {
             "AgentKeys Test",
             None,
             None,
-            None, // sts_provider — #514 (AWS relay path)
             84532,
             None,
             None,
             None,
             None,
             None,
-            None, // sandbox_bridge_url — #390, no sandbox in unit tests
-            None, // sandbox_bridge_token
-            None, // audit_worker_url — tests never fetch real envelopes by default
-            "us-east-1".into(),
+            None,
+            None,
             None,
             Some(tmp.path().join("master.sh").to_string_lossy().into_owned()),
             None,
@@ -16818,17 +16432,14 @@ mod tests {
             "AgentKeys Test",
             None,
             None,
-            None, // sts_provider — #514 (AWS relay path)
             84532,
             None,
             None,
             None,
             None,
             None,
-            None, // sandbox_bridge_url — #390, no sandbox in unit tests
-            None, // sandbox_bridge_token
-            None, // audit_worker_url — tests never fetch real envelopes by default
-            "us-east-1".into(),
+            None,
+            None,
             None,
             Some(tmp.path().join("master.sh").to_string_lossy().into_owned()),
             None,
@@ -16921,17 +16532,14 @@ mod tests {
             "AgentKeys Test",
             Some(format!("http://{addr}")),
             None,
-            None, // sts_provider — #514 (AWS relay path)
             84532,
             None,
             None,
             None,
             None,
             None,
-            None, // sandbox_bridge_url — #390, no sandbox in unit tests
-            None, // sandbox_bridge_token
-            None, // audit_worker_url — tests never fetch real envelopes by default
-            "us-east-1".into(),
+            None,
+            None,
             None,
             None,
             None,
@@ -17083,7 +16691,6 @@ mod tests {
             "AgentKeys Test",
             Some(format!("http://{addr}")),
             None,
-            None, // sts_provider — #514 (AWS relay path)
             84532,
             None,
             None,
@@ -17092,8 +16699,6 @@ mod tests {
             None,
             None,
             None,
-            None,
-            "us-east-1".into(),
             None,
             None,
             None,
@@ -17600,20 +17205,17 @@ mod tests {
             "AgentKeys Test",
             None,
             None,
-            None, // sts_provider — #514 (AWS relay path)
             84532,
             None,
             None,
-            Some("https://config.example".into()), // config_url set
-            None,                                  // CONFIG_ROLE_ARN missing → partial config
-            None,                                  // classify_url
-            None,                                  // sandbox_bridge_url — #390
-            None,                                  // sandbox_bridge_token
-            None,                                  // audit_worker_url
-            "us-east-1".into(),
+            Some("https://config.example".into()),
             None,
             None,
-            None, // #220 master_session_store
+            None,
+            None,
+            None,
+            None,
+            None,
             None,
         )
         .unwrap();
@@ -17830,17 +17432,14 @@ mod tests {
             "AgentKeys Test",
             None,
             None,
-            None, // sts_provider — #514 (AWS relay path)
             84532,
             None,
             None,
             None,
             None,
             None,
-            None,                              // sandbox_bridge_url — #390
-            None,                              // sandbox_bridge_token
-            Some("http://127.0.0.1:9".into()), // audit_worker_url — closed port
-            "us-east-1".into(),
+            None,
+            Some("http://127.0.0.1:9".into()),
             None,
             None,
             None,
@@ -18048,20 +17647,17 @@ mod tests {
             "AgentKeys Test",
             None,
             None,
-            None, // sts_provider — #514 (AWS relay path)
             84532,
             None,
             None,
             None,
             None,
             None,
-            None, // sandbox_bridge_url — #390, no sandbox in unit tests
-            None, // sandbox_bridge_token
-            None, // audit_worker_url — tests never fetch real envelopes by default
-            "us-east-1".into(),
+            None,
+            None,
             None,
             Some(script),
-            None, // #220 master_session_store
+            None,
             None,
         )
         .unwrap();
@@ -18485,9 +18081,9 @@ pub(crate) async fn context_doc_store(
     let key = agentkeys_backend_client::protocol::CONTEXT_ENTRY_KEY;
     let backend = persona_backend(state).await.map_err(|(_, e)| e)?;
     let mut entries: VersionedConfig<Vec<StoredMemoryEntry>> = match &backend {
-        PersonaBackend::Real(ctx, creds) => {
+        PersonaBackend::Real(ctx) => {
             let client = reqwest::Client::new();
-            memory_get_ns_hashed_real(&client, ctx, creds, memory_ns)
+            memory_get_ns_hashed_real(&client, ctx, memory_ns)
                 .await?
                 .map(|(entries, revision)| VersionedConfig::new(entries, revision))
                 .unwrap_or_default()
@@ -18516,18 +18112,11 @@ pub(crate) async fn context_doc_store(
     };
     entries.push(entry.clone());
     match &backend {
-        PersonaBackend::Real(ctx, creds) => {
+        PersonaBackend::Real(ctx) => {
             let client = reqwest::Client::new();
-            memory_put_ns_real(
-                &client,
-                ctx,
-                creds,
-                memory_ns,
-                &entries,
-                Some(&entries.revision),
-            )
-            .await
-            .map(|_| "durable")
+            memory_put_ns_real(&client, ctx, memory_ns, &entries, Some(&entries.revision))
+                .await
+                .map(|_| "durable")
         }
         PersonaBackend::Cache => {
             let mut cache = state.master_memory.write().await;
@@ -18553,9 +18142,9 @@ pub(crate) async fn context_doc_load(
         PersonaBackend::Cache => "cache",
     };
     let entries: Vec<StoredMemoryEntry> = match &backend {
-        PersonaBackend::Real(ctx, creds) => {
+        PersonaBackend::Real(ctx) => {
             let client = reqwest::Client::new();
-            memory_get_ns_real(&client, ctx, creds, memory_ns)
+            memory_get_ns_real(&client, ctx, memory_ns)
                 .await?
                 .unwrap_or_default()
         }

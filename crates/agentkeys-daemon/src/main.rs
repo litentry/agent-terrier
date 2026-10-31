@@ -291,15 +291,6 @@ struct Args {
     #[arg(long, env = "AGENTKEYS_SIGNER_URL")]
     signer_url: Option<String>,
 
-    /// #514 — which credential plane mints data-class STS credentials.
-    /// `ve` routes every data mint through the SIGNER's `/dev/sign-sts` (the
-    /// signer holds the cloud AK/SK and independently validates the intent —
-    /// ADR `docs/spec/stacks/ve-sts-signing-split.md`). Unset/anything else
-    /// keeps the AWS anonymous relay. Same env var the broker reads, so the
-    /// two components can never disagree about which cloud they are on.
-    #[arg(long, env = "AGENTKEYS_STS_PROVIDER")]
-    sts_provider: Option<String>,
-
     /// SIWE chain_id for the signer-flow bootstrap. Default mirrors
     /// the broker's wallet_sig plug-in test vectors (Base Sepolia).
     #[arg(long, default_value_t = 84532)]
@@ -312,22 +303,15 @@ struct Args {
     #[arg(long, env = "AGENTKEYS_WORKER_MEMORY_URL")]
     memory_url: Option<String>,
 
-    /// W3 real-memory: per-actor memory IAM role ARN for the STS relay (sourced from
-    /// operator-workstation.env). Required alongside --memory-url for the real chain.
-    #[arg(long, env = "MEMORY_ROLE_ARN")]
-    memory_role_arn: Option<String>,
+    /// Credential worker endpoint.
+    #[arg(long, env = "AGENTKEYS_WORKER_CRED_URL")]
+    cred_url: Option<String>,
 
     /// #201 config data class: the config worker base URL (e.g. https://config.example.invalid).
     /// Unset ⇒ the master-memory list derives categories from the in-memory cache instead of
     /// the durable, master-only Config-class taxonomy (config/memory-taxonomy.enc); dev/no-infra.
     #[arg(long, env = "AGENTKEYS_WORKER_CONFIG_URL")]
     config_url: Option<String>,
-
-    /// #201 config data class: per-actor config IAM role ARN for the STS relay (CONFIG_ROLE_ARN,
-    /// sourced from operator-workstation.env). Required alongside --config-url for the real
-    /// taxonomy chain; a partial config fails loud (issue #90 discipline).
-    #[arg(long, env = "CONFIG_ROLE_ARN")]
-    config_role_arn: Option<String>,
 
     /// #207 classifier-service: the classify worker base URL (e.g. https://classify.example.invalid).
     /// Set ⇒ classification (cred auto-categorize #207 item 7, connect-time auto-distribute
@@ -357,10 +341,6 @@ struct Args {
     /// operator configures it explicitly (#317).
     #[arg(long, env = "AGENTKEYS_AUDIT_WORKER_URL", default_value = "")]
     audit_worker_url: String,
-
-    /// W3 real-memory: AWS region for the STS relay.
-    #[arg(long, env = "REGION", default_value = "us-east-1")]
-    region: String,
 
     /// W3 real-memory: the on-chain-registered master device key hash (the cap-mint
     /// device binding). Must match the device registered via the W3 bootstrap.
@@ -1407,21 +1387,16 @@ async fn run_ui_bridge_mode(args: Args) -> anyhow::Result<()> {
         &args.ui_bridge_rp_name,
         args.broker_url.clone(),
         args.signer_url.clone(),
-        args.sts_provider.clone(),
         args.init_chain_id,
         args.memory_url.clone(),
-        args.memory_role_arn.clone(),
+        args.cred_url.clone(),
         args.config_url.clone(),
-        args.config_role_arn.clone(),
         args.classify_url.clone(),
         args.sandbox_bridge_url.clone(),
         args.sandbox_bridge_token.clone(),
         Some(args.audit_worker_url.clone()).filter(|u| !u.trim().is_empty()),
-        args.region.clone(),
         args.master_device_key_hash.clone(),
         args.register_master_script.clone(),
-        // Issue #220: root master-session persistence at ~/.agentkeys (None when no
-        // $HOME resolves → persistence disabled, never a surprising relative path).
         master_session::MasterSessionStore::from_home_env(),
         device_key,
     )
