@@ -24,11 +24,6 @@ pub mod sponsored_accept;
 pub mod state;
 pub mod storage;
 pub mod sts;
-// #512: ve_sign moved to agentkeys-core (the signer needs it too — one signer
-// codebase, both stacks). Re-exported so `crate::ve_sign::…` and the live
-// conformance test's `agentkeys_broker_server::ve_sign::…` paths keep working.
-pub use agentkeys_core::ve_sign;
-pub mod ve_sts;
 
 use axum::{
     extract::DefaultBodyLimit,
