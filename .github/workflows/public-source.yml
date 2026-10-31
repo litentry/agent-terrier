@@ -5,14 +5,61 @@ on:
     branches: [main]
 permissions:
   contents: read
+concurrency:
+  group: public-checks-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
   public-source:
     runs-on: ubuntu-latest
     timeout-minutes: 3
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
       - name: Run the canonical source lane
         run: python3 terrier test source --report "${RUNNER_TEMP}/source-lane.json"
       - name: Summarize timings
         if: always()
         run: python3 scripts/test-timing-summary.py "${RUNNER_TEMP}/source-lane.json" >> "${GITHUB_STEP_SUMMARY}"
+  core-security:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Restore public Rust build cache
+        id: rust-cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: |
+            ~/.cargo/registry
+            target/debug/deps
+            target/debug/build
+            target/debug/.fingerprint
+          key: core-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', '**/Cargo.toml') }}
+      - name: Install the repository-pinned toolchain
+        run: env -u RUSTUP_TOOLCHAIN rustup toolchain install --no-self-update
+      - name: Run core security checks
+        run: python3 terrier test core --online --report "${RUNNER_TEMP}/core-lane.json"
+      - name: Summarize timings
+        if: always()
+        run: python3 scripts/test-timing-summary.py "${RUNNER_TEMP}/core-lane.json" >> "${GITHUB_STEP_SUMMARY}"
+      - name: Retain the structured report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: core-security-timing
+          path: ${{ runner.temp }}/core-lane.json
+          if-no-files-found: error
+          retention-days: 7
+      - name: Save trusted public dependency cache
+        if: success() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.rust-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: |
+            ~/.cargo/registry
+            target/debug/deps
+            target/debug/build
+            target/debug/.fingerprint
+          key: ${{ steps.rust-cache.outputs.cache-primary-key }}
