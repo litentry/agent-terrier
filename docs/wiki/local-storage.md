@@ -1,4 +1,4 @@
-The local object service is a qualified storage component. The credential and configuration workers use it for encrypted data operations. Integration with the other workers, product clients, broker sessions and complete local application remains open in [#5](https://github.com/litentry/agent-terrier/issues/5).
+The local object service is a qualified storage component. The credential, configuration and memory workers use it for encrypted data operations. Integration with the other workers, product clients, broker sessions and complete local application remains open in [#5](https://github.com/litentry/agent-terrier/issues/5).
 
 ## Ownership and boundaries
 
@@ -55,6 +55,23 @@ python3 scripts/tests/qualify_local_config.py
 ```
 
 The shared Rust integration target belongs to `agentkeys-worker-creds` and covers both workers. It checks real SQLite writes, owner-only denial before storage access, independent storage denial, concurrent revision conflicts, ciphertext-only storage, v3 passthrough without a worker key, and deletion failures. The explicit qualifier runs the configuration executable against real local contracts, then restarts it and revokes the delegate's grant and device while retaining owner access. Its issuer is a fixture; broker login/mint and the complete application remain separate acceptance work.
+
+### Memory and proposal inboxes
+
+The memory worker uses the same local startup options and requires `--development-kek-file`. Use its own protected key and a database bound to the `memory` data class. It encrypts development memory and proposal records; client-encrypted v3 memory is not implemented. The worker no longer obtains storage credentials from a broker or cloud account.
+
+Own-memory reads and writes stay within the caller's signed service and actor prefix. Canonical reads need the distinct canonical-fetch capability and address one owner knowledge object; they cannot select a checkpoint sub-key. The request's `namespace` is a client hint: the signed service controls storage and encryption context. Conditional writes compare the caller's expected plaintext hash and use an atomic storage revision to reject competing updates with `409 stale_base`.
+
+A proposal grant permits append only. The worker stamps provenance from the signed actor and service, and repeating an existing proposal returns `409 object_revision_conflict` without overwriting it. The owner lists and reads the inbox with a fetch capability for `inbox`. Lists follow storage pagination and return an error for unreadable records instead of silently omitting them. Deleting a proposal requires an owner capability from `/v1/cap/memory-inbox-delete`, with the signed teardown operation. That capability is confined to inbox objects; it cannot delete canonical or working memory.
+
+Run locally from the public checkout after preparing the contract cache and CLI:
+
+```bash
+cargo test -p agentkeys-worker-creds --test local_storage
+python3 scripts/tests/qualify_local_memory.py
+```
+
+The shared deterministic fixture exercises own/canonical separation, keyed checkpoints, competing writes, proposal provenance, append-only behavior and read-versus-delete denials at both worker and storage boundaries. The explicit qualifier uses the actual memory executable and local contracts for canonical access, persistence and real scope/device revocation. Its issuer is still a test fixture, so complete broker-session and product-client acceptance remains pending.
 
 ### Object service
 

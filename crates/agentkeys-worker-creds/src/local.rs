@@ -25,6 +25,16 @@ pub struct LocalWorkerOptions {
     listen: SocketAddr,
 }
 
+impl LocalWorkerOptions {
+    pub fn require_development_key(&self) -> Result<()> {
+        ensure!(
+            self.development_kek_file.is_some(),
+            "this worker requires --development-kek-file"
+        );
+        Ok(())
+    }
+}
+
 pub async fn serve(
     options: LocalWorkerOptions,
     router: fn(Arc<WorkerState>) -> axum::Router,

@@ -554,14 +554,14 @@ impl DataClient {
         s3_key: &str,
     ) -> Result<(), DataError> {
         let cap = self
-            .cap_mint(session, CapMintOp::MemoryGet, "inbox")
+            .cap_mint(session, CapMintOp::MemoryInboxDelete, "inbox")
             .await?;
         let response: agentkeys_protocol::InboxDeleteResp = self
             .worker(
                 session,
                 endpoint(&self.endpoints.memory_url, "/v1/memory/inbox-delete"),
                 "memory",
-                &["get", "delete"],
+                &["delete"],
                 &agentkeys_protocol::InboxDeleteBody {
                     cap,
                     s3_key: s3_key.into(),
@@ -876,6 +876,7 @@ mod tests {
             .route("/dev/sign-message", post(sign))
             .route("/v1/cap/memory-get", post(cap))
             .route("/v1/cap/memory-put", post(cap))
+            .route(CapMintOp::MemoryInboxDelete.broker_path(), post(cap))
             .route("/v1/memory/inbox-get", post(get_inbox))
             .route("/v1/memory/inbox-delete", post(delete_inbox))
             .route("/v1/memory/get", post(get_memory))

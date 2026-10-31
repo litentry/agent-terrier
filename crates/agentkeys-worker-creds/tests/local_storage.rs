@@ -712,6 +712,200 @@ async fn configuration_without_development_key_only_accepts_client_encrypted_obj
     assert_eq!(fixture.snapshot(), stored);
 }
 
+#[tokio::test]
+async fn memory_separates_own_canonical_and_append_only_inbox_authority() {
+    let fixture = Fixture::new_for(
+        DataClass::Memory,
+        agentkeys_worker_memory::handlers::build_router,
+        true,
+    )
+    .await;
+    let cap = |owner, op, service: &str| {
+        let mut cap = fixture.cap(owner, op);
+        cap.payload.service = service.into();
+        fixture.sign(&mut cap, owner);
+        cap
+    };
+    let put = |owner, value: &[u8], object_key: Option<&str>, expected: Option<&str>| serde_json::json!({"cap":cap(owner, CapOp::Store, "knowledge:notes"), "namespace":"notes", "plaintext_b64":STANDARD.encode(value), "object_key":object_key, "expected_content_hash":expected});
+    let read = |owner, op, object_key: Option<&str>| serde_json::json!({"cap":cap(owner, op, "knowledge:notes"), "namespace":"notes", "object_key":object_key});
+    for (owner, value) in [
+        (true, b"canonical".as_slice()),
+        (false, b"working".as_slice()),
+    ] {
+        let (status, body) = fixture
+            .call_body("/v1/memory/put", put(owner, value, None, Some("")))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+    for (route, op, value) in [
+        ("/v1/memory/get", CapOp::Fetch, b"working".as_slice()),
+        (
+            "/v1/memory/canonical-get",
+            CapOp::CanonicalFetch,
+            b"canonical".as_slice(),
+        ),
+    ] {
+        let (status, body) = fixture.call_body(route, read(false, op, None)).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(
+            STANDARD
+                .decode(body["plaintext_b64"].as_str().unwrap())
+                .unwrap(),
+            value
+        );
+    }
+    let (status, body) = fixture
+        .call_body(
+            "/v1/memory/put",
+            put(false, b"checkpoint", Some("checkpoint/dsh-home"), Some("")),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body) = fixture
+        .call_body(
+            "/v1/memory/get",
+            read(false, CapOp::Fetch, Some("checkpoint/dsh-home")),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        STANDARD
+            .decode(body["plaintext_b64"].as_str().unwrap())
+            .unwrap(),
+        b"checkpoint"
+    );
+    let before = fixture.snapshot();
+    let calls = fixture.storage.calls.load(Ordering::SeqCst);
+    let (status, body) = fixture
+        .call_body(
+            "/v1/memory/canonical-get",
+            read(false, CapOp::CanonicalFetch, Some("checkpoint/dsh-home")),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["reason"], "object_key_on_canonical");
+    assert_eq!(fixture.storage.calls.load(Ordering::SeqCst), calls);
+    assert_eq!(fixture.snapshot(), before);
+    let expected = agentkeys_worker_creds::audit::keccak_hex(b"working");
+    let (first, second) = tokio::join!(
+        fixture.call_body(
+            "/v1/memory/put",
+            put(false, b"first", None, Some(&expected))
+        ),
+        fixture.call_body(
+            "/v1/memory/put",
+            put(false, b"second", None, Some(&expected))
+        )
+    );
+    assert_eq!(
+        [first.0, second.0]
+            .iter()
+            .filter(|status| **status == StatusCode::OK)
+            .count(),
+        1
+    );
+    assert_eq!(
+        [first.0, second.0]
+            .iter()
+            .filter(|status| **status == StatusCode::CONFLICT)
+            .count(),
+        1
+    );
+    let client = ObjectClient::new(fixture.storage.clone());
+    let canonical = format!("bots/{}/memory/knowledge:notes.enc", "11".repeat(32));
+    assert!(matches!(
+        client
+            .get(&cap(false, CapOp::Fetch, "knowledge:notes"), &canonical)
+            .await,
+        Err(ObjectError::Denied)
+    ));
+    assert!(matches!(
+        client
+            .put(
+                &cap(false, CapOp::Store, "knowledge:notes"),
+                &canonical,
+                b"forbidden",
+                None
+            )
+            .await,
+        Err(ObjectError::Denied)
+    ));
+
+    let proposal = || serde_json::json!({"cap":cap(false, CapOp::Append, "proposal:notes"), "key":"lesson", "plaintext_b64":STANDARD.encode(PLAINTEXT), "kind":"knowledge"});
+    let (status, body) = fixture
+        .call_body("/v1/memory/inbox-append", proposal())
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let key = body["s3_key"].as_str().unwrap().to_string();
+    let before = fixture.snapshot();
+    let (status, body) = fixture
+        .call_body("/v1/memory/inbox-append", proposal())
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["reason"], "object_revision_conflict");
+    assert_eq!(fixture.snapshot(), before);
+    let (status, body) = fixture
+        .call_body(
+            "/v1/memory/inbox-list",
+            serde_json::json!({"cap":cap(true, CapOp::Fetch, "inbox")}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["items"].as_array().unwrap().len(), 1);
+    assert_eq!(body["items"][0]["source_delegate_omni"], "22".repeat(32));
+    assert_eq!(body["items"][0]["ns"], "notes");
+    let (status, body) = fixture
+        .call_body(
+            "/v1/memory/inbox-get",
+            serde_json::json!({"cap":cap(true, CapOp::Fetch, "inbox"), "s3_key":key}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        STANDARD
+            .decode(body["item"]["body_b64"].as_str().unwrap())
+            .unwrap(),
+        PLAINTEXT
+    );
+    for (owner, operation, reason) in [
+        (true, CapOp::Fetch, "cap_op_mismatch"),
+        (false, CapOp::Teardown, "inbox_not_master_self"),
+    ] {
+        let calls = fixture.storage.calls.load(Ordering::SeqCst);
+        let (status, body) = fixture
+            .call_body(
+                "/v1/memory/inbox-delete",
+                serde_json::json!({"cap":cap(owner, operation, "inbox"), "s3_key":key}),
+            )
+            .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+        assert_eq!(body["reason"], reason);
+        assert_eq!(fixture.storage.calls.load(Ordering::SeqCst), calls);
+        assert_eq!(fixture.snapshot(), before);
+    }
+    assert!(matches!(
+        client
+            .delete(&cap(true, CapOp::Fetch, "inbox"), &key, None)
+            .await,
+        Err(ObjectError::Denied)
+    ));
+    assert!(matches!(
+        client
+            .delete(&cap(true, CapOp::Teardown, "inbox"), &canonical, None)
+            .await,
+        Err(ObjectError::Denied)
+    ));
+    let (status, body) = fixture
+        .call_body(
+            "/v1/memory/inbox-delete",
+            serde_json::json!({"cap":cap(true, CapOp::Teardown, "inbox"), "s3_key":key}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["deleted"], true);
+    assert_eq!(fixture.snapshot().len(), before.len() - 1);
+}
+
 struct WorkerProcess {
     child: tokio::process::Child,
     url: String,
@@ -775,6 +969,9 @@ impl WorkerProcess {
         if store {
             body["plaintext_b64"] = STANDARD.encode(PLAINTEXT).into();
         }
+        if route.starts_with("/v1/memory/") {
+            body["namespace"] = "notes".into();
+        }
         let response = reqwest::Client::builder()
             .no_proxy()
             .build()
@@ -798,6 +995,12 @@ async fn real_chain_credential_worker() {
 #[ignore = "requires the explicit real-chain configuration qualification fixture"]
 async fn real_chain_config_worker() {
     qualify_real_worker(DataClass::Config).await;
+}
+
+#[tokio::test]
+#[ignore = "requires the explicit real-chain memory qualification fixture"]
+async fn real_chain_memory_worker() {
+    qualify_real_worker(DataClass::Memory).await;
 }
 
 async fn qualify_real_worker(data_class: DataClass) {
@@ -860,15 +1063,35 @@ async fn qualify_real_worker(data_class: DataClass) {
     let cap = |key: &DeviceKey, actor: &str, op| {
         let mut cap = cap_for(&signer, key, &operator, actor, op);
         cap.payload.data_class = data_class;
+        if data_class == DataClass::Memory {
+            cap.payload.service = "knowledge:notes".into();
+        }
         sign_cap(&signer, key, &mut cap);
         cap
     };
     let owner_cap = |op| cap(&owner, &operator, op);
-    let agent_cap = |op| cap(&agent, &enrollment.actor_omni, op);
+    let agent_cap = |op| {
+        cap(
+            &agent,
+            &enrollment.actor_omni,
+            if data_class == DataClass::Memory && op == CapOp::Fetch {
+                CapOp::CanonicalFetch
+            } else {
+                op
+            },
+        )
+    };
     let (put_route, get_route) = if data_class == DataClass::Config {
         ("/v1/config/put", "/v1/config/get")
+    } else if data_class == DataClass::Memory {
+        ("/v1/memory/put", "/v1/memory/get")
     } else {
         ("/v1/cred/store", "/v1/cred/fetch")
+    };
+    let agent_get_route = if data_class == DataClass::Memory {
+        "/v1/memory/canonical-get"
+    } else {
+        get_route
     };
     let snapshot = || {
         let connection = rusqlite::Connection::open_with_flags(
@@ -890,7 +1113,9 @@ async fn qualify_real_worker(data_class: DataClass) {
     if phase == "active" {
         let (status, body) = worker.call(put_route, owner_cap(CapOp::Store), true).await;
         assert_eq!(status, StatusCode::OK, "{body}");
-        let (status, body) = worker.call(get_route, agent_cap(CapOp::Fetch), false).await;
+        let (status, body) = worker
+            .call(agent_get_route, agent_cap(CapOp::Fetch), false)
+            .await;
         if data_class == DataClass::Config {
             assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
             assert_eq!(body["reason"], "config_not_master_self");
@@ -927,11 +1152,15 @@ async fn qualify_real_worker(data_class: DataClass) {
                     sign_cap(&signer, &agent, &mut cap);
                 }
                 _ => {
-                    cap.payload.data_class = DataClass::Memory;
+                    cap.payload.data_class = if data_class == DataClass::Memory {
+                        DataClass::Config
+                    } else {
+                        DataClass::Memory
+                    };
                     sign_cap(&signer, &agent, &mut cap);
                 }
             }
-            let (status, body) = worker.call(get_route, cap, false).await;
+            let (status, body) = worker.call(agent_get_route, cap, false).await;
             assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
             assert_eq!(body["reason"], reason);
             assert!(body.get("plaintext_b64").is_none());
@@ -947,7 +1176,9 @@ async fn qualify_real_worker(data_class: DataClass) {
         .await;
     } else {
         let before = snapshot();
-        let (status, body) = worker.call(get_route, agent_cap(CapOp::Fetch), false).await;
+        let (status, body) = worker
+            .call(agent_get_route, agent_cap(CapOp::Fetch), false)
+            .await;
         assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
         assert_eq!(
             body["reason"],

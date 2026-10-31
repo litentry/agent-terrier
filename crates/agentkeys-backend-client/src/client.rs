@@ -829,7 +829,7 @@ impl BackendClient {
     }
 
     /// `POST /v1/memory/inbox-delete` — the MASTER GCs one inbox proposal after
-    /// curating it (delete-on-accept / discard-on-reject). Master-self.
+    /// curating it. Requires an owner capability minted with `CapMintOp::MemoryInboxDelete`.
     pub async fn memory_inbox_delete(
         &self,
         cap: CapToken,
