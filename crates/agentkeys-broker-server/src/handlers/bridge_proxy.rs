@@ -1,19 +1,13 @@
-//! `POST /v1/agent/bridge` — the broker-mediated path to ONE delegate's
-//! in-sandbox bridge (#715). The console used to call the veFaaS gateway
-//! directly (`agent_url` + `x-faas-instance-name`); that gateway now demands
-//! the function's secret token, which is STACK-WIDE (one token, every
-//! household's sandboxes) and therefore never leaves the broker host. The
-//! broker holds it, and it also derives the per-delegate in-pod bearer
-//! (`sandbox_bridge_token`) the bridge's chat/context routes require — so the
-//! console (any J1_master holder) reaches exactly the delegates it OWNS, on
-//! exactly the bridge routes the console needs, and nothing else.
+//! `POST /v1/agent/bridge` — the broker-mediated path to an owned delegate's
+//! bridge. The broker derives the per-delegate `sandbox_bridge_token`; the
+//! console supplies its owner session and never receives that bridge token.
 //!
 //! Authority chain per request: J1 session (operator match) → on-chain
 //! ownership + tier probe of `device_key_hash` (D1: the chain is the registry;
 //! the broker keeps no per-operator delegate index) → the delegate's LIVE
 //! instance (the named one when given, else the live one) → the allowlisted
-//! path → forward through the backend's routing headers (+ the gateway
-//! credential) with the derived bridge bearer → the upstream's status + JSON
+//! path → forward through the runtime backend with the derived bridge bearer
+//! → the upstream's status + JSON
 //! body verbatim. The `/v1/sandbox/mgmt/*` surface is deliberately NOT
 //! reachable here: the runtime-home export/import is the broker's own #577
 //! business under its own token. The request shape is

@@ -927,10 +927,8 @@ export function apply(ctx: Context, config: Config): void {
   for (const route of routes) {
     ctx.effect(() => ctx.webServer.register(route), `agentkeys-bridge: ${route.path}`);
   }
-  // Bind-first (#589): the webserver listens on activation and the agent session
-  // is created in the BACKGROUND (not awaited), so the port answers within the
-  // veFaaS budget; /healthz reads 503 `starting` until it exists. A session
-  // import disposes it and the next /v1/chat re-creates it.
+  // Listen before session creation; /healthz reports 503 until it is ready.
+  // Import disposes the session, and the next chat request re-creates it.
   void ensureAgent();
 
   const sweepTimer = setInterval(() => void sweepIdle().catch(() => {}), config.sessionSweepMs ?? 60_000);

@@ -191,8 +191,7 @@ pub struct K10RotateBody {
     pub new_device_key_hash: String,
 }
 
-/// #377 — the broker spawned a veFaaS delegate-sandbox instance for a delegate
-/// device (create-on-pair at §10.2 poll, or ensure-on-resolve at #367 boot).
+/// The broker created a delegate runtime during pairing or resolution.
 /// Emitted only when an instance was actually CREATED — an idempotent ensure
 /// that found an existing live instance is a no-op and emits nothing.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -200,15 +199,14 @@ pub struct SandboxSpawnBody {
     /// `keccak256(K10_pubkey || 0x01)` — the delegate the instance is keyed to
     /// (the `agentkeys_device_key_hash` Metadata label on the instance).
     pub device_key_hash: String,
-    /// The veFaaS `SandboxId` of the spawned instance.
+    /// The runtime backend's instance identifier.
     pub sandbox_id: String,
-    /// The sandbox application (`FunctionId`) the instance runs under.
+    /// The runtime backend's application identifier.
     pub function_id: String,
 }
 
-/// #377 — the broker killed a delegate's sandbox instance. Today's only
-/// broker-driven reason is `"unpair"` (a confirmed `revokeAgentDevice`);
-/// veFaaS-side timeout expiry is not broker-observed and emits nothing.
+/// The broker tore down a delegate runtime after confirmed revocation.
+/// This event does not report exits outside broker-driven teardown.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SandboxTeardownBody {
     pub device_key_hash: String,

@@ -670,12 +670,8 @@ impl ReconcileStats {
 /// #694 workspace checkpoint restores it beside the engine index), and the
 /// next pass rebuilds from canonical.
 ///
-/// A veFaaS pod starts the daemon with NO `HOME` (the pod env is the function
-/// template + instance envs, and supervisord's `user=` switch sets none —
-/// measured, the #651 class). The old `$HOME`-else-`"."` default therefore
-/// resolved `./.agentkeys/ov-ingested.txt` against the daemon's cwd `/`, which
-/// `gem` cannot create: no rows were ever recorded, and every pass rewrote —
-/// and the engine re-embedded — every granted item (VE prod, to 2026-10-04).
+/// Missing `HOME` must not make the manifest relative to a potentially
+/// unwritable working directory; losing it would repeat ingestion each pass.
 pub fn ingest_manifest_from_env() -> std::path::PathBuf {
     ingest_manifest_path(
         std::env::var("AGENTKEYS_OV_INGEST_MANIFEST")
@@ -904,7 +900,7 @@ mod tests {
     fn the_manifest_path_never_resolves_against_the_working_directory() {
         use std::path::{Path, PathBuf};
         let temp = Path::new("/tmp");
-        // The veFaaS pod: no HOME, so the account's home answers.
+        // An absent HOME can still resolve through the account database.
         assert_eq!(
             ingest_manifest_path(None, Some(Path::new("/home/gem")), temp),
             PathBuf::from("/home/gem/.agentkeys/ov-ingested.txt")
@@ -925,9 +921,7 @@ mod tests {
         }
     }
 
-    /// The pod condition itself: the env wrapper, run in a child process with
-    /// `HOME` removed (what veFaaS + supervisord hand the daemon), resolves an
-    /// absolute path — the old default answered `./.agentkeys/ov-ingested.txt`.
+    /// The environment wrapper resolves an absolute path without HOME.
     #[test]
     fn a_home_less_process_resolves_an_absolute_manifest() {
         const PROBE: &str = "AGENTKEYS_OV_MANIFEST_PROBE";

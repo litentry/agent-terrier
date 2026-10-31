@@ -11,9 +11,9 @@
 //!
 //! `agent_url` is the device's assigned runtime (its dsh-sandbox bridge).
 //! When the broker carries sandbox-lifecycle config (#377), resolve ALSO
-//! ensures the delegate's veFaaS instance exists (idempotent spawn — the
+//! ensures the delegate's runtime exists (idempotent spawn — the
 //! create-on-boot half of "create-on-pair, broker-driven") and returns the
-//! gateway URL as `agent_url`, plus a `sandbox` object reporting this call's
+//! bridge URL as `agent_url`, plus a `sandbox` object reporting this call's
 //! ensure outcome (a spawn failure rides in `sandbox.error`; the resolve
 //! itself still succeeds — the device needs its JWT regardless). On hosts
 //! without sandbox config it stays `null` and the device falls back to its
@@ -29,12 +29,7 @@ use crate::handlers::cap::{call_get_device, ChainContracts};
 use crate::jwt::issue::mint_agent_session_jwt;
 use crate::state::SharedState;
 
-/// How long a delegate resolve waits on its sandbox ensure before answering
-/// with the session alone; the ensure runs on its own task and continues. The
-/// in-sandbox daemon resolves with a 40 s client timeout (`chat_loop.rs`), and
-/// a veFaaS cold-start adopt runs minutes: on 2026-09-28 chef's replacement
-/// sandbox resolved in a loop for 150 s while its own adopt held the ensure,
-/// and its checkpoint restore gives up after 180 s without a session.
+/// Bound the session response wait while runtime creation continues separately.
 const RESOLVE_ENSURE_WAIT: std::time::Duration = std::time::Duration::from_secs(20);
 
 #[derive(Debug, Deserialize)]
@@ -133,7 +128,7 @@ pub async fn agent_resolve(
 
     // 4. #377: a DELEGATE needs its runtime — ensure its dsh-sandbox instance
     //    exists (idempotent; extends the lifetime of a live one). Best-effort
-    //    against the resolve: a veFaaS failure is surfaced in `sandbox.error`,
+    //    against the resolve: a runtime failure is surfaced in `sandbox.error`,
     //    never a resolve failure. #409 D9: a channel-endpoint DEVICE never
     //    spawns — the boot-path twin of the `poll.rs` scope_is_device_only gate.
     let provision = if body.is_device {

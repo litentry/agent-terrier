@@ -80,9 +80,7 @@ pub struct MirrorConfig {
     pub interval: Duration,
     /// How long the FIRST pass waits for the engine's `/health` before judging
     /// it (`AGENTKEYS_MEMORY_MIRROR_ENGINE_WAIT_SECS`, default 90, 0..=600).
-    /// The engine boots after the daemon (supervisord priority), so a first
-    /// pass that judged it before it listened stamped `degraded` for a whole
-    /// interval — measured 2026-09-18: 12 s after boot, `ready` 5 min later.
+    /// Allows the engine to become ready independently of daemon startup.
     pub first_pass_engine_wait: Duration,
     pub engine: OpenVikingClient,
     pub manifest: std::path::PathBuf,
@@ -635,9 +633,7 @@ async fn run_loop(cfg: MirrorConfig, credential: Arc<DelegateCredential>) {
                 tokio::time::sleep(Duration::from_secs(2)).await;
                 continue;
             }
-            // The engine starts after this daemon (supervisord priority), and
-            // again whenever the checkpoint lets it go after holding it for
-            // its workspace restore: give that `/health` a bounded wait before
+            // Give engine startup or checkpoint restoration a bounded wait before
             // judging it, so the report is `ready`, not a `degraded` that
             // stands for a whole interval.
             let released_for = cfg

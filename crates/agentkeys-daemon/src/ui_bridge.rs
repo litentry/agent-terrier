@@ -1201,10 +1201,9 @@ async fn auth_email_status(
                 },
                 None => {
                     tracing::error!(
-                        "ui-bridge: no --signer-url configured — holding an IDENTITY-ONLY \
-                         session: memory + config will be unavailable. Point the daemon at \
-                         this STACK's signer (dev.sh reads SIGNER_HOST/VE_SIGNER_HOST from the \
-                         operator env file)"
+                        "ui-bridge: no --signer-url configured — holding an identity-only \
+                         session: memory and config will be unavailable. Configure the \
+                         explicit local signer endpoint with --signer-url."
                     );
                     OnboardingSession {
                         email,
@@ -6489,9 +6488,7 @@ pub(crate) async fn spawn_submit_core(
                 .pointer("/sandbox/sandbox_id")
                 .and_then(|v| v.as_str())
                 .map(str::to_string);
-            // The delegate's bridge base rides in the spawn response (the
-            // veFaaS gateway / per-task ENI) — derived, so a laptop daemon
-            // needs no AGENTKEYS_SANDBOX_BRIDGE_URL to distribute presets.
+            // Reuse the runtime's reported bridge endpoint for preset delivery.
             let agent_url = spawned
                 .pointer("/sandbox/agent_url")
                 .and_then(|v| v.as_str())
@@ -11445,11 +11442,7 @@ async fn sandbox_bridge_request(
     sandbox_bridge_request_instanced(state, method, path, body, None, None, None).await
 }
 
-/// #428/#430 per-delegate variant: when `instance` is set, the request carries
-/// the veFaaS session-affinity header `x-faas-instance-name: <SandboxId>` so
-/// the shared gateway routes it to THAT delegate's sandbox. `None` keeps the
-/// single-bridge behavior (local dev / one-sandbox hosts, where a direct
-/// bridge ignores the header harmlessly).
+/// Per-delegate requests prefer the broker-mediated bridge path.
 async fn sandbox_bridge_request_instanced(
     state: &SharedUiBridgeState,
     method: reqwest::Method,
@@ -11492,9 +11485,7 @@ fn is_bridge_healthz_body(value: &serde_json::Value) -> bool {
 /// nothing re-creates it until the next turn — so a freshly UPDATED pod answers
 /// 503 `starting` for as long as nobody chats, while `/v1/context/apply` (files
 /// written; a re-source only when a session exists) is already served. Gating
-/// the preset apply on a 2xx made every update wait out the whole budget and
-/// then apply INTO the first turn in flight — chef, 2026-09-17: a 121 s wait,
-/// then its on-demand ask came back empty.
+/// preset application on a 2xx would delay it until a session exists.
 async fn sandbox_bridge_reachable(
     state: &SharedUiBridgeState,
     instance: Option<&str>,
@@ -11533,13 +11524,7 @@ async fn sandbox_bridge_exchange_instanced(
     base_override: Option<&str>,
     delegate_omni: Option<&str>,
 ) -> Result<(String, reqwest::StatusCode, serde_json::Value), String> {
-    // #715 — a PER-DELEGATE instance is reached THROUGH THE BROKER: the veFaaS
-    // gateway demands the function's stack-wide secret token (which never
-    // leaves the broker host) and the bridge demands the per-delegate in-pod
-    // bearer (which the broker derives). The console sends its master J1 +
-    // the delegate's on-chain identity; the broker checks ownership and
-    // forwards. The direct call survives ONLY for the single-bridge dev
-    // topology (`--sandbox-bridge-url`, no instance).
+    // The broker checks ownership and supplies the per-delegate bridge bearer.
     if let Some(id) = instance.filter(|i| !i.trim().is_empty()) {
         if let Some(target) = bridge_via_broker_target(state, delegate_omni).await {
             return sandbox_bridge_exchange_via_broker(state, &target, id, method, path, body)

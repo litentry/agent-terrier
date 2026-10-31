@@ -1132,7 +1132,7 @@ async fn finalize_spawn(
     // 0. #546 — persist the ceremony context DURABLY (device_key_hash →
     //    label/chat_channel_id/omnis/K10) BEFORE any create: the resolve/poll
     //    ensure path re-injects this exact set whenever the runtime is
-    //    re-created (veFaaS expiry, backend desync, wake cold-start), so a
+    //    re-created (runtime exit, backend desync, wake cold-start), so a
     //    re-created sandbox is never chat-silent. The row dies with the
     //    binding (deleted on confirmed revoke — custody note in
     //    `storage::spawn_contexts`). Best-effort + loud: a write failure

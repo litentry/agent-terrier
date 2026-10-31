@@ -1444,9 +1444,7 @@ async fn run_ui_bridge_mode(args: Args) -> anyhow::Result<()> {
         // chat loop (its checkpoint restore touches the marker the engine's
         // start script waits for) — a host daemon with no engine env is a no-op.
         openviking_config::render_at_boot()?;
-        // #430 — the in-sandbox delegate chat loop (env-gated: only a spawned
-        // sandbox's supervisord env carries the chat vars; a host daemon is a
-        // clean no-op).
+        // Start the delegate chat loop only when its explicit configuration exists.
         chat_loop::spawn_if_configured();
     }
     let app = ui_bridge::build_router(state, &args.ui_bridge_origin);

@@ -1,6 +1,5 @@
-//! #430 (epic #425 S4) — the DELEGATE-side chat loop, run by the
-//! agentkeys-daemon INSTANCE INSIDE the dsh-sandbox (the image ships this
-//! daemon under supervisord). The operator chat rides the delegate's
+//! The delegate-side chat loop runs in the runtime's agentkeys-daemon.
+//! The operator chat rides the delegate's
 //! OPERATOR-OWNED duplex feed (`opchat-<label>`, D8): the operator publishes
 //! `direction: in` events; this loop consumes them, runs each turn through the
 //! local bridge (`POST /v1/chat`, persona-framed by #390), and publishes the
