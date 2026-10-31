@@ -167,7 +167,7 @@ describe('agentkeys bridge (real HTTP through the webServer seam)', () => {
       });
       expect(wrong.status, `${path} wrong bearer`).toBe(401);
     }
-    // /healthz stays open: veFaaS readiness + the console's reachability probe.
+    // /healthz stays open for runtime readiness and console reachability.
     expect((await fetch(`${base}/healthz`)).status).toBe(200);
   });
 

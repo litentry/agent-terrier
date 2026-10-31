@@ -6,15 +6,10 @@
 //! ensured (cold-created if dead) through the SAME #546 path the resolve /
 //! sweeper use — nothing an app can observe changes.
 //!
-//! The create runs DETACHED from the request and ONE per delegate at a time
-//! (`AppState::wake_creates_in_flight`): the worker's wake call gives up after
-//! 20 s while a veFaaS create takes ~20-30 s, so an in-request create was
-//! cancelled mid-flight — the instance came up, nothing was memoized, and the
-//! next feed event created a second one whose relay-key provisioning rotated
-//! the gate key under the first (measured 2026-09-27: chef ×2, agent-i ×2). The
-//! woken sandbox also gets the REPLAY WINDOW (`AGENTKEYS_WAKE_SINCE_MS`, the
-//! waking event minus a margin): its boot fast-forward would otherwise skip the
-//! very event that woke it, and the app would never handle it.
+//! Creation runs separately from the request, once per delegate at a time
+//! (`AppState::wake_creates_in_flight`), so a request timeout cannot cancel it
+//! or trigger a competing creation. The runtime receives a replay window
+//! (`AGENTKEYS_WAKE_SINCE_MS`) that includes the event which woke it.
 //!
 //! Authority: the caller is the co-located channel worker (the #541 host-minted
 //! `AGENTKEYS_CHANNEL_STS_TOKEN` bearer — the same worker-only trust the

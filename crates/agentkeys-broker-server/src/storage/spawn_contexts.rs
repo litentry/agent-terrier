@@ -2,34 +2,16 @@
 //! (#546): everything a delegate-sandbox RE-create needs, keyed by
 //! `device_key_hash`.
 //!
-//! The ceremony's `PendingCeremonyStore` row is one-shot RAM by design (build →
-//! submit, seconds). But the sandbox itself is not: a veFaaS instance expires,
-//! an ECS task dies, a backend-registry desync duplicates — and the resolve/poll
-//! ensure path then (re)creates the runtime. Before #546 that path had NOTHING
-//! to inject (the one-shot row was consumed at spawn), so re-created sandboxes
-//! came up chat-silent: no `AGENTKEYS_CHAT_CHANNEL_ID`, no identity envs, no
-//! K10 — the in-sandbox chat loop never started and the delegate's
-//! `opchat-<label>` feed went unanswered. This store is the reconstruction
-//! source: `finalize_spawn` writes the row at ceremony confirm, EVERY create
-//! path reads it, and a confirmed `revokeAgentDevice` (archive / unpair / fleet
-//! revoke) deletes it.
+//! The ceremony's `PendingCeremonyStore` row is consumed at submission. This
+//! store retains runtime reconstruction data across restarts: `finalize_spawn`
+//! writes it after confirmation, creation paths read it, and confirmed
+//! `revokeAgentDevice` deletes it.
 //!
-//! **This store is REGISTERED EXCEPTION E2 in arch.md §1a (Design rules).** It
-//! bends D2 (stateless broker) and D3 (a key lives only on the machine it
-//! identifies): `k10_secret_hex` — the delegate's private key — sits at rest
-//! for the LIFETIME OF THE BINDING (deleted on revoke). The scope bound,
-//! rationale, diagram (`docs/assets/spawn-context-custody-tradeoff.svg`) and
-//! revert path live in that registry — do not re-justify or widen the store
-//! here. The interim #551 KEK wrap was SKIPPED (owner decision 2026-07-23);
-//! **#552 LANDED**: on a stack flipped to `AGENTKEYS_DELEGATE_KEYS=signer`
-//! every NEW spawn is signer-custodied — the row stores the K10 ADDRESS only
-//! (`k10_secret_hex = ""`; re-creates mint a fresh J1 instead of injecting a
-//! key). The secret column now serves ONLY pre-flip legacy delegates and
-//! empties as they archive+respawn; re-homing the readable half to the
-//! Config data class (full D2) is the recorded tail. The row is
-//! provisioning data, never authority: it deliberately carries NO omnis (the
-//! ensure path injects chain-read identity per D1), and a forged row cannot
-//! widen scope — every cap-mint is still chain-verified at the worker.
+//! Local services select `AGENTKEYS_DELEGATE_KEYS=signer`: new rows hold the
+//! K10 address and an empty `k10_secret_hex`; recreation obtains a fresh
+//! session from the signer. Legacy secret-bearing rows remain a migration
+//! risk and are not evidence of protected custody. Reconstruction data is
+//! never authority: identities and grants are independently read from chain.
 
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard};

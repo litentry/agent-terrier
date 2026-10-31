@@ -1,6 +1,6 @@
 # Architecture and ownership
 
-This document describes the public source tree. The complete local runtime is still under development in [epic #1](https://github.com/litentry/agent-terrier/issues/1); this source-boundary revision is not a full localhost release.
+This document describes the public source tree. The complete local runtime is still under development in [epic #1](https://github.com/litentry/agent-terrier/issues/1); component qualification does not constitute a full localhost release.
 
 ## Components
 
@@ -62,7 +62,7 @@ ERC-4337 receipt interpretation is owned by `agentkeys-core::user_operation_rece
 
 Public source checks reject captured deployment image inventories as well as secrets, private domains and excluded assets. This is a source/artifact gate; historical publication review remains part of release acceptance. Identity derivation has one configurable namespace and preserves the existing default vectors; no deployment-specific namespace constant is required.
 
-The source tree still contains runtime-specific integrations that must be replaced by neutral interfaces before local release. That work is tracked by [#3](https://github.com/litentry/agent-terrier/issues/3); real local chain/signing, storage, Docker and models follow in [#4](https://github.com/litentry/agent-terrier/issues/4), [#5](https://github.com/litentry/agent-terrier/issues/5), [#6](https://github.com/litentry/agent-terrier/issues/6) and [#7](https://github.com/litentry/agent-terrier/issues/7).
+Remaining migration work includes the native UI's direct gateway-header fallback and enrollment helper dependencies, plus standalone agent-plugin home-directory defaults. These must use public runtime and CLI owners before local release; removing obsolete deployment comments does not qualify those paths. Legacy secret-bearing spawn-context rows also remain a custody migration risk; local services select signer custody for new rows. See [#3](https://github.com/litentry/agent-terrier/issues/3), storage [#5](https://github.com/litentry/agent-terrier/issues/5), Docker [#6](https://github.com/litentry/agent-terrier/issues/6) and models [#7](https://github.com/litentry/agent-terrier/issues/7). Local chain/signing qualification is tracked in [#4](https://github.com/litentry/agent-terrier/issues/4).
 
 The complete CLI and light manager must call these owners rather than duplicate their implementation. Release acceptance requires a public-only clean install and an offline core journey after downloads. Existing inherited documentation is not the new local setup contract.
 

@@ -3493,17 +3493,9 @@ pub mod sandbox_env {
     /// cron evaluation. OPTIONAL — absent = UTC.
     pub const APP_TZ_OFFSET_MINUTES: &str = "AGENTKEYS_APP_TZ_OFFSET_MINUTES";
 
-    /// The in-sandbox bridge port — where the #577 management surface
-    /// (session export/import, job status) lives, reached through the veFaaS
-    /// gateway with `x-faas-proxy-port`. The bridge, not the daemon, hosts it
-    /// because the bridge runs as root and OWNS the runtime home (`/root/.dsh`,
-    /// unreadable by the daemon's `gem` user). ONE owner: the image's
-    /// supervisord unit pins `PORT="8090"` on the bridge.
+    /// Runtime bridge port for chat, context, session transfer and job status.
     pub const SANDBOX_BRIDGE_PORT: u16 = 8090;
-    /// The agentkeys-daemon's own ui-bridge inside the sandbox — its
-    /// `/v1/sandbox/self/*` surface (the self-grants view the dsh guard reads,
-    /// the #717 live-rebind push the broker makes). Reached through the same
-    /// gateway with `x-faas-proxy-port` set to it.
+    /// Runtime daemon port for `/v1/sandbox/self/*` grants and live rebinding.
     pub const SANDBOX_DAEMON_PORT: u16 = 3114;
 
     /// The identity/link envs required in BOTH custody modes (#552).

@@ -53,13 +53,7 @@ pub(crate) fn session_jwt_ttl_seconds() -> u64 {
         .unwrap_or(18_000)
 }
 
-/// #642 — TTL for the `J1_agent` a delegate SANDBOX boots with. A pod lives a
-/// full 24 h veFaaS lease; the interactive 5 h default left every cap-minted
-/// leg in the pod (checkpoint saves, the #566 mirror, cred fetches) dead for
-/// the lease tail — measured live (first `ExpiredSignature` 5 h after spawn)
-/// while chat kept answering. The J1 dies with the pod and every re-create
-/// mints fresh, so this tracks the lease, not a login session; masters keep
-/// the 5 h default above.
+/// TTL for a delegate runtime's boot session, independent of owner logins.
 pub(crate) fn delegate_session_jwt_ttl_seconds() -> u64 {
     delegate_session_jwt_ttl_from(
         std::env::var(crate::env::BROKER_DELEGATE_SESSION_JWT_TTL_SECONDS).ok(),

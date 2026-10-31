@@ -408,7 +408,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_expire_at_reads_the_measured_vefaas_shape() {
+    fn parse_expire_at_normalizes_explicit_timezone_offsets() {
         // Reject an unnormalized or ambiguous timezone.
         // Offset handling: +08:00 must land on the same instant as its UTC twin.
         let t = parse_expire_at("2026-07-06T00:00:00+08:00").expect("rfc3339 with offset");

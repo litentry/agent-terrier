@@ -156,10 +156,7 @@ pub struct BindingManifestEntry {
     /// spawn or a pre-#427 binding). Readable-layer only, like `label`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preset_id: Option<String>,
-    /// The delegate's bridge base (`sandbox.agent_url` of the spawn / #577
-    /// update response — the veFaaS gateway, routed per instance by header),
-    /// so the preset can be re-applied later without a spawn response in
-    /// hand. Absent on a row that predates 2026-09-17 until its next update.
+    /// Bridge endpoint reported by spawn/update, retained for preset delivery.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_url: Option<String>,
     /// #427 — the delegate's `knowledge:<ns>` namespace name (the #425 O2

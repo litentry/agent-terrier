@@ -36,8 +36,7 @@ export interface Config {
   /** Budget for one call: the cap mint + the worker put (+ a by-reference
    *  upload for a large body). */
   timeoutMs?: number;
-  /** How long to wait between advertisement fetches while the daemon is
-   *  still coming up (supervisord starts both; order is not guaranteed). */
+  /** Delay between advertisement fetches while the daemon starts. */
   retryMs?: number;
   /** After this long without an advertisement the plugin logs an error (and
    *  keeps retrying at the slow cadence). */
