@@ -31,6 +31,43 @@ fn enroll(command: &mut Command) {
 }
 
 #[test]
+fn local_owner_commands_reject_production_configuration_before_key_access() {
+    for mode in ["flag-disabled", "remote-rpc", "production-profile"] {
+        let (mut command, directory) = isolated_cmd();
+        let key_path = directory.path().join("owner.pem");
+        match mode {
+            "flag-disabled" => {
+                command.env_remove("AGENT_TERRIER_LOCAL_DEV");
+            }
+            "remote-rpc" => {
+                command.env("AGENTKEYS_CHAIN_RPC_HTTP", "https://example.invalid");
+            }
+            _ => {
+                let mut profile =
+                    agentkeys_core::chain_profile::ChainProfile::load_builtin("anvil").unwrap();
+                profile.chain_kind = agentkeys_core::chain_profile::ChainKind::EthereumL1;
+                let profile_path = directory.path().join("production.json");
+                std::fs::write(&profile_path, serde_json::to_vec(&profile).unwrap()).unwrap();
+                command.env("AGENTKEYS_CHAIN_PROFILE_FILE", profile_path);
+            }
+        }
+        command.args([
+            "chain",
+            "prepare-owner",
+            "register",
+            "--operator-omni",
+            &hex::encode([1; 32]),
+            "--key-file",
+            key_path.to_str().unwrap(),
+            "--beneficiary",
+            &hex::encode([2; 20]),
+        ]);
+        command.assert().failure().stderr(contains("development"));
+        assert!(!key_path.exists(), "{mode} wrote an owner key");
+    }
+}
+
+#[test]
 fn stub_requires_explicit_opt_in() {
     let (mut command, directory) = isolated_cmd();
     enroll(&mut command);

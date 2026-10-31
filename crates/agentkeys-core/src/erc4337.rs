@@ -27,6 +27,43 @@ use crate::audit::calldata::selector;
 use crate::device_crypto::keccak256;
 
 const WORD: usize = 32;
+pub const DEFAULT_VERIFICATION_GAS_LIMIT: u128 = 1_500_000;
+pub const DEFAULT_CALL_GAS_LIMIT: u128 = 2_000_000;
+pub const DEFAULT_PRE_VERIFICATION_GAS: u128 = 100_000;
+
+pub fn operator_master_wallet_calldata(operator: &[u8; 32]) -> Vec<u8> {
+    let mut data = selector("operatorMasterWallet(bytes32)").to_vec();
+    data.extend_from_slice(operator);
+    data
+}
+
+pub fn entrypoint_nonce_calldata(account: &[u8; 20]) -> Vec<u8> {
+    let mut data = selector("getNonce(address,uint192)").to_vec();
+    data.extend_from_slice(&addr_word(account));
+    data.extend_from_slice(&[0; 32]);
+    data
+}
+
+pub fn factory_account_calldata(
+    credential: &[u8; 32],
+    pub_x: &[u8; 32],
+    pub_y: &[u8; 32],
+    rp_id_hash: &[u8; 32],
+    salt: &[u8; 32],
+) -> Vec<u8> {
+    let mut data = selector("getAddress(bytes32,uint256,uint256,bytes32,bytes32)").to_vec();
+    for word in [credential, pub_x, pub_y, rp_id_hash, salt] {
+        data.extend_from_slice(word);
+    }
+    data
+}
+
+pub fn revoke_scope_calldata(operator: &[u8; 32], actor: &[u8; 32]) -> Vec<u8> {
+    let mut data = selector("revokeScope(bytes32,bytes32)").to_vec();
+    data.extend_from_slice(operator);
+    data.extend_from_slice(actor);
+    data
+}
 
 /// Prefix of the master-account credential-id preimage (see [`master_cred_id_hash`]).
 /// **Terminology source-of-truth:** the bash literal in

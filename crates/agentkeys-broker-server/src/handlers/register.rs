@@ -50,7 +50,7 @@ use agentkeys_core::erc4337::{
 
 use crate::handlers::accept::{
     addr20, aerr, bearer, call_entrypoint_nonce, call_operator_master_wallet, env_profile,
-    eth_address_has_code, eth_call, load_accept_config, norm_omni, selector, AcceptConfig,
+    eth_address_has_code, eth_call, load_accept_config, norm_omni, AcceptConfig,
     SPONSOR_WINDOW_SECS,
 };
 use crate::sponsored_accept::{assemble_register_userop, AcceptUserOpParams, BuildAcceptResponse};
@@ -160,15 +160,16 @@ pub(crate) async fn call_factory_get_address(
     rpid_hash: &[u8; 32],
     salt: &[u8; 32],
 ) -> Result<[u8; 20], String> {
-    let mut data = format!(
+    let data = format!(
         "0x{}",
-        selector("getAddress(bytes32,uint256,uint256,bytes32,bytes32)")
+        hex::encode(agentkeys_core::erc4337::factory_account_calldata(
+            cred_id_hash,
+            pub_x,
+            pub_y,
+            rpid_hash,
+            salt
+        ))
     );
-    data.push_str(&hex::encode(cred_id_hash));
-    data.push_str(&hex::encode(pub_x));
-    data.push_str(&hex::encode(pub_y));
-    data.push_str(&hex::encode(rpid_hash));
-    data.push_str(&hex::encode(salt));
     let raw = eth_call(http, rpc, factory, &data).await?;
     let hexs = raw.trim_start_matches("0x");
     if hexs.len() < 64 {

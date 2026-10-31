@@ -735,13 +735,22 @@ enum K11Action {
 
 #[derive(Subcommand)]
 enum ChainAction {
+    #[command(
+        about = "Prepare a real owner-signed operation on the explicit local development chain"
+    )]
+    PrepareOwner(agentkeys_cli::local_owner::OwnerOptions),
+    #[command(
+        about = "Verify a prepared owner operation from stdin against its actual chain receipt"
+    )]
+    VerifyOwner {
+        #[arg(long)]
+        transaction: String,
+    },
     #[command(about = "List built-in chain profile names")]
     List,
     #[command(about = "Print one profile's full JSON (omit name to use the resolved profile)")]
     Show {
-        #[arg(
-            help = "Profile name (heima | heima-paseo | base | base-sepolia | ethereum | sepolia | anvil)"
-        )]
+        #[arg(help = "Built-in profile name (anvil)")]
         name: Option<String>,
     },
 }
@@ -1347,6 +1356,26 @@ enum AgentAction {
 async fn cmd_chain(ctx: &CommandContext, action: &ChainAction) -> anyhow::Result<String> {
     use agentkeys_core::chain_profile::ChainProfile;
     match action {
+        ChainAction::PrepareOwner(options) => {
+            let plan = agentkeys_cli::local_owner::prepare(ctx, options).await?;
+            Ok(serde_json::to_string(&plan)?)
+        }
+        ChainAction::VerifyOwner { transaction } => {
+            use std::io::Read;
+            const MAX_OWNER_PLAN_BYTES: u64 = 1024 * 1024;
+            let mut input = String::new();
+            std::io::stdin()
+                .take(MAX_OWNER_PLAN_BYTES + 1)
+                .read_to_string(&mut input)?;
+            anyhow::ensure!(
+                input.len() as u64 <= MAX_OWNER_PLAN_BYTES,
+                "owner plan exceeds input size limit"
+            );
+            let plan = serde_json::from_str(&input)?;
+            Ok(serde_json::to_string(
+                &agentkeys_cli::local_owner::verify(ctx, transaction, plan).await?,
+            )?)
+        }
         ChainAction::List => Ok(ChainProfile::list_builtin_names().join("\n")),
         ChainAction::Show { name } => {
             let profile = match name {
