@@ -18,7 +18,7 @@ This document describes the public source tree. The complete local runtime is st
 | Development signing | `crates/agentkeys-mock-server` signer implementation and `agentkeys-local-signer` entry point | Local services and authenticated native/browser clients |
 | UI tokens and components | `design-system` | `apps/parent-control`, `apps/device-display` |
 | Agent runtime plugins | `packages/agentkeys-dsh` | Agent environments |
-| Local agent composition and image | `packages/agent-terrier-runtime` | Local component development and image qualification |
+| Local agent composition and image | `packages/agent-terrier-runtime`, existing `agentkeys-daemon` binary | Local component development and image qualification |
 | Runtime lifecycle and Docker ownership | `crates/agentkeys-runtime` | Broker and local runtime controllers |
 | Protocol examples | `e2e/fixtures` | Shared drift and conformance checks |
 
