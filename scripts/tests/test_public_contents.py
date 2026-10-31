@@ -25,6 +25,18 @@ class PublicContentsTests(unittest.TestCase):
         self.assertEqual(report["findings"], [])
         self.assertEqual(report["scanned_files"], 1)
 
+    def test_captured_deployment_inventory_is_denied_without_echoing_values(self):
+        inventory = {
+            "ResponseMetadata": {"RequestId": "synthetic-request", "Service": "synthetic-service", "Region": "synthetic-region"},
+            "Result": {"Images": [{"ImageId": "synthetic-instance", "ImageUrl": "synthetic-private-image"}]},
+        }
+        report = self.check_text(json.dumps(inventory), "captured-response.json")
+        self.assertEqual(report["findings"], [{
+            "path": "captured-response.json", "rule": "deployment-inventory", "line": 0,
+        }])
+        self.assertNotIn("synthetic-private-image", json.dumps(report))
+        self.assertEqual(self.check_text(json.dumps({"image": "example/local-agent:dev"}), "recipe.json")["findings"], [])
+
     def test_private_domain_hash_blocks_subdomains_without_echoing_names(self):
         domain = "synthetic-private.example"
         digest = hashlib.sha256(domain.encode()).hexdigest()

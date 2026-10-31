@@ -1,38 +1,11 @@
-//! `OmniAccount` derivation.
-//!
-//! Reuses dexs-backend's hash shape verbatim
-//! (`SHA256(client_id || identity_type || identity_value)`). The
-//! `client_id` is a PER-STACK broker config value (#464): the AWS stack
-//! keeps the historical `"agentkeys"`, the VE stack derives under
-//! `"agentterrier"`. The same email or wallet therefore produces a
-//! *different* OmniAccount per stack (and per any other deployment, e.g.
-//! dexs-backend's `"wildmeta"`) — each stack is a sovereign identity
-//! namespace, which is what lets VE and AWS share the Heima chain without
-//! SidecarRegistry collisions or cross-stack secret mirroring.
-//!
-//! The derivation is deterministic and stable. Changing **any** of:
-//! - a stack's configured `client_id` (`AGENTKEYS_CLIENT_ID` env),
-//! - the `IdentityType::canonical()` strings (in `plugins/auth.rs`),
-//! - the byte concatenation order or separator,
-//!
-//! is a backwards-incompatible change for every stored OmniAccount and
-//! every grant/audit row keyed on one — a wrong `client_id` forks every
-//! identity as surely as a wrong signer secret. The value is logged at
-//! boot and pinned by derivation-vector tests below; changing a live
-//! stack's value requires a migration.
+//! OmniAccount = SHA256(client_id || identity_type || identity_value).
+//! The configured namespace, canonical identity and concatenation order are
+//! persistent identity inputs. Changing any of them requires migration.
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-/// Default `client_id` input to `SHA256(client_id || type || value)` —
-/// the AWS stack's historical namespace. A stack overrides it via broker
-/// config (`AGENTKEYS_CLIENT_ID`, see `BrokerConfig::client_id`); AWS is
-/// unchanged by omission, the VE stack sets `"agentterrier"`.
 pub const DEFAULT_CLIENT_ID: &str = "agentkeys";
-
-/// The VE stack's namespace (#464). Referenced here so the pinned vectors
-/// below and the VE unit env agree on one spelling.
-pub const VE_CLIENT_ID: &str = "agentterrier";
 
 /// Lowercase 64-char hex SHA256 digest. Newtype so the type system can
 /// distinguish OmniAccounts from other 32-byte hashes.
@@ -75,9 +48,6 @@ impl std::fmt::Display for OmniAccount {
 /// releases; `identity_value` MUST be the canonical form (lowercase hex
 /// address for EVM, normalized email, Google `sub`).
 ///
-/// Per port-vs-greenfield "What we port — crypto primitives only", this
-/// matches the dexs-backend hash shape verbatim. Renaming any of the
-/// inputs is a breaking change.
 pub fn derive_with_client_id(
     client_id: &str,
     identity_type: &str,
@@ -133,27 +103,15 @@ mod tests {
     }
 
     #[test]
-    fn client_id_namespacing_is_load_bearing() {
-        // The whole point of the client_id input: dexs-backend deployments
-        // and AgentKeys deployments must produce DIFFERENT OmniAccounts
-        // for the same email so users have one identity per operator.
-        let agentkeys = derive_with_client_id("agentkeys", "email", "u@x.com");
-        let wildmeta = derive_with_client_id("wildmeta", "email", "u@x.com");
-        assert_ne!(agentkeys, wildmeta);
+    fn configured_namespaces_produce_distinct_accounts() {
+        let default_account =
+            derive_with_client_id(DEFAULT_CLIENT_ID, "email", "onboard@example.com");
+        let custom_account = derive_with_client_id("custom-client", "email", "onboard@example.com");
+        assert_ne!(default_account, custom_account);
     }
 
     #[test]
-    fn per_stack_namespaces_never_collide() {
-        // #464: the SAME identity on the two stacks derives DIFFERENT omnis —
-        // this is what lets VE + AWS share the Heima chain (SidecarRegistry
-        // keyed on keccak(omni)) without collisions or secret mirroring.
-        let aws = derive_with_client_id(DEFAULT_CLIENT_ID, "email", "onboard@example.com");
-        let ve = derive_with_client_id(VE_CLIENT_ID, "email", "onboard@example.com");
-        assert_ne!(aws, ve);
-    }
-
-    #[test]
-    fn pinned_vectors_both_stacks() {
+    fn pinned_vectors_default_and_custom_namespaces() {
         // Frozen derivation vectors (#464) — computed once via
         // hashlib.sha256((cid+type+value).encode()).hexdigest() and pinned.
         // If either fails, a client_id or the concatenation shape drifted:
@@ -173,16 +131,16 @@ mod tests {
                 "43adfc06263716e1fe7b72513bb3d305aff6cf8f060c1b709cfa0d4977bf0373",
             ),
             (
-                VE_CLIENT_ID,
+                "custom-client",
                 "email",
                 "onboard@example.com",
-                "fff6a048f0addaa0f793ad2cfd3e81aaa30664f90131f486443401477213bb0d",
+                "de57a88a89d2b31b30c3193eb1e3cc01dc38df7f5cb2b338793f27dc62f28ead",
             ),
             (
-                VE_CLIENT_ID,
+                "custom-client",
                 "evm",
                 "0x1234567890abcdef1234567890abcdef12345678",
-                "ef0881a6bdd2532b518e938c74366062730bc13c9f16d01558f647204881bd5b",
+                "0f54d7b16ea1dc47c8ffbf4df811be104fe921bf77bd37bc110f7614b83a09b9",
             ),
         ];
         for (cid, ity, ival, expect) in cases {

@@ -774,8 +774,7 @@ export function OnboardingScreen({
     // exists for a genuinely ABSENT backend; when the daemon is up, the
     // failure is real (broker email_link unarmed, SES sender unverified, rate
     // limit) and silently starting the ceremony would walk the operator past
-    // verification as if their email had been confirmed — the exact bug the
-    // VE stack shipped. Ask the daemon directly instead of inferring from the
+    // verification as if their email had been confirmed. Ask the daemon directly instead of inferring from the
     // failed call: postJson reports an HTTP error and a dead socket with the
     // same `unreachable` reason, so r.status cannot tell them apart.
     if (hosted) {
@@ -1086,12 +1085,8 @@ export function OnboardingScreen({
                 <br />
                 <span className="mono" style={{ fontSize: 11 }}>{blockedReason}</span>
                 <br />
-                No passkey was created — so nothing is stranded and your keychain stays clean. This
-                is expected on a stack whose broker hasn&apos;t had its sponsored-register runtime
-                armed yet (on Volcano Engine: the operator arms{' '}
-                <span className="mono">BROKER_SPONSOR_SIGNER_KEY</span> + the bundler, then re-runs{' '}
-                <span className="mono">setup-broker-host.sh --cloud ve --only-step 5</span>). Once
-                that&apos;s done, retry:
+                No passkey was created. Local registration is not ready; the details above
+                identify the missing setup. Complete that setup, then retry:
                 <div style={{ margin: '10px 0' }}>
                   <button
                     className="btn"
