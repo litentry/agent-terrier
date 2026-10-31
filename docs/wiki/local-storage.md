@@ -1,5 +1,7 @@
 The local object service is a qualified storage component. The credential, configuration, memory and channel workers use it for encrypted data operations. Integration with product clients, broker sessions and the complete local application remains open in [#5](https://github.com/litentry/agent-terrier/issues/5).
 
+The browser data library now calls these workers directly with signed capabilities. No cloud credential exchange or cloud headers are required. Configuration and credential encryption still uses the explicitly configured key-derivation signer; the complete local signer and broker-session setup remains in progress.
+
 ## Ownership and boundaries
 
 `agentkeys-local-store` runs a small authenticated HTTP service with a separate SQLite database for each data class. The database records its application, schema and data-class identity; an unrelated database or a database belonging to another class is rejected. Database directories must be private, and files must be owned by the current user with no symbolic or hard links. Host administrators remain trusted in this local development environment.

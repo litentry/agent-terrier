@@ -603,6 +603,7 @@ dependencies = [
  "agentkeys-local-store",
  "agentkeys-protocol",
  "agentkeys-types",
+ "agentkeys-web-core",
  "agentkeys-worker-audit",
  "agentkeys-worker-channel",
  "agentkeys-worker-config",

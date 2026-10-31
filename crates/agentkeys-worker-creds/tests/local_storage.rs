@@ -1206,6 +1206,132 @@ async fn channel_waiting_reads_recheck_authority_after_a_publish() {
     }
 }
 
+#[tokio::test]
+async fn browser_client_uses_real_scoped_memory_without_cloud_credentials() {
+    use agentkeys_web_core::{
+        data::{DataClient, DataEndpoints, DataError, DataSession},
+        device::DeviceIdentity,
+    };
+    use rand_core::RngCore;
+    let fixture = Fixture::new_for(
+        DataClass::Memory,
+        agentkeys_worker_memory::handlers::build_router,
+        true,
+    )
+    .await;
+    let mut entropy = [0; 32];
+    rand_core::OsRng.fill_bytes(&mut entropy);
+    let device = DeviceIdentity::from_random_bytes(&entropy).unwrap();
+    fixture.chain.lock().unwrap().agent_hash = device.device_key_hash().unwrap();
+    let (worker_url, worker_task) = serve(fixture.worker.clone()).await;
+    let malformed_proof = Arc::new(AtomicUsize::new(0));
+    let mut issuer = Router::new();
+    for (route, operation) in [
+        ("/v1/cap/memory-put", CapOp::Store),
+        ("/v1/cap/memory-get", CapOp::Fetch),
+    ] {
+        let signer = fixture.signer.clone();
+        let malformed = malformed_proof.clone();
+        issuer = issuer.route(
+            route,
+            post(
+                move |headers: axum::http::HeaderMap,
+                      Json(request): Json<agentkeys_protocol::BrokerCapRequest>| {
+                    let signer = signer.clone();
+                    let malformed = malformed.clone();
+                    async move {
+                        assert_eq!(headers["authorization"], "Bearer synthetic-browser-session");
+                        let (_, now) = fresh_cap_pop_nonce_ts();
+                        let payload = CapPayload {
+                            operator_omni: request.operator_omni,
+                            actor_omni: request.actor_omni,
+                            service: request.service,
+                            op: operation,
+                            data_class: DataClass::Memory,
+                            device_key_hash: request.device_key_hash,
+                            k3_epoch: 1,
+                            issued_at: now,
+                            expires_at: now + 60,
+                            nonce: "fixture".into(),
+                        };
+                        let signature: Signature =
+                            signer.sign(&Sha256::digest(serde_json::to_vec(&payload).unwrap()));
+                        Json(CapToken {
+                            payload,
+                            broker_sig: URL_SAFE_NO_PAD.encode(signature.to_bytes()),
+                            client_sig: if malformed.load(Ordering::SeqCst) == 1 {
+                                None
+                            } else {
+                                request.client_sig
+                            },
+                            client_nonce: request.client_nonce,
+                            client_ts: request.client_ts,
+                            delegation_path: request.delegation_path,
+                        })
+                    }
+                },
+            ),
+        );
+    }
+    let (broker_url, broker_task) = serve(issuer).await;
+    let client = DataClient::new(DataEndpoints {
+        broker_url,
+        memory_url: worker_url,
+        signer_url: "http://127.0.0.1:1".into(),
+        config_url: String::new(),
+        credential_url: String::new(),
+        audit_url: String::new(),
+        classify_url: None,
+    });
+    let operator = "11".repeat(32);
+    let actor = "22".repeat(32);
+    let (_, now) = fresh_cap_pop_nonce_ts();
+    let session = DataSession {
+        bearer: "synthetic-browser-session",
+        operator_omni: &operator,
+        actor_omni: &actor,
+        device: &device,
+        now_unix_seconds: now,
+    };
+    client
+        .memory_put(&session, "notes", None, PLAINTEXT, "")
+        .await
+        .unwrap();
+    assert_eq!(
+        client
+            .memory_get(&session, "notes", None)
+            .await
+            .unwrap()
+            .unwrap(),
+        PLAINTEXT
+    );
+    let stored = fixture.snapshot();
+    let calls = fixture.storage.calls.load(Ordering::SeqCst);
+    malformed_proof.store(1, Ordering::SeqCst);
+    let error = client
+        .memory_get(&session, "notes", None)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, DataError::Http { status:403, ref body } if serde_json::from_str::<serde_json::Value>(body).unwrap()["reason"] == "cap_pop_invalid")
+    );
+    assert_eq!(fixture.storage.calls.load(Ordering::SeqCst), calls);
+    assert_eq!(fixture.snapshot(), stored);
+    malformed_proof.store(0, Ordering::SeqCst);
+    fixture.chain.lock().unwrap().allowed = false;
+    let error = client
+        .memory_put(&session, "notes", None, b"forbidden", "")
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, DataError::Http { status:403, ref body } if serde_json::from_str::<serde_json::Value>(body).unwrap()["reason"] == "service_not_in_scope")
+    );
+    assert_eq!(fixture.storage.calls.load(Ordering::SeqCst), calls);
+    assert_eq!(fixture.snapshot(), stored);
+    worker_task.abort();
+    broker_task.abort();
+}
+
 struct WorkerProcess {
     child: tokio::process::Child,
     url: String,
