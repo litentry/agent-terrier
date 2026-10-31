@@ -39,5 +39,6 @@
     "tokens.ts",
     "tokens.json",
     "generated"
-  ]
+  ],
+  "license": "Apache-2.0"
 }

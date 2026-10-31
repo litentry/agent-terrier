@@ -41,3 +41,7 @@ The [local chain guide](docs/wiki/local-chain.md) covers `terrier chain start/de
 The [local owner guide](docs/wiki/local-owner.md) covers headless owner registration, device/delegate binding and grant revocation. The [local model guide](docs/wiki/local-models.md) covers `terrier models config/probe` and a reproducible macOS qualification with external networking blocked.
 
 The [local storage guide](docs/wiki/local-storage.md) documents the isolated object service, its fast negative tests and explicit real-chain qualification. Product worker integration remains in progress.
+
+## License
+
+Apache-2.0 is the default project license. Existing Solidity and DSH licenses remain explicit exceptions; see [licensing](docs/wiki/licensing.md) and [NOTICE](NOTICE).

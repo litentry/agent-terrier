@@ -8,6 +8,11 @@
     "CONTRIBUTING.md",
     "Cargo.lock",
     "Cargo.toml",
+    "LICENSE",
+    "LICENSES/AGPL-3.0-only.txt",
+    "LICENSES/GPL-3.0-only.txt",
+    "LICENSES/MIT.txt",
+    "NOTICE",
     "README.md",
     "rust-toolchain.toml",
     "terrier"
