@@ -34,6 +34,8 @@ def main():
     service_parser.add_argument("action", choices=["start", "status", "doctor", "logs", "stop"])
     service_parser.add_argument("--bin-dir", type=Path, help="Directory containing built public service binaries")
     service_parser.add_argument("--broker-port", type=int, help="Broker port for the first service startup")
+    service_parser.add_argument("--runtime-image", help="Enable the managed runtime with a reviewed preloaded local image")
+    service_parser.add_argument("--docker-socket", type=Path, help="Explicit local Docker Unix socket; required with --runtime-image")
     credential_parser = commands.add_parser("cred", help="Use an existing local owner session for credentials")
     credential_parser.add_argument("action", choices=["store", "fetch"])
     credential_parser.add_argument("service")
@@ -80,15 +82,15 @@ def main():
         if arguments.command == "_serve-services":
             return services.serve(repository, state, arguments.bin_dir)
         if arguments.command == "services":
-            if arguments.action != "start" and (arguments.bin_dir is not None or arguments.broker_port is not None):
-                raise ValueError("--bin-dir and --broker-port are only valid for services start")
+            if arguments.action != "start" and (arguments.bin_dir is not None or arguments.broker_port is not None or arguments.runtime_image is not None or arguments.docker_socket is not None):
+                raise ValueError("Service configuration options are only valid for services start")
             if arguments.action == "logs":
                 return services.logs(state)
             if arguments.action in ("status", "doctor"):
                 result = services.status(state)
             else:
                 with local_state.exclusive_lock(state / "operation.lock"):
-                    result = (services.start(repository, state, arguments.bin_dir, arguments.broker_port)
+                    result = (services.start(repository, state, arguments.bin_dir, arguments.broker_port, arguments.runtime_image, arguments.docker_socket)
                               if arguments.action == "start" else services.stop(state))
             print(json.dumps(result, indent=2))
             return 1 if arguments.action == "doctor" and not result.get("ready") else 0

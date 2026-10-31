@@ -1,6 +1,7 @@
 """Explicit CLI lifecycle qualification using real services, contracts and owner credentials."""
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import os
 from pathlib import Path
 import secrets
 import socket
@@ -36,7 +37,15 @@ class LocalServicesQualification(LocalOwnerFixture):
                 running_chain = self.invoke(state, "start", "--port", str(available_port()))
                 self.invoke(state, "deploy", "--offline")
                 self.services(state, "doctor", success=False)
-                running = self.services(state, "start")
+                image = os.environ.get("AGENT_TERRIER_TEST_AGENT_IMAGE")
+                docker_socket = os.environ.get("AGENT_TERRIER_TEST_DOCKER_SOCKET")
+                self.assertEqual(image is None, docker_socket is None, "qualification image/socket must be paired")
+                runtime_arguments = ["--runtime-image", image, "--docker-socket", docker_socket] if image else []
+                running = self.services(state, "start", *runtime_arguments)
+                runtime_configuration = running["runtime"]
+                if image:
+                    self.assertEqual(runtime_configuration["image"], image)
+                    self.assertEqual(runtime_configuration["socket"], docker_socket)
                 self.assertTrue(running["ready"])
                 self.assertEqual(len(running["services"]), 12)
                 self.assertEqual(self.services(state, "start"), running)
@@ -58,6 +67,21 @@ class LocalServicesQualification(LocalOwnerFixture):
                 scope_build = json.loads(scope_response)
                 self.assertEqual(scope_build["chain_id"], running_chain["chain_id"])
                 self.assertEqual(scope_build["user_op"]["sender"].lower(), alice["account"].lower())
+                self.assertEqual(chain.rpc(running_chain["rpc_http"], "eth_blockNumber"), block_before)
+                spawn_request = json.loads((REPOSITORY / "e2e/fixtures/backend-protocol/build_spawn_userop_request.json").read_text())
+                spawn_request.update(operator_omni=alice["operator_omni"], label="local-delegate", memory_ns="local-delegate", preset_id="")
+
+                def delegate_build():
+                    self.assertEqual(request(broker + "/v1/agent/spawn/build", spawn_request)[0], 401)
+                    self.assertEqual(request(broker + "/v1/agent/spawn/build",
+                        dict(spawn_request, operator_omni="0x" + "92" * 32), session)[0], 403)
+                    status, response = request(broker + "/v1/agent/spawn/build", spawn_request, session)
+                    self.assertEqual(status, 200, "authorized signer-backed delegate build failed")
+                    return json.loads(response)
+
+                built_delegate = delegate_build()
+                self.assertEqual(delegate_build()["device_key_hash"], built_delegate["device_key_hash"],
+                    "delegate build did not reuse deterministic signer custody")
                 self.assertEqual(chain.rpc(running_chain["rpc_http"], "eth_blockNumber"), block_before)
                 signing_body = {"omni_account":alice["operator_omni"].removeprefix("0x"), "message_hex":b"synthetic-local-signer".hex()}
 
@@ -136,6 +160,8 @@ class LocalServicesQualification(LocalOwnerFixture):
                 self.assertEqual(self.invoke(state, "status")["instance_id"], running_chain["instance_id"])
                 running = self.services(state, "start")
                 self.assertEqual(running["services"]["broker"]["url"], broker)
+                self.assertEqual(running["runtime"], runtime_configuration)
+                self.assertEqual(delegate_build()["device_key_hash"], built_delegate["device_key_hash"])
                 self.assertEqual(signing_check(), original_signer_address)
                 credential("fetch")
                 self.assertTrue(all(path.read_bytes() == value for path, value in preserved.items()), "service restart replaced a key")
@@ -215,7 +241,12 @@ class LocalServicesQualification(LocalOwnerFixture):
                     listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
                     listener.bind(("127.0.0.1", manifest["broker_port"]))
                 self.assertEqual(self.invoke(state, "status")["instance_id"], running_chain["instance_id"])
-                running = self.services(state, "start")
+                if image:
+                    self.services(state, "start", "--runtime-image", "terrier-unavailable-" + secrets.token_hex(8),
+                        "--docker-socket", docker_socket, success=False)
+                    self.assertFalse(self.services(state, "status")["running"])
+                running = self.services(state, "start", *runtime_arguments)
+                self.assertEqual(running["runtime"], runtime_configuration)
                 self.assertEqual(request(running["services"]["model_relay"]["url"] + "/v1/usage", bearer=relay_token)[0], 401)
                 credential("fetch")
                 for path in keys:
