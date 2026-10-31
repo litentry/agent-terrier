@@ -14,6 +14,7 @@ These are targets, not measured hosted-runner guarantees. Cold setup is reported
 python3 terrier test focused --component protocol
 python3 terrier test focused --component runtime
 python3 terrier test focused --component broker
+python3 terrier test focused --component signer
 python3 terrier test focused --component ui
 python3 terrier test core --component storage
 python3 terrier test source

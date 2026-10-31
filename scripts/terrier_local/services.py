@@ -28,11 +28,14 @@ WORKERS = {
 }
 BROKER_BINARY = "agentkeys-broker-server"
 STORE_BINARY = "agentkeys-local-store"
+SIGNER_BINARY = "agentkeys-local-signer"
+BINARIES = (BROKER_BINARY, STORE_BINARY, SIGNER_BINARY, *WORKERS.values())
+MANIFEST_VERSION = 2
 
 
 def binary_directory(repository, configured=None):
     directory = Path(configured or os.environ.get("AGENT_TERRIER_BIN_DIR", repository / "target/debug")).resolve()
-    for name in [BROKER_BINARY, STORE_BINARY, *WORKERS.values()]:
+    for name in BINARIES:
         if not (directory / name).is_file() or not os.access(directory / name, os.X_OK):
             raise ValueError(f"Build the local service binary {name} or configure --bin-dir")
     return directory
@@ -58,7 +61,7 @@ def prepare(repository, state, binaries, port):
     manifest_path = directory / "manifest.json"
     if manifest_path.exists() or manifest_path.is_symlink():
         manifest = local_state.read_json(manifest_path)
-        if (not isinstance(manifest, dict) or manifest.get("version") != 1 or manifest.get("development_only") is not True
+        if (not isinstance(manifest, dict) or manifest.get("version") not in (1, MANIFEST_VERSION) or manifest.get("development_only") is not True
                 or manifest.get("profile_identity") != fingerprint
                 or type(manifest.get("initialized")) is not bool
                 or type(manifest.get("broker_port")) is not int
@@ -71,7 +74,7 @@ def prepare(repository, state, binaries, port):
             raise ValueError("Service manifest is missing; restore it before reusing existing state")
         if port is not None and (type(port) is not int or not 1 <= port <= 65535):
             raise ValueError("Broker port must be between 1 and 65535")
-        manifest = {"version":1, "development_only":True, "profile_identity":fingerprint,
+        manifest = {"version":MANIFEST_VERSION, "development_only":True, "profile_identity":fingerprint,
                     "broker_port":port if port is not None else available_port(), "initialized":False}
         local_state.write_json(manifest_path, manifest)
     broker_directory = local_state.private_directory(directory / "broker")
@@ -101,6 +104,15 @@ def prepare(repository, state, binaries, port):
             raise ValueError("An existing worker encryption key is missing; restore the original key")
         else:
             local_state.write_private(key, secrets.token_hex(32).encode())
+    signer_directory = local_state.private_directory(directory / "signer")
+    signer_secret = signer_directory / "master.key"
+    if signer_secret.exists() or signer_secret.is_symlink():
+        os.close(local_state.open_private(signer_secret))
+    elif manifest["initialized"] and manifest["version"] == MANIFEST_VERSION:
+        raise ValueError("An existing development signer key is missing; restore the original key")
+    else:
+        local_state.write_private(signer_secret, secrets.token_hex(32).encode())
+    manifest["version"] = MANIFEST_VERSION
     manifest["initialized"] = True
     local_state.write_json(manifest_path, manifest)
     return manifest
@@ -109,6 +121,8 @@ def prepare(repository, state, binaries, port):
 def start(repository, state, configured=None, port=None):
     current = status(state)
     if current["running"]:
+        if current.get("service_schema") != MANIFEST_VERSION:
+            raise RuntimeError("The running services use an older schema; stop and restart them to migrate")
         if not current.get("ready"):
             raise RuntimeError("Local services are unhealthy; inspect doctor/logs, then stop before restarting")
         if port is not None and current["broker_port"] != port:
@@ -237,6 +251,10 @@ def serve(repository, state, configured):
                 environment, directory / "broker.log", children)
             if components["broker"][1] != environment["BROKER_OIDC_ISSUER"]:
                 raise ValueError("Broker listener differs from the persisted session issuer")
+            components["signer"] = launch(binaries / SIGNER_BINARY,
+                ["--development", "--profile", profile_path, "--broker-public-key", public_key,
+                 "--master-secret-file", directory / "signer/master.key"],
+                contracts.tool_environment(), directory / "signer.log", children)
             for data_class, worker_binary in WORKERS.items():
                 worker_directory = directory / data_class
                 common = ["--development", "--profile", profile_path, "--broker-public-key", public_key]
@@ -257,7 +275,7 @@ def serve(repository, state, configured):
                                    and profile.get("rpc", {}).get("http") == running_chain.get("rpc_http")
                                    and profile.get("contract_set_version") ==
                                    (repository / "crates/agentkeys-chain/VERSION").read_text().strip())
-                return {"running":True, "ready":running_chain["running"] and profile_matches and all(item["healthy"] for item in services.values()),
+                return {"running":True, "service_schema":MANIFEST_VERSION, "ready":running_chain["running"] and profile_matches and all(item["healthy"] for item in services.values()),
                         "development_only":True, "broker_port":manifest["broker_port"],
                         "chain_running":running_chain["running"], "profile_matches":profile_matches, "services":services}
 
@@ -309,7 +327,7 @@ def serve(repository, state, configured):
 def logs(state):
     paths = [state / "services-supervisor.log"]
     directory = state / "services"
-    paths.extend([directory / "broker.log", *[directory / f"{name}{suffix}.log" for name in WORKERS for suffix in ("", "-store")]])
+    paths.extend([directory / "broker.log", directory / "signer.log", *[directory / f"{name}{suffix}.log" for name in WORKERS for suffix in ("", "-store")]])
     for path in paths:
         if path.exists() or path.is_symlink():
             with os.fdopen(local_state.open_private(path)) as source:

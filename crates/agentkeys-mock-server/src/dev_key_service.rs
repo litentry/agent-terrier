@@ -112,6 +112,7 @@ impl SignerError {
 /// Holds the 32-byte master secret in process memory. Construct one per
 /// process at boot via `DevKeyService::from_env()` and share it through
 /// `Arc` if multiple call sites need it.
+#[derive(zeroize::ZeroizeOnDrop)]
 pub struct DevKeyService {
     master_secret: [u8; 32],
 }
@@ -149,8 +150,7 @@ impl DevKeyService {
         Ok(Some(Self { master_secret }))
     }
 
-    /// **DEV ONLY.** Construct directly from a 32-byte master secret (used
-    /// by tests; production must go through `from_env()`).
+    /// Development-only constructor shared by protected local startup and tests.
     pub fn from_master_secret(master_secret: [u8; 32]) -> Self {
         Self { master_secret }
     }

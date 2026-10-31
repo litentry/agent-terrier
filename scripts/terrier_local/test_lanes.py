@@ -12,7 +12,7 @@ import time
 
 from . import contracts
 
-COMPONENTS = ("protocol", "runtime", "broker", "daemon", "storage", "cli", "ui", "dsh")
+COMPONENTS = ("protocol", "runtime", "broker", "signer", "daemon", "storage", "cli", "ui", "dsh")
 RUNTIME_SUITE = ("runtime", "agentkeys-runtime", "--lib", None, "")
 CORE = (
     ("protocol", "agentkeys-protocol", "--lib", None, ""),
@@ -25,6 +25,9 @@ RUST_COMPONENTS = {
     "protocol": [CORE[0]],
     "runtime": [RUNTIME_SUITE],
     "broker": [("broker", "agentkeys-broker-server", "--lib", None, "")],
+    "signer": [("signer", "agentkeys-mock-server", "--lib", None, ""),
+               ("signer-routes", "agentkeys-mock-server", "--test", "dev_key_service_routes", ""),
+               ("signer-startup", "agentkeys-mock-server", "--test", "local_signer_startup", "")],
     "daemon": [("daemon", "agentkeys-daemon", "--bin", "agentkeys-daemon", "")],
     "storage": [("storage", "agentkeys-local-store", "--lib", None, "")],
     "cli": [("cli", "agentkeys-cli", "--lib", None, "")],

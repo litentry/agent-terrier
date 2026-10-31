@@ -8,11 +8,17 @@ edition = "2021"
 name = "agentkeys-mock-server"
 path = "src/main.rs"
 
+[[bin]]
+name = "agentkeys-local-signer"
+path = "src/local_signer.rs"
+
 [lib]
 name = "agentkeys_mock_server"
 path = "src/lib.rs"
 
 [dependencies]
+anyhow = { workspace = true }
+zeroize = { workspace = true }
 agentkeys-types = { workspace = true }
 agentkeys-core = { workspace = true }
 agentkeys-protocol = { workspace = true }
@@ -42,6 +48,7 @@ thiserror = { workspace = true }
 jsonwebtoken = "9"
 
 [dev-dependencies]
+tempfile = "3"
 tokio = { workspace = true }
 # Test-only: mint test JWTs against an in-test ES256 keypair so the JWT-auth
 # path (`--signer-only` mode) can be exercised hermetically.

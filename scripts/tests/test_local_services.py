@@ -42,7 +42,7 @@ class LocalServicesTests(unittest.TestCase):
             self.assertEqual((state / "chain.sock").read_text(), "unrelated-chain-marker")
 
     def test_reuse_is_idempotent_but_unhealthy_or_different_ports_are_refused(self):
-        current = {"running":True, "ready":True, "broker_port":12345}
+        current = {"running":True, "ready":True, "broker_port":12345, "service_schema":services.MANIFEST_VERSION}
         with mock.patch.object(services, "status", return_value=current):
             with mock.patch.object(services.subprocess, "Popen") as spawn:
                 self.assertEqual(services.start(Path("."), Path(".")), current)
@@ -51,7 +51,37 @@ class LocalServicesTests(unittest.TestCase):
                 current["ready"] = False
                 with self.assertRaisesRegex(RuntimeError, "unhealthy"):
                     services.start(Path("."), Path("."))
+                current.pop("service_schema")
+                with self.assertRaisesRegex(RuntimeError, "older schema"):
+                    services.start(Path("."), Path("."))
                 spawn.assert_not_called()
+
+    def test_signer_migration_is_once_only_and_never_replaces_existing_keys(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            directory = local_state.private_directory(root / "services")
+            broker = local_state.private_directory(directory / "broker")
+            for name in ("oidc", "session"):
+                local_state.write_private(broker / f"{name}.json", b"synthetic-original")
+            for name in services.WORKERS:
+                worker = local_state.private_directory(directory / name)
+                local_state.write_private(worker / "development.key", b"synthetic-original")
+            local_state.write_json(directory / "manifest.json", {"version":1, "development_only":True,
+                "profile_identity":"test-deployment", "broker_port":12345, "initialized":True})
+            with mock.patch.object(deployment, "active_profile", return_value=({}, {}, "test-deployment")):
+                manifest = services.prepare(root, root, root, None)
+                self.assertEqual(manifest["version"], services.MANIFEST_VERSION)
+                secret = directory / "signer/master.key"
+                original = secret.read_bytes()
+                self.assertEqual(len(original), 64)
+                self.assertEqual(secret.stat().st_mode & 0o777, 0o600)
+                services.prepare(root, root, root, None)
+                self.assertTrue(secret.read_bytes() == original, "signer key was replaced")
+                self.assertEqual((broker / "session.json").read_bytes(), b"synthetic-original")
+                secret.unlink()
+                with self.assertRaisesRegex(ValueError, "signer key is missing"):
+                    services.prepare(root, root, root, None)
+                self.assertFalse(secret.exists())
 
 
 if __name__ == "__main__":
