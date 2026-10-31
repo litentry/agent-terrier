@@ -1,3 +1,4 @@
+from contextlib import ExitStack
 import json
 import os
 from pathlib import Path
@@ -32,7 +33,7 @@ SIGNER_BINARY = "agentkeys-local-signer"
 RELAY_BINARY = "agentkeys-gate"
 BUNDLER_BINARY = "agentkeys-bundler"
 BINARIES = (BROKER_BINARY, STORE_BINARY, SIGNER_BINARY, RELAY_BINARY, BUNDLER_BINARY, *WORKERS.values())
-MANIFEST_VERSION = 4
+MANIFEST_VERSION = 5
 
 
 def binary_directory(repository, configured=None):
@@ -57,13 +58,13 @@ def available_port():
         return listener.getsockname()[1]
 
 
-def prepare(repository, state, binaries, port):
+def prepare(repository, state, binaries, port, runtime_image=None, docker_socket=None):
     running_chain, profile, fingerprint = deployment.active_profile(repository, state)
     directory = local_state.private_directory(state / "services")
     manifest_path = directory / "manifest.json"
     if manifest_path.exists() or manifest_path.is_symlink():
         manifest = local_state.read_json(manifest_path)
-        if (not isinstance(manifest, dict) or manifest.get("version") not in (1, 2, 3, MANIFEST_VERSION) or manifest.get("development_only") is not True
+        if (not isinstance(manifest, dict) or manifest.get("version") not in (1, 2, 3, 4, MANIFEST_VERSION) or manifest.get("development_only") is not True
                 or manifest.get("profile_identity") != fingerprint
                 or type(manifest.get("initialized")) is not bool
                 or type(manifest.get("broker_port")) is not int
@@ -79,6 +80,7 @@ def prepare(repository, state, binaries, port):
         manifest = {"version":MANIFEST_VERSION, "development_only":True, "profile_identity":fingerprint,
                     "broker_port":port if port is not None else available_port(), "initialized":False}
         local_state.write_json(manifest_path, manifest)
+    runtime = runtime_configuration(manifest, runtime_image, docker_socket)
     broker_directory = local_state.private_directory(directory / "broker")
     for purpose in ("oidc", "session"):
         path = broker_directory / f"{purpose}.json"
@@ -126,10 +128,59 @@ def prepare(repository, state, binaries, port):
         else:
             local_state.write_json(path, {})
     prepare_submitter(state, binaries, manifest, running_chain, profile)
+    manifest["runtime"] = runtime
     manifest["version"] = MANIFEST_VERSION
     manifest["initialized"] = True
     local_state.write_json(manifest_path, manifest)
     return manifest
+
+
+def runtime_configuration(manifest, image=None, socket_path=None):
+    if (image is None) != (socket_path is None):
+        raise ValueError("Runtime image and Docker socket must be configured together")
+    if manifest.get("version") == MANIFEST_VERSION and manifest.get("initialized") and "runtime" not in manifest:
+        raise ValueError("Existing runtime configuration is missing; restore the service manifest")
+    previous = manifest.get("runtime")
+    if previous is not None:
+        validate_runtime_configuration(previous)
+    if image is None:
+        return previous
+    configured = {"image":image, "socket":str(Path(socket_path).expanduser()),
+                  "namespace":previous["namespace"] if previous else "terrier-" + secrets.token_hex(16)}
+    validate_runtime_configuration(configured)
+    if previous and previous["socket"] != configured["socket"]:
+        raise ValueError("Existing runtime state belongs to another Docker socket; use a separate local state directory")
+    return configured
+
+
+def validate_runtime_configuration(configuration):
+    if not isinstance(configuration, dict) or set(configuration) != {"image", "socket", "namespace"}:
+        raise ValueError("Invalid persisted runtime configuration")
+    image, endpoint, namespace = (configuration[name] for name in ("image", "socket", "namespace"))
+    if (not all(isinstance(value, str) and value for value in (image, endpoint, namespace))
+            or image.startswith("-") or any(character.isspace() for character in image)
+            or not Path(endpoint).is_absolute() or "://" in endpoint
+            or not namespace.startswith("terrier-") or len(namespace) > 48
+            or any(character not in "abcdefghijklmnopqrstuvwxyz0123456789-" for character in namespace)):
+        raise ValueError("Invalid local image, Docker socket or runtime namespace")
+
+
+def runtime_environment(repository, directory, configuration):
+    if configuration is None:
+        return {}
+    validate_runtime_configuration(configuration)
+    client_directory = local_state.private_directory(directory / "docker-client")
+    client_config = client_directory / "config.json"
+    if client_config.exists() or client_config.is_symlink():
+        if local_state.read_json(client_config) != {}:
+            raise ValueError("The local runtime Docker client must have an empty isolated configuration")
+    else:
+        local_state.write_json(client_config, {})
+    return {"AGENT_TERRIER_LOCAL_DEV":"1", "AGENT_TERRIER_SANDBOX_IMAGE":configuration["image"],
+            "AGENT_TERRIER_DOCKER_SOCKET":configuration["socket"],
+            "AGENT_TERRIER_RUNTIME_NAMESPACE":configuration["namespace"],
+            "AGENT_TERRIER_TRANSPORT_SCRIPT":str((repository / "packages/agent-terrier-runtime/service-transport.mjs").resolve()),
+            "DOCKER_CONFIG":str(client_directory)}
 
 
 def prepare_submitter(state, binaries, manifest, running_chain, profile):
@@ -157,7 +208,7 @@ def prepare_submitter(state, binaries, manifest, running_chain, profile):
         chain.rpc(running_chain["rpc_http"], "anvil_setBalance", [address, hex(funding)])
 
 
-def start(repository, state, configured=None, port=None):
+def start(repository, state, configured=None, port=None, runtime_image=None, docker_socket=None):
     current = status(state)
     if current["running"]:
         if current.get("service_schema") != MANIFEST_VERSION:
@@ -166,9 +217,13 @@ def start(repository, state, configured=None, port=None):
             raise RuntimeError("Local services are unhealthy; inspect doctor/logs, then stop before restarting")
         if port is not None and current["broker_port"] != port:
             raise ValueError("The owned broker is already running on a different port")
+        if runtime_image is not None or docker_socket is not None:
+            requested = runtime_configuration({"runtime":current.get("runtime")}, runtime_image, docker_socket)
+            if requested != current.get("runtime"):
+                raise ValueError("Stop local services before changing runtime configuration")
         return current
     binaries = binary_directory(repository, configured)
-    prepare(repository, state, binaries, port)
+    prepare(repository, state, binaries, port, runtime_image, docker_socket)
     log = local_state.open_private(state / "services-supervisor.log", os.O_CREAT | os.O_WRONLY | os.O_APPEND)
     environment = contracts.tool_environment()
     environment["AGENT_TERRIER_STATE_DIR"] = str(state)
@@ -273,6 +328,8 @@ def serve(repository, state, configured):
         profile_path = state / "chain-profile.json"
         broker_directory = directory / "broker"
         public_key = broker_directory / "session-public.pem"
+        reservations = ExitStack()
+        reserved_listeners = {}
         children = []
         components = {}
         path = chain.socket_path(state, SOCKET_NAME)
@@ -284,6 +341,22 @@ def serve(repository, state, configured):
         signal.signal(signal.SIGTERM, interrupted)
         signal.signal(signal.SIGINT, interrupted)
         try:
+            for name in ("broker", "signer", *WORKERS):
+                listener = reservations.enter_context(socket.socket())
+                listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                listener.bind(("127.0.0.1", manifest["broker_port"] if name == "broker" else 0))
+                listener.listen(1)
+                reserved_listeners[name] = listener
+            endpoints = {name:f"http://127.0.0.1:{listener.getsockname()[1]}" for name, listener in reserved_listeners.items()}
+
+            def launch_reserved(name, binary, arguments, environment):
+                address = endpoints[name].removeprefix("http://")
+                reserved_listeners[name].close()
+                launched = launch(binary, [*arguments, "--listen", address], environment, directory / f"{name}.log", children)
+                if launched[1] != endpoints[name]:
+                    raise ValueError("Local service listener differs from its reserved endpoint")
+                return launched
+
             relay_directory = directory / "relay"
             components["model_relay"] = launch(binaries / RELAY_BINARY,
                 ["--listen", "127.0.0.1:0", "--require-local-upstream",
@@ -298,15 +371,21 @@ def serve(repository, state, configured):
                 AGENTKEYS_GATE_ADMIN_TOKEN_FILE=str(relay_directory / "admin.key"),
                 AGENTKEYS_GATE_TURN_URL=components["model_relay"][1] + "/v1", AGENTKEYS_BUNDLER_URL=components["bundler"][1],
                 BROKER_SPONSOR_SIGNER_KEY_FILE=str(directory / "bundler/submitter.key"))
+            environment.update(AGENTKEYS_DELEGATE_KEYS="signer", AGENTKEYS_SIGNER_URL=endpoints["signer"])
+            for name in WORKERS:
+                worker = "cred" if name == "credentials" else name
+                environment[f"AGENTKEYS_WORKER_{worker.upper()}_URL"] = endpoints[name]
+            environment.update(runtime_environment(repository, directory, manifest["runtime"]))
+            reserved_listeners["broker"].close()
             components["broker"] = launch(binaries / BROKER_BINARY,
                 broker_arguments(broker_directory, manifest["broker_port"]),
                 environment, directory / "broker.log", children)
             if components["broker"][1] != environment["BROKER_OIDC_ISSUER"]:
                 raise ValueError("Broker listener differs from the persisted session issuer")
-            components["signer"] = launch(binaries / SIGNER_BINARY,
+            components["signer"] = launch_reserved("signer", binaries / SIGNER_BINARY,
                 ["--development", "--profile", profile_path, "--broker-public-key", public_key,
                  "--master-secret-file", directory / "signer/master.key"],
-                contracts.tool_environment(), directory / "signer.log", children)
+                contracts.tool_environment())
             for data_class, worker_binary in WORKERS.items():
                 worker_directory = directory / data_class
                 common = ["--development", "--profile", profile_path, "--broker-public-key", public_key]
@@ -314,9 +393,9 @@ def serve(repository, state, configured):
                     [*common, "--database", worker_directory / "objects.db", "--data-class", data_class],
                     contracts.tool_environment(), directory / f"{data_class}-store.log", children)
                 components[data_class + "_store"] = store
-                components[data_class] = launch(binaries / worker_binary,
+                components[data_class] = launch_reserved(data_class, binaries / worker_binary,
                     [*common, "--storage-url", store[1], "--development-kek-file", worker_directory / "development.key"],
-                    contracts.tool_environment(), directory / f"{data_class}.log", children)
+                    contracts.tool_environment())
 
             def snapshot():
                 services = {name:{"url":endpoint, "healthy":process.poll() is None and healthy(endpoint, name in ("broker", "model_relay"))}
@@ -328,7 +407,7 @@ def serve(repository, state, configured):
                                    and profile.get("contract_set_version") ==
                                    (repository / "crates/agentkeys-chain/VERSION").read_text().strip())
                 return {"running":True, "service_schema":MANIFEST_VERSION, "ready":running_chain["running"] and profile_matches and all(item["healthy"] for item in services.values()),
-                        "development_only":True, "broker_port":manifest["broker_port"],
+                        "development_only":True, "broker_port":manifest["broker_port"], "runtime":manifest["runtime"],
                         "chain_running":running_chain["running"], "profile_matches":profile_matches, "services":services}
 
             if not snapshot()["ready"]:
@@ -372,6 +451,7 @@ def serve(repository, state, configured):
             signal.signal(signal.SIGTERM, signal.SIG_IGN)
             signal.signal(signal.SIGINT, signal.SIG_IGN)
             stop_children(children)
+            reservations.close()
             if bound:
                 path.unlink(missing_ok=True)
 

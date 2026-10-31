@@ -9,6 +9,33 @@ from terrier_local import deployment, local_state, services
 
 
 class LocalServicesTests(unittest.TestCase):
+    def test_runtime_configuration_is_explicit_persistent_and_engine_bound(self):
+        manifest = {"version":4, "initialized":True}
+        self.assertIsNone(services.runtime_configuration(manifest))
+        for image, endpoint in (("image", None), (None, "/tmp/test.sock"), ("image", "tcp://remote:1"),
+                                ("bad image", "/tmp/test.sock")):
+            with self.assertRaises(ValueError):
+                services.runtime_configuration(manifest, image, endpoint)
+        configured = services.runtime_configuration(manifest, "fixture-image", "/tmp/test.sock")
+        current = {"version":services.MANIFEST_VERSION, "initialized":True, "runtime":configured}
+        self.assertEqual(services.runtime_configuration(current), configured)
+        updated = services.runtime_configuration(current, "updated-image", "/tmp/test.sock")
+        self.assertEqual(updated["namespace"], configured["namespace"])
+        with self.assertRaisesRegex(ValueError, "another Docker socket"):
+            services.runtime_configuration(current, "fixture-image", "/tmp/another.sock")
+        current.pop("runtime")
+        with self.assertRaisesRegex(ValueError, "configuration is missing"):
+            services.runtime_configuration(current)
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            environment = services.runtime_environment(directory, directory, configured)
+            self.assertEqual(environment["AGENT_TERRIER_RUNTIME_NAMESPACE"], configured["namespace"])
+            client_config = directory / "docker-client/config.json"
+            self.assertEqual(client_config.stat().st_mode & 0o777, 0o600)
+            local_state.write_json(client_config, {"credsStore":"must-not-use"})
+            with self.assertRaisesRegex(ValueError, "isolated configuration"):
+                services.runtime_environment(directory, directory, configured)
+
     def test_missing_existing_keys_and_changed_deployment_never_generate_replacements(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
