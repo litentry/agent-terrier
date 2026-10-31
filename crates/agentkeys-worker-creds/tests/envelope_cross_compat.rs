@@ -33,7 +33,7 @@ fn aad_lowercase_actor_only() {
     let with_lower = envelope::aad("x", &actor, "openrouter", 0);
     assert_ne!(
         with_upper, with_lower,
-        "AAD must preserve service casing — CLI's s3_backend.rs inlines service as-is"
+        "AAD must preserve service casing — legacy envelopes preserve service spelling"
     );
 }
 

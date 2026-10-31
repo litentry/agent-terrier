@@ -20,7 +20,6 @@ use agentkeys_core::backend::{BackendError, CredentialBackend};
 use agentkeys_core::chain_profile::ChainProfile;
 use agentkeys_core::init_flow;
 use agentkeys_core::mock_client::MockHttpClient;
-use agentkeys_core::s3_backend::{S3CredentialBackend, WriteEnvelope};
 pub use agentkeys_core::session_store;
 use agentkeys_core::session_store::SessionStore;
 use agentkeys_core::signer_client::{HttpSignerClient, SignerClient, SignerClientError};
@@ -86,22 +85,10 @@ fn wrap_backend_error(err: BackendError) -> anyhow::Error {
     anyhow!("{}", format_backend_error(&err))
 }
 
-/// Which `CredentialBackend` impl `agentkeys` should route credential CRUD
-/// through. The legacy `Http` impl talks to the mock-server's
-/// `/credential/*` endpoints; `S3` (issue #85) PUT/GETs encrypted blobs at
-/// `s3://$BUCKET/bots/<wallet|actor_omni>/credentials/<service>.enc`.
-/// `Sidecar` is the stage-1-v2 target (localhost daemon proxy mints
-/// cap-tokens against the on-chain ScopeContract + SidecarRegistry); it is
-/// declared here so the CLI surface is forward-compatible, but the daemon
-/// implementation lands in a follow-up — calling it today returns a clear
-/// "not yet implemented" error rather than silently falling back to a
-/// weaker mode. Every other trait method (sessions, audit, identity,
-/// scope, inbox, rendezvous, auth-requests) still goes through
-/// `MockHttpClient` regardless of this flag.
+/// Backend selection for the legacy mock commands. Local commands use capabilities.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CredentialBackendKind {
     Http,
-    S3,
     Sidecar,
 }
 
@@ -112,42 +99,11 @@ impl CredentialBackendKind {
     pub fn parse(raw: &str) -> Result<Self> {
         match raw.to_ascii_lowercase().as_str() {
             "http" | "mock" => Ok(Self::Http),
-            "s3" => Ok(Self::S3),
             "sidecar" => Ok(Self::Sidecar),
             other => Err(anyhow!(
-                "unknown --credential-backend '{}': expected 'http', 's3', or 'sidecar'",
+                "unknown --credential-backend '{}': expected 'http' or 'sidecar'; use `terrier cred` for local storage",
                 other
             )),
-        }
-    }
-}
-
-/// Which envelope format the S3 backend writes. Defaults to `V1` to keep
-/// existing #87 deployments working unchanged; operators opt in to `V2`
-/// once they've finished the dual-tag + bucket-policy migration steps in
-/// `docs/plan/v2-issues/issue-v2-stage-1-foundation.md`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EnvelopeVersionFlag {
-    V1,
-    V2,
-}
-
-impl EnvelopeVersionFlag {
-    pub fn parse(raw: &str) -> Result<Self> {
-        match raw.to_ascii_lowercase().as_str() {
-            "v1" | "1" => Ok(Self::V1),
-            "v2" | "2" => Ok(Self::V2),
-            other => Err(anyhow!(
-                "unknown --envelope-version '{}': expected 'v1' or 'v2'",
-                other
-            )),
-        }
-    }
-
-    fn to_write_envelope(self) -> WriteEnvelope {
-        match self {
-            Self::V1 => WriteEnvelope::V1,
-            Self::V2 => WriteEnvelope::V2,
         }
     }
 }
@@ -176,26 +132,8 @@ pub struct CommandContext {
     /// Issue #85: which `CredentialBackend` impl handles credential CRUD.
     /// Defaults to `Http` for backwards-compat during the migration window.
     pub credential_backend: CredentialBackendKind,
-    /// Issue #85: S3 bucket holding `bots/<wallet>/credentials/<service>.enc`.
-    /// Defaults to `AGENTKEYS_BUCKET` env var, same name cloud-setup.md
-    /// uses. Required when `credential_backend == S3`.
-    pub data_bucket: Option<String>,
-    /// Issue #85: AWS region for the S3 client. `None` falls back to the
-    /// SDK default chain (`AWS_REGION` or shared config).
-    pub data_region: Option<String>,
-    /// Issue #85: signer base URL for `/dev/sign-message`-driven KEK
-    /// derivation. Required when `credential_backend == S3`.
     pub signer_url: Option<String>,
-    /// Issue #85: 64-lowercase-hex `omni_account`, the derivation domain
-    /// the signer keys off. Required when `credential_backend == S3`.
-    /// Issue #74 step 2 will pull this from the session JWT directly; this
-    /// is a temporary operator-supplied bridge.
     pub omni_account: Option<String>,
-    /// v2 stage 1: which envelope shape `--credential-backend=s3` writes.
-    /// Defaults to `V1` so legacy #87 deployments keep working; flip to
-    /// `V2` per-operator post-migration. Reads always accept both formats
-    /// — only writes care about this flag.
-    pub envelope_version: EnvelopeVersionFlag,
     /// v2 stage 1: which EVM chain backbone to talk to. Resolved per
     /// `ChainProfile::resolve` order — CLI `--chain` flag wins over
     /// `$AGENTKEYS_CHAIN` env over the built-in local default.
@@ -219,28 +157,15 @@ impl CommandContext {
                 .ok()
                 .filter(|s| !s.is_empty()),
             credential_backend: CredentialBackendKind::Http,
-            data_bucket: std::env::var("AGENTKEYS_BUCKET")
-                .ok()
-                .filter(|s| !s.is_empty()),
-            data_region: std::env::var("AWS_REGION")
-                .ok()
-                .or_else(|| std::env::var("AWS_DEFAULT_REGION").ok())
-                .filter(|s| !s.is_empty()),
             signer_url: std::env::var("AGENTKEYS_SIGNER_URL")
                 .ok()
                 .filter(|s| !s.is_empty()),
             omni_account: std::env::var("AGENTKEYS_OMNI_ACCOUNT")
                 .ok()
                 .filter(|s| !s.is_empty()),
-            envelope_version: EnvelopeVersionFlag::V1,
             chain_profile_cli_name: None,
             cached_chain_profile: std::sync::OnceLock::new(),
         }
-    }
-
-    pub fn with_envelope_version(mut self, v: EnvelopeVersionFlag) -> Self {
-        self.envelope_version = v;
-        self
     }
 
     pub fn with_chain_profile_name(mut self, name: Option<String>) -> Self {
@@ -298,11 +223,6 @@ impl CommandContext {
         self
     }
 
-    pub fn with_data_bucket(mut self, bucket: Option<String>) -> Self {
-        self.data_bucket = bucket;
-        self
-    }
-
     pub fn with_signer_url(mut self, signer_url: Option<String>) -> Self {
         self.signer_url = signer_url;
         self
@@ -352,11 +272,6 @@ impl CommandContext {
             .load_with_legacy_fallback(&self.session_id)
     }
 
-    /// Synchronous backend used by every CLI command that does NOT touch
-    /// credential CRUD (sessions, audit, identity, scope, rendezvous,
-    /// inbox). `--credential-backend s3` does NOT change this — those
-    /// endpoints still live on the legacy mock-server. See
-    /// `credential_backend()` for the credential-CRUD path.
     fn backend(&self) -> Arc<dyn CredentialBackend> {
         if let Some(ref b) = self.backend_override {
             b.clone()
@@ -365,127 +280,16 @@ impl CommandContext {
         }
     }
 
-    /// Backend handling credential CRUD (`store_credential`,
-    /// `read_credential`, `teardown_agent`, `list_credentials`). When
-    /// `--credential-backend s3` is selected, builds an
-    /// `S3CredentialBackend` against `AGENTKEYS_BUCKET` + signer. Falls
-    /// back to the `Http` (mock-server) path otherwise.
-    ///
-    /// **AWS-creds resolution (issue #85 / codex adversarial review).**
-    /// When `--broker-url` is set, this method *mints fresh
-    /// OIDC-scoped AWS temp creds via the broker* and injects them
-    /// directly into the S3 client. That's the only way to keep the
-    /// `agentkeys_user_wallet` PrincipalTag isolation property: relying
-    /// on `aws_config::defaults` would let the operator's *static* AWS
-    /// admin creds drive the S3 PUT (no PrincipalTag, no per-operator
-    /// scoping). It also avoids the trap where `cmd_provision` minted
-    /// creds only for the scraper subprocess env, leaving the parent
-    /// process's `S3CredentialBackend` with no creds at all.
-    ///
-    /// Without `--broker-url` the backend falls back to
-    /// `aws_config::defaults` (process AWS_* env or shared config) —
-    /// fine for callers who already exported `AWS_*` manually.
-    ///
-    /// Async because both the broker JWT-mint + STS exchange and the
-    /// AWS SDK config loader are async.
     async fn credential_backend(&self) -> Result<Arc<dyn CredentialBackend>> {
-        if let Some(ref b) = self.backend_override {
-            return Ok(b.clone());
+        if let Some(ref backend) = self.backend_override {
+            return Ok(backend.clone());
         }
         match self.credential_backend {
             CredentialBackendKind::Http => Ok(Arc::new(MockHttpClient::new(&self.backend_url))),
-            CredentialBackendKind::S3 => {
-                let bucket = self
-                    .data_bucket
-                    .clone()
-                    .ok_or_else(|| anyhow!(
-                        "--credential-backend=s3 requires --bucket or AGENTKEYS_BUCKET env"
-                    ))?;
-                let signer_url = self
-                    .signer_url
-                    .clone()
-                    .ok_or_else(|| anyhow!(
-                        "--credential-backend=s3 requires --signer-url or AGENTKEYS_SIGNER_URL env (for client-side KEK derivation)"
-                    ))?;
-                let omni = self
-                    .omni_account
-                    .clone()
-                    .ok_or_else(|| anyhow!(
-                        "--credential-backend=s3 requires --omni-account or AGENTKEYS_OMNI_ACCOUNT env (until issue #74 step 2 persists omni in the session JWT)"
-                    ))?;
-                let session_token = self.load_session().ok().map(|s| s.token.clone());
-                let mut signer = HttpSignerClient::new(&signer_url);
-                if let Some(ref tok) = session_token {
-                    signer = signer.with_session_jwt(tok.clone());
-                }
-
-                let aws_creds = self.mint_s3_credentials(session_token.as_deref()).await?;
-
-                let backend = S3CredentialBackend::new(
-                    bucket,
-                    self.data_region.as_deref(),
-                    aws_creds,
-                    Arc::new(signer),
-                    omni,
-                )
-                .await
-                .with_write_envelope(self.envelope_version.to_write_envelope());
-                Ok(Arc::new(backend))
-            }
             CredentialBackendKind::Sidecar => Err(anyhow!(
-                "--credential-backend=sidecar is not yet wired through. The daemon proxy + broker cap-mint endpoints + credentials-worker are shipped \
-                 (run `agentkeys-daemon proxy` + `agentkeys-broker-server` + `agentkeys-worker-creds`), but the CLI→daemon `/v1/cred/*` handoff isn't stitched yet. \
-                 Tracked in #91. For stage-1 use --credential-backend=s3 with --envelope-version=v2 (actor_omni-keyed paths, same envelope bytes the worker would write) \
-                 or --credential-backend=http for the legacy mock-server."
+                "legacy sidecar handoff is unavailable; use `terrier cred` for local capability storage"
             )),
         }
-    }
-
-    /// Mint broker-scoped AWS temp creds for the S3 client when the
-    /// operator has a Stage-7 broker configured. When not configured,
-    /// return `None` so the SDK falls back to its default cred chain.
-    ///
-    /// Same OIDC + `AssumeRoleWithWebIdentity` path that
-    /// `broker_env_for_provision` uses for the scraper subprocess.
-    /// `cmd_provision` ends up making two STS calls per run (one for
-    /// the scraper, one for the parent's S3 client) — that's cheap
-    /// (each session lasts an hour) and the alternative is threading
-    /// the creds through the orchestrator just to avoid a second STS
-    /// round-trip.
-    async fn mint_s3_credentials(
-        &self,
-        session_token: Option<&str>,
-    ) -> Result<Option<aws_credential_types::Credentials>> {
-        let Some(broker_url) = self.broker_url.as_deref() else {
-            return Ok(None);
-        };
-        let Some(token) = session_token else {
-            return Err(anyhow!(
-                "--credential-backend=s3 with --broker-url requires an active session (run `agentkeys init` first)"
-            ));
-        };
-        let role_arn = std::env::var("AGENTKEYS_DATA_ROLE_ARN").map_err(|_| anyhow!(
-            "--credential-backend=s3 with --broker-url requires AGENTKEYS_DATA_ROLE_ARN env (issue #71 Option A)"
-        ))?;
-        let region = self
-            .data_region
-            .clone()
-            .unwrap_or_else(|| "us-east-1".to_string());
-        let temp = fetch_via_broker_default_ttl(broker_url, token, &role_arn, &region).await?;
-        // Convert the broker-minted creds into the SDK's canonical
-        // `Credentials` type so we can plug them directly into the S3
-        // config builder. The expiration is informational — the SDK
-        // doesn't refresh static creds, but with a 1h TTL the parent
-        // process's S3 client won't outlive a single CLI invocation.
-        let expiry = std::time::SystemTime::UNIX_EPOCH
-            + std::time::Duration::from_secs(temp.expiration.max(0) as u64);
-        Ok(Some(aws_credential_types::Credentials::new(
-            temp.access_key_id,
-            temp.secret_access_key,
-            Some(temp.session_token),
-            Some(expiry),
-            "agentkeys-broker-oidc",
-        )))
     }
 
     /// Resolve the session store for this context: the injected override
@@ -733,8 +537,6 @@ pub async fn cmd_store(
     let session = ctx
         .load_session()
         .context("load session (run `agentkeys init` first)")?;
-    // Identity resolution (alias / email → wallet) always goes through the
-    // legacy backend — issue #85's S3 path only handles credential CRUD.
     let id_backend = ctx.backend();
     let agent_id = resolve_agent(&id_backend, &session, agent)?;
     let service_name = ServiceName(service.to_string());
@@ -744,19 +546,6 @@ pub async fn cmd_store(
         match ctx.credential_backend {
             CredentialBackendKind::Http => {
                 eprintln!("[verbose] POST {}/credential/store", ctx.backend_url);
-            }
-            CredentialBackendKind::S3 => {
-                let prefix = match ctx.envelope_version {
-                    EnvelopeVersionFlag::V1 => agent_id.0.to_lowercase(),
-                    EnvelopeVersionFlag::V2 => actor_omni_hex(&agent_id),
-                };
-                eprintln!(
-                    "[verbose] PUT s3://{}/bots/{}/credentials/{}.enc (envelope={:?})",
-                    ctx.data_bucket.as_deref().unwrap_or("?"),
-                    prefix,
-                    service,
-                    ctx.envelope_version,
-                );
             }
             CredentialBackendKind::Sidecar => {
                 eprintln!("[verbose] PUT (sidecar) — not yet implemented");
@@ -789,18 +578,6 @@ pub async fn cmd_read(ctx: &CommandContext, agent: Option<&str>, service: &str) 
         match ctx.credential_backend {
             CredentialBackendKind::Http => {
                 eprintln!("[verbose] GET {}/credential/read", ctx.backend_url);
-            }
-            CredentialBackendKind::S3 => {
-                // Reads try v2 first then fall back to v1 — surface both
-                // paths so operators can correlate verbose output with
-                // ListObjectsV2 in CloudTrail.
-                eprintln!(
-                    "[verbose] GET s3://{bucket}/bots/{omni}/credentials/{service}.enc (v2; falls back to wallet={wallet})",
-                    bucket = ctx.data_bucket.as_deref().unwrap_or("?"),
-                    omni = actor_omni_hex(&agent_id),
-                    service = service,
-                    wallet = agent_id.0.to_lowercase(),
-                );
             }
             CredentialBackendKind::Sidecar => {
                 eprintln!("[verbose] GET (sidecar) — not yet implemented");
@@ -1034,15 +811,6 @@ pub async fn cmd_teardown(ctx: &CommandContext, agent: &str) -> Result<String> {
         match ctx.credential_backend {
             CredentialBackendKind::Http => {
                 eprintln!("[verbose] DELETE {}/credential/teardown", ctx.backend_url);
-            }
-            CredentialBackendKind::S3 => {
-                let wallet_addr = WalletAddress(agent.to_string());
-                eprintln!(
-                    "[verbose] DELETE s3://{}/bots/{{{wallet},{omni}}}/credentials/*",
-                    ctx.data_bucket.as_deref().unwrap_or("?"),
-                    wallet = agent.to_lowercase(),
-                    omni = actor_omni_hex(&wallet_addr),
-                );
             }
             CredentialBackendKind::Sidecar => {
                 eprintln!("[verbose] DELETE (sidecar) — not yet implemented");
@@ -1843,11 +1611,6 @@ pub async fn cmd_whoami(
 
     let mut out = serde_json::Map::new();
     out.insert("session_wallet".into(), json!(session.wallet.0));
-    // v2 stage 1: arch.md §14.1 names the stable per-operator anchor
-    // `actor_omni = SHA256("agentkeys"||"evm"||initial_master_wallet)`.
-    // Surface it next to the wallet so operators can sanity-check the
-    // bucket-policy PrincipalTag + S3 path their backend will use after
-    // the dual-tag migration completes.
     let actor_omni = actor_omni_hex(&session.wallet);
     out.insert("agentkeys_actor_omni".into(), json!(actor_omni));
     if let Some(scope) = &session.scope {

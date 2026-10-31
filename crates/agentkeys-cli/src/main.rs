@@ -2,7 +2,7 @@ use agentkeys_cli::{
     cmd_approve, cmd_feedback, cmd_inbox_list, cmd_inbox_provision, cmd_init_with_force,
     cmd_provision, cmd_read, cmd_revoke, cmd_run, cmd_scope, cmd_signer_derive,
     cmd_signer_preview_7730, cmd_signer_sign, cmd_signer_sign_typed_data, cmd_store, cmd_teardown,
-    cmd_whoami, CommandContext, CredentialBackendKind, EnvelopeVersionFlag, InitMode,
+    cmd_whoami, CommandContext, CredentialBackendKind, InitMode,
 };
 
 use clap::{Parser, Subcommand};
@@ -43,17 +43,9 @@ struct Cli {
         long,
         env = "AGENTKEYS_CREDENTIAL_BACKEND",
         default_value = "http",
-        help = "Where credential CRUD lands. 'http' (default) talks to the legacy mock-server. 's3' encrypts client-side and PUTs to s3://$AGENTKEYS_BUCKET/bots/<wallet|actor_omni>/credentials/<service>.enc, gated by the OIDC-assumed agentkeys-data-role + PrincipalTag isolation. 'sidecar' (stage-1 v2 — not yet implemented) talks to the localhost daemon proxy. The legacy backend still handles sessions, audit, identity, and scope regardless of this flag."
+        help = "Legacy mock credential backend: http or sidecar (unavailable). Use terrier cred for local capability storage."
     )]
     credential_backend: String,
-
-    #[arg(
-        long,
-        env = "AGENTKEYS_ENVELOPE_VERSION",
-        default_value = "v1",
-        help = "v2 stage 1 — which envelope shape --credential-backend=s3 writes. 'v1' (default) keys S3 path + AAD off the master wallet (legacy #87 layout). 'v2' keys both off actor_omni_hex per arch.md §14.4 — stable across K3 rotation. Reads always accept BOTH formats during the migration window, so this flag only affects writes."
-    )]
-    envelope_version: String,
 
     #[arg(
         long,
@@ -64,22 +56,15 @@ struct Cli {
 
     #[arg(
         long,
-        env = "AGENTKEYS_BUCKET",
-        help = "S3 bucket holding bots/<wallet>/credentials/<service>.enc. Required when --credential-backend=s3."
-    )]
-    bucket: Option<String>,
-
-    #[arg(
-        long,
         env = "AGENTKEYS_SIGNER_URL",
-        help = "Signer base URL — when --credential-backend=s3 is set, the S3 backend calls /dev/sign-message under --omni-account to derive a deterministic per-(wallet, service) KEK for client-side AES-256-GCM."
+        help = "Signer base URL for explicit signing commands"
     )]
     signer_url: Option<String>,
 
     #[arg(
         long,
         env = "AGENTKEYS_OMNI_ACCOUNT",
-        help = "64-lowercase-hex omni_account for KEK derivation when --credential-backend=s3. Issue #74 step 2 will pull this from the session JWT automatically."
+        help = "Account identity for explicit signing commands"
     )]
     omni_account: Option<String>,
 
@@ -1728,20 +1713,11 @@ async fn main() {
             std::process::exit(1);
         }
     };
-    let envelope_version = match EnvelopeVersionFlag::parse(&cli.envelope_version) {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("{e}");
-            std::process::exit(1);
-        }
-    };
     let ctx = CommandContext::new(&cli.backend, cli.verbose, cli.json)
         .with_broker_url(cli.broker_url.clone())
         .with_session_id(cli.session_id.clone())
         .with_credential_backend(cred_kind)
-        .with_envelope_version(envelope_version)
         .with_chain_profile_name(cli.chain.clone())
-        .with_data_bucket(cli.bucket.clone())
         .with_signer_url(cli.signer_url.clone())
         .with_omni_account(cli.omni_account.clone());
 
