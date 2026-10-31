@@ -85,6 +85,8 @@ Local owner registration binds an actual actor-owned K10 request-signing key alo
 
 Broker capability minting resolves authority coordinates through that same chain-profile owner. The explicit CLI credential qualification runs actual login, broker signing, worker verification and persistent SQLite storage against fresh local contracts. Owner and delegated access, negative authorization cases, grant/device revocation and worker/storage restart are exercised without a fixture issuer. This credential check does not complete delegate-session provisioning, browser signer setup or the container journey.
 
+Broker session and identity-token key persistence shares a small serialization adapter over `agentkeys-core::protected_file`. Creation is exclusive and private from the first write; loading rejects unsafe permissions, links, ownership and excessive size. Concurrent creation cannot replace the winning identity. This replaces duplicated read/write-then-chmod paths; it preserves key-purpose validation and uses the shared file-security implementation.
+
 ## Local agent runtime
 
 The broker accepts an injected `SandboxRuntime`; its public composition uses `DockerRuntime`. Agent creation reuses the existing authorized broker routes and create-only credential callback. Docker connects through an explicit local Unix socket, requires the development profile guard, inspects an already-loaded image and creates by immutable image digest with pulling disabled.

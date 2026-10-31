@@ -78,15 +78,7 @@ impl OidcKeypair {
             purpose: KeypairPurpose::Oidc,
         };
 
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| BrokerError::Internal(format!("create dir {parent:?}: {e}")))?;
-        }
-        let json = serde_json::to_string_pretty(&persisted)
-            .map_err(|e| BrokerError::Internal(format!("serialize keypair: {e}")))?;
-        std::fs::write(path, json)
-            .map_err(|e| BrokerError::Internal(format!("write keypair {path:?}: {e}")))?;
-        set_owner_only_inner(path)?;
+        crate::key_file::create(path, &persisted)?;
 
         Ok(Self {
             kid,
@@ -101,10 +93,7 @@ impl OidcKeypair {
     /// managed by `crate::jwt::SessionKeypair::load`. Pre-Stage-7 keypair
     /// files have no `purpose` field and are accepted as `oidc`.
     pub fn load(path: &Path) -> BrokerResult<Self> {
-        let raw = std::fs::read_to_string(path)
-            .map_err(|e| BrokerError::Internal(format!("read keypair {path:?}: {e}")))?;
-        let persisted: PersistedKeypair = serde_json::from_str(&raw)
-            .map_err(|e| BrokerError::Internal(format!("parse keypair {path:?}: {e}")))?;
+        let persisted: PersistedKeypair = crate::key_file::load(path)?;
 
         if persisted.purpose != KeypairPurpose::Oidc {
             return Err(BrokerError::Internal(format!(
@@ -175,29 +164,6 @@ impl OidcKeypair {
         header.kid = Some(self.kid.clone());
         encode(&header, claims, &key).map_err(|e| BrokerError::Internal(format!("sign jwt: {e}")))
     }
-}
-
-/// Internal chmod-0600 helper. `pub(crate)` so the parallel
-/// `crate::jwt::SessionKeypair` can reuse it without duplicating the
-/// platform-conditional code.
-#[cfg(unix)]
-pub(crate) fn set_owner_only_inner(path: &Path) -> BrokerResult<()> {
-    use std::os::unix::fs::PermissionsExt;
-    let mut perms = std::fs::metadata(path)
-        .map_err(|e| BrokerError::Internal(format!("metadata {path:?}: {e}")))?
-        .permissions();
-    perms.set_mode(0o600);
-    std::fs::set_permissions(path, perms)
-        .map_err(|e| BrokerError::Internal(format!("chmod {path:?}: {e}")))?;
-    Ok(())
-}
-
-#[cfg(not(unix))]
-pub(crate) fn set_owner_only_inner(_path: &Path) -> BrokerResult<()> {
-    // On non-Unix, file ACLs aren't 0600-shaped. The README warns operators
-    // to run the broker on Linux; we don't fail startup on Windows just to
-    // make CI green.
-    Ok(())
 }
 
 /// Bridges `rand_core 0.6` (what `p256` 0.13 expects) to the system OS RNG.

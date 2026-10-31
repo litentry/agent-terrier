@@ -75,15 +75,7 @@ impl SessionKeypair {
             purpose: KeypairPurpose::Session,
         };
 
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| BrokerError::Internal(format!("create dir {parent:?}: {e}")))?;
-        }
-        let json = serde_json::to_string_pretty(&persisted)
-            .map_err(|e| BrokerError::Internal(format!("serialize keypair: {e}")))?;
-        std::fs::write(path, json)
-            .map_err(|e| BrokerError::Internal(format!("write keypair {path:?}: {e}")))?;
-        crate::oidc::set_owner_only_inner(path)?;
+        crate::key_file::create(path, &persisted)?;
 
         Ok(Self {
             kid,
@@ -99,13 +91,7 @@ impl SessionKeypair {
     /// BROKER_SESSION_KEYPAIR_PATH at the OIDC keypair file will get a
     /// load-time error, not a same-key signing accident.
     pub fn load(path: &Path) -> BrokerResult<Self> {
-        let raw = std::fs::read_to_string(path)
-            .map_err(|e| BrokerError::Internal(format!("read keypair {path:?}: {e}")))?;
-        let persisted: PersistedSessionKeypair = serde_json::from_str(&raw).map_err(|e| {
-            BrokerError::Internal(format!(
-                "parse session keypair {path:?}: {e} (the file may be missing the \"purpose\" field — session keypairs must be tagged purpose=session)"
-            ))
-        })?;
+        let persisted: PersistedSessionKeypair = crate::key_file::load(path)?;
 
         if persisted.purpose != KeypairPurpose::Session {
             return Err(BrokerError::Internal(
@@ -212,7 +198,8 @@ mod tests {
           "private_key_pem": "-----BEGIN PRIVATE KEY-----\nbm9uc2Vuc2U=\n-----END PRIVATE KEY-----\n",
           "purpose": "oidc"
         }"#;
-        std::fs::write(&path, raw).unwrap();
+        agentkeys_core::protected_file::write(path.to_str().unwrap(), raw.as_bytes(), true)
+            .unwrap();
 
         let err = SessionKeypair::load(&path)
             .err()
@@ -235,7 +222,8 @@ mod tests {
           "kid": "untagged-1",
           "private_key_pem": "-----BEGIN PRIVATE KEY-----\nbm9uc2Vuc2U=\n-----END PRIVATE KEY-----\n"
         }"#;
-        std::fs::write(&path, raw).unwrap();
+        agentkeys_core::protected_file::write(path.to_str().unwrap(), raw.as_bytes(), true)
+            .unwrap();
         assert!(SessionKeypair::load(&path).is_err());
     }
 }
