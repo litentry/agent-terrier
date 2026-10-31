@@ -25,11 +25,8 @@ pub struct BrokerConfig {
     /// #541 — the host-minted shared bearer authenticating the CHANNEL WORKER
     /// to `/v1/cap/channel-sts`. Empty = the endpoint refuses (not configured).
     pub channel_sts_token: String,
-    /// The data-plane credential provider this stack runs (`AGENTKEYS_STS_PROVIDER`:
-    /// `aws` — the default — or `ve`). Selects the broker's own STS client
-    /// (main.rs) AND is injected into every delegate sandbox at create
-    /// (`sandbox_env::STS_PROVIDER`) so the delegate runtime mints its own
-    /// storage credential the way this stack does. Unknown values fail boot.
+    /// The local binary accepts only `local`; embedding applications inject
+    /// their own optional external credential adapter through AppState.
     pub sts_provider: String,
     pub audit_db_path: PathBuf,
     pub aws_region: String,
@@ -71,27 +68,9 @@ pub struct BrokerConfig {
 
 impl BrokerConfig {
     pub fn from_env() -> anyhow::Result<Self> {
-        // Issue #71 OIDC-only migration: the broker no longer accepts static
-        // IAM-user credentials. AssumeRoleWithWebIdentity is JWT-authenticated
-        // and the `caller_identity_ok` startup probe (when enabled) reads
-        // creds from the SDK's default chain — same as before but without
-        // the DAEMON_ACCESS_KEY_ID escape hatch.
-        //
-        // BROKER_DATA_ROLE_ARN can be derived from ACCOUNT_ID. Operator can
-        // still override. BROKER_AGENT_ROLE_ARN is accepted as a legacy
-        // alias for callers that haven't migrated.
         let data_role_arn = std::env::var(env::BROKER_DATA_ROLE_ARN)
             .or_else(|_| std::env::var(env::BROKER_AGENT_ROLE_ARN))
-            .or_else(|_| {
-                std::env::var(env::ACCOUNT_ID)
-                    .map(|account_id| format!("arn:aws:iam::{}:role/agentkeys-data-role", account_id))
-            })
-            .map_err(|_| anyhow::anyhow!(
-                "missing required env var: set {} explicitly (legacy: {}), or set {} and the broker will derive arn:aws:iam::$ACCOUNT_ID:role/agentkeys-data-role",
-                env::BROKER_DATA_ROLE_ARN,
-                env::BROKER_AGENT_ROLE_ARN,
-                env::ACCOUNT_ID,
-            ))?;
+            .unwrap_or_default();
 
         // #295 P1 §7a — optional. Empty disables /v1/cap/canonical-sts with a
         // clear error (not a boot failure), so brokers predating this keep booting.
@@ -108,10 +87,9 @@ impl BrokerConfig {
             .to_ascii_lowercase()
             .as_str()
         {
-            "" | "aws" => "aws".to_string(),
-            "ve" => "ve".to_string(),
+            "" | "local" => "local".to_string(),
             other => anyhow::bail!(
-                "unknown AGENTKEYS_STS_PROVIDER={other:?} (expected \"aws\" or \"ve\") — refusing to guess a credential plane"
+                "AGENTKEYS_STS_PROVIDER={other:?} is unsupported by the local binary; external credential adapters require an embedding application"
             ),
         };
 

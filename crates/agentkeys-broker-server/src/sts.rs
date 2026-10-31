@@ -66,6 +66,46 @@ pub trait StsClient: Send + Sync {
     fn supports_inline_session_policy(&self) -> bool;
 }
 
+pub struct UnavailableStsClient;
+
+#[async_trait]
+impl StsClient for UnavailableStsClient {
+    async fn assume_role_with_web_identity(
+        &self,
+        _role: &str,
+        _session: &str,
+        _token: &str,
+        _duration: i32,
+    ) -> BrokerResult<AssumedCredentials> {
+        Err(BrokerError::Unavailable(
+            "external credential exchange is not configured".into(),
+        ))
+    }
+
+    async fn assume_role_scoped(
+        &self,
+        _role: &str,
+        _session: &str,
+        _token: &str,
+        _duration: i32,
+        _policy: Option<&str>,
+    ) -> BrokerResult<AssumedCredentials> {
+        Err(BrokerError::Unavailable(
+            "external credential exchange is not configured".into(),
+        ))
+    }
+
+    async fn caller_identity_ok(&self) -> BrokerResult<()> {
+        Err(BrokerError::Unavailable(
+            "external credential exchange is not configured".into(),
+        ))
+    }
+
+    fn supports_inline_session_policy(&self) -> bool {
+        false
+    }
+}
+
 pub struct AwsStsClient {
     client: aws_sdk_sts::Client,
     /// #510: `assume_role_scoped` delegates to the provisioner's anonymous
