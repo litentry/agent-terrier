@@ -438,7 +438,7 @@ export class MappedBackend implements AgentKeysClient {
   }
 
   // #577 — which of these delegates run OLDER image bits than the current
-  // pre-cache registration (the "Update available" signal).
+  // image identity (the "Update available" signal).
   async agentImageStatus(deviceKeyHashes: string[]): Promise<Result<ApiImageStatus>> {
     return this.postJson<ApiImageStatus>('/v1/agent/image-status', {
       device_key_hashes: deviceKeyHashes,

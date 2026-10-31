@@ -1,32 +1,6 @@
-//! #577 — the ONE-CLICK delegate image update + the staleness surface.
-//!
-//! `POST /v1/agent/update` (J1_master-gated) replaces the archive+respawn
-//! ceremony for image rollouts: it kills the delegate's live sandbox and
-//! re-creates it against the CURRENT precached image **reusing the durable
-//! #546 spawn context** — same actor/omni, same K10 derivation (a fresh #552
-//! J1 is minted per create), same chat channel, no on-chain write, no Touch
-//! ID, no slot movement. Between kill and re-create it performs a BEST-EFFORT
-//! runtime-home hand-off: export the old instance's on-disk `DSH_HOME`
-//! state through the in-sandbox bridge's #577 management surface, import it
-//! into the replacement, then re-source the agent. Every degradation
-//! (pre-#577 image with no export endpoint, ECS backend with no
-//! broker-routable management path, oversized home) is SURFACED in the
-//! response — the update itself still lands. (The wire doc's `hermes_home`
-//! FIELD NAME is the frozen shape, predating #621.)
-//!
-//! What the hand-off can and cannot preserve: the runtime home carries the
-//! profile patch, durable session JSONL and skills docs — those migrate.
-//! Anything held only in process memory dies with the instance, exactly as it
-//! already does at every veFaaS expiry (default lifetime 1440 min).
-//!
-//! `POST /v1/agent/image-status` (same auth) is the staleness signal: veFaaS
-//! exposes no image digest, but an instance FREEZES the pre-cache
-//! registration id it spawned from (`DescribeSandbox.ImageInfo.Id`) while a
-//! #568 refresh replaces the tag's registrations with a NEW one — so `frozen ∉
-//! current` is exactly "this delegate runs old bits", now visible in
-//! parent-control instead of via a shell probe. "Current" is every
-//! registration of the tag: one URL can hold duplicates (the 2026-09-30..10-04
-//! boot precache), and any of them serves the same bits.
+//! Owner-authorized runtime updates preserve actor identity and on-chain grants.
+//! Runtime-home export/import is best effort; any loss of continuity is surfaced.
+//! Image status compares immutable image identities rather than mutable tags.
 
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
@@ -86,66 +60,10 @@ pub struct SessionHandoff {
     pub detail: String,
 }
 
-/// `POST /v1/agent/image-status` body (J1_master-gated): the caller names the
-/// delegates it can see (the broker keeps no per-operator delegate index —
-/// chain is the registry, D1); each hash is chain-verified to belong to the
-/// session operator before any instance detail is returned.
-#[derive(Debug, Clone, Deserialize)]
-pub struct ImageStatusRequest {
-    pub operator_omni: String,
-    pub device_key_hashes: Vec<String>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct ImageStatusResponse {
-    /// The broker's configured `CR_IMAGE` tag ref (`null` = app default /
-    /// no registration-based backend).
-    pub image: Option<String>,
-    /// A CURRENT pre-cache registration id for `image`. When the tag holds
-    /// several (duplicates), the newest preheated one — display only; `stale`
-    /// counts any registration of the tag as current.
-    pub current_registration_id: Option<String>,
-    /// That registration's preheat state (`success` = 已预热).
-    pub precache_status: Option<String>,
-    pub delegates: Vec<DelegateImageStatus>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct DelegateImageStatus {
-    pub device_key_hash: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub sandbox_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub sandbox_status: Option<String>,
-    /// The instance's veFaaS lease deadline as RFC3339 (normalized at the
-    /// driver boundary — the vendor's own `2026-08-15 15:50:54 +0800 CST`
-    /// form is NOT safe for a client's `Date.parse`). Absent on backends
-    /// without a lease (ECS tasks have no expiry).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub expire_at: Option<String>,
-    /// The registration id this instance froze at spawn.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub booted_registration_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub booted_image_url: Option<String>,
-    /// The LIVE agent identity the instance's bridge `/healthz` reports —
-    /// what is actually RUNNING, not what the image tag claims. `agent_engine`
-    /// is the agent name the bridge reports (`dsh` since #621), `agent_version`
-    /// (the #483 bump cadence's ground truth), `model` the LLM endpoint id.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub agent_engine: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub agent_version: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub model: Option<String>,
-    /// `true` = running older bits than the tag's current registrations;
-    /// `null` = unknowable (no live instance / default image / no registration).
-    pub stale: Option<bool>,
-    /// Per-delegate probe failure (chain probe, describe) — the row is still
-    /// returned so one bad hash never hides the rest.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-}
+pub use agentkeys_protocol::console::{
+    AgentImageStatusRequest as ImageStatusRequest, ApiDelegateImageStatus as DelegateImageStatus,
+    ApiImageStatus as ImageStatusResponse,
+};
 
 // ─── shared auth + chain probe ───────────────────────────────────────────────
 
@@ -294,7 +212,7 @@ fn parse_agent_health(body: &[u8]) -> AgentHealth {
 }
 
 /// GET one instance's bridge `/healthz` through the gateway routing headers.
-/// Unauthenticated by design (veFaaS health-checks it), short-fused, and
+/// Public liveness check, bounded by a short timeout, and
 /// best-effort: any transport failure yields empty fields, never an error —
 /// a stale/booting instance's row still renders.
 async fn fetch_agent_health(
@@ -327,8 +245,7 @@ pub async fn agent_update(
     let Some(backend) = state.sandbox.clone() else {
         return Err(aerr(
             StatusCode::SERVICE_UNAVAILABLE,
-            "no sandbox lifecycle configured on this host (SANDBOX_FUNCTION_ID / \
-             AGENTKEYS_SANDBOX_ECS_CLUSTER both unset) — nothing to update",
+            "no local sandbox lifecycle configured; set AGENT_TERRIER_SANDBOX_IMAGE",
         ));
     };
     let (cfg, _broker_sk) =
@@ -571,7 +488,7 @@ pub(crate) async fn rotate_delegate_runtime(
         crate::handlers::sandbox::append_best_effort(env).await;
     }
 
-    // Re-create from the durable spawn context — the SAME path a veFaaS
+    // Re-create from the durable spawn context — the same path a runtime
     // expiry re-create takes (#546 reconstruction + fresh #552 J1 + lazily
     // re-provisioned metered gate key), so update can never drift from it.
     let provision = crate::handlers::sandbox::ensure_for_delegate(
@@ -681,8 +598,8 @@ pub async fn agent_image_status(
         // "no runtime" rather than a guessed staleness.
         return Ok(Json(ImageStatusResponse {
             image: None,
-            current_registration_id: None,
-            precache_status: None,
+            current_image_id: None,
+            image_status: None,
             delegates: req
                 .device_key_hashes
                 .iter()
@@ -691,8 +608,8 @@ pub async fn agent_image_status(
                     sandbox_id: None,
                     sandbox_status: None,
                     expire_at: None,
-                    booted_registration_id: None,
-                    booted_image_url: None,
+                    booted_image_id: None,
+                    booted_image_ref: None,
                     agent_engine: None,
                     agent_version: None,
                     model: None,
@@ -706,10 +623,10 @@ pub async fn agent_image_status(
         load_accept_config().map_err(|e| aerr(StatusCode::SERVICE_UNAVAILABLE, e))?;
 
     let current_rows = backend
-        .current_image_registrations()
+        .current_images()
         .await
         .map_err(|e| aerr(StatusCode::BAD_GATEWAY, format!("{e:#}")))?;
-    let current = crate::ve_faas::preferred_registration(&current_rows);
+    let current = current_rows.first();
 
     let mut delegates = Vec::with_capacity(req.device_key_hashes.len());
     for dkh in &req.device_key_hashes {
@@ -718,8 +635,8 @@ pub async fn agent_image_status(
             sandbox_id: None,
             sandbox_status: None,
             expire_at: None,
-            booted_registration_id: None,
-            booted_image_url: None,
+            booted_image_id: None,
+            booted_image_ref: None,
             agent_engine: None,
             agent_version: None,
             model: None,
@@ -741,10 +658,11 @@ pub async fn agent_image_status(
                     row.expire_at = Some(first.expire_at.clone()).filter(|s| !s.trim().is_empty());
                     match backend.booted_image_info(&first.id).await {
                         Ok(booted) => {
-                            row.stale = crate::ve_faas::image_stale(booted.as_ref(), &current_rows);
+                            row.stale =
+                                crate::sandbox_backend::image_stale(booted.as_ref(), &current_rows);
                             if let Some(b) = booted {
-                                row.booted_registration_id = Some(b.registration_id);
-                                row.booted_image_url = Some(b.source_image_url);
+                                row.booted_image_id = Some(b.image_id);
+                                row.booted_image_ref = Some(b.image_ref);
                             }
                         }
                         Err(e) => row.error = Some(format!("describe: {e:#}")),
@@ -768,8 +686,8 @@ pub async fn agent_image_status(
         image: current
             .map(|c| c.image_url.clone())
             .or_else(|| backend.current_image_tag()),
-        current_registration_id: current.map(|c| c.image_id.clone()),
-        precache_status: current.map(|c| c.precache_status.clone()),
+        current_image_id: current.map(|c| c.image_id.clone()),
+        image_status: current.map(|c| c.status.clone()),
         delegates,
     }))
 }

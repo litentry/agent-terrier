@@ -3456,9 +3456,9 @@ async fn agent_preset_reapply(
             "no bridge base recorded for this delegate yet — run \"update runtime\" once: it records the base and re-applies the preset itself",
         );
     };
-    let body = serde_json::json!({
-        "operator_omni": operator_omni,
-        "device_key_hashes": [entry.device_key_hash],
+    let body = serde_json::json!(agentkeys_protocol::console::AgentImageStatusRequest {
+        operator_omni,
+        device_key_hashes: vec![entry.device_key_hash],
     });
     let (resp, parsed) =
         forward_to_broker_value(&broker, "/v1/agent/image-status", &j1, &body).await;
@@ -6820,9 +6820,9 @@ async fn agent_image_status_proxy(
         Some(s) if !s.j1.is_empty() => (s.j1.clone(), s.omni.clone()),
         _ => return pairing_err(StatusCode::FORBIDDEN, "no master session"),
     };
-    let body = serde_json::json!({
-        "operator_omni": operator_omni,
-        "device_key_hashes": req.device_key_hashes,
+    let body = serde_json::json!(agentkeys_protocol::console::AgentImageStatusRequest {
+        operator_omni,
+        device_key_hashes: req.device_key_hashes,
     });
     let (resp, parsed) =
         forward_to_broker_value(&broker, "/v1/agent/image-status", &j1, &body).await;
@@ -6830,47 +6830,13 @@ async fn agent_image_status_proxy(
         return resp;
     }
     let Some(v) = parsed else { return resp };
-    let top = |k: &str| {
-        v.get(k)
-            .and_then(|x| x.as_str())
-            .filter(|x| !x.is_empty())
-            .map(str::to_string)
-    };
-    let mapped = ApiImageStatus {
-        image: top("image"),
-        current_registration_id: top("current_registration_id"),
-        precache_status: top("precache_status"),
-        delegates: v
-            .get("delegates")
-            .and_then(|d| d.as_array())
-            .map(|rows| {
-                rows.iter()
-                    .map(|r| {
-                        let rs = |k: &str| {
-                            r.get(k)
-                                .and_then(|x| x.as_str())
-                                .filter(|x| !x.is_empty())
-                                .map(str::to_string)
-                        };
-                        ApiDelegateImageStatus {
-                            device_key_hash: rs("device_key_hash").unwrap_or_default(),
-                            sandbox_id: rs("sandbox_id"),
-                            sandbox_status: rs("sandbox_status"),
-                            expire_at: rs("expire_at"),
-                            booted_registration_id: rs("booted_registration_id"),
-                            booted_image_url: rs("booted_image_url"),
-                            agent_engine: rs("agent_engine"),
-                            agent_version: rs("agent_version"),
-                            model: rs("model"),
-                            stale: r.get("stale").and_then(|x| x.as_bool()),
-                            error: rs("error"),
-                        }
-                    })
-                    .collect()
-            })
-            .unwrap_or_default(),
-    };
-    Json(mapped).into_response()
+    match serde_json::from_value::<ApiImageStatus>(v) {
+        Ok(status) => Json(status).into_response(),
+        Err(_) => pairing_err(
+            StatusCode::BAD_GATEWAY,
+            "broker returned an invalid image-status response",
+        ),
+    }
 }
 
 /// #429 — `GET /v1/agent/inheritable-namespaces`: the kept namespaces of

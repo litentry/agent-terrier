@@ -1,10 +1,10 @@
 pub mod accept_assertion;
 pub mod audit;
 pub mod auth;
-pub mod aws_ecs;
 pub mod boot;
 pub mod config;
 pub mod cors;
+pub mod docker_runtime;
 pub mod env;
 pub mod error;
 pub mod gate_admin;
@@ -22,7 +22,6 @@ pub mod sponsored_accept;
 pub mod state;
 pub mod storage;
 pub mod sts;
-pub mod ve_faas;
 // #512: ve_sign moved to agentkeys-core (the signer needs it too — one signer
 // codebase, both stacks). Re-exported so `crate::ve_sign::…` and the live
 // conformance test's `agentkeys_broker_server::ve_sign::…` paths keep working.

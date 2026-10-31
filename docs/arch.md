@@ -48,7 +48,7 @@ The complete CLI and light manager must call these owners rather than duplicate 
 
 | Remaining overlap | Owner | Removal gate |
 |---|---|---|
-| Runtime lifecycle and provider-specific implementations | Broker runtime interface | #3 establishes neutral contracts; #6 supplies the local adapter; no provider implementation in the public release |
+| Remaining storage, signing and model provider integration | Shared neutral interfaces | #3 and local adapter issues remove remaining provider implementations before release |
 | Repeated worker authorization helpers | Worker verification and protocol types | #3 and #5 consolidate pure policy while retaining independent enforcement at each boundary |
 
 ## Chain configuration
@@ -66,3 +66,13 @@ Every software-key library call requires a `DevelopmentSigning` context construc
 `terrier` is the public local-tool entry point. Contract operations are owned by `scripts/terrier_local/contracts.py`; future local management surfaces must call this owner. The dependency revision and archive checksum have one owner in `crates/agentkeys-chain/foundry.lock`. The CLI uses a verified public archive instead of requiring submodule initialization. It builds an isolated generated cache with relative dependency paths, preserving reproducible contract metadata without workstation paths. [Contract development](wiki/contract-development.md) documents the supported commands and remaining local-chain acceptance.
 
 `scripts/terrier_local/chain.py` owns the local Anvil process lifecycle; `local_state.py` owns private state permissions and locking. An owner-only control socket addresses the supervisor's actual child process without saved PID signals. `deployment.py` handles the disposable deployer, version checks and generated profile; the shared Solidity deployment script owns the contract set and constructor wiring. Contract transactions use a fresh encrypted local keystore, never Anvil's default unlocked accounts. The password is stored beside the keystore for unattended development, explicitly outside the production custody model. Generated state, broadcast records and credentials stay outside source/build artifacts. See [local chain](wiki/local-chain.md) for persistence, recovery and the trusted-local-machine boundary.
+
+## Local agent runtime
+
+The broker accepts an injected `SandboxRuntime`; its public composition uses `DockerRuntime`. Agent creation reuses the existing authorized broker routes and create-only credential callback. Docker connects through an explicit local Unix socket, requires the development profile guard, inspects an already-loaded image and creates by immutable image digest with pulling disabled.
+
+Each actor runtime runs as an unprivileged user with a read-only root filesystem, limited CPU/memory/processes, temporary writable home and no host or Docker-socket mounts. Management ports bind only to host loopback. Namespaced device/actor labels are checked before reuse or removal; every device gets a separately labeled bridge network. Required actor identity, exactly one credential and both management bearers are checked before replacement. Network cleanup verifies ownership and refuses networks still in use. Container environment values travel over a pipe, not command arguments or logs; Docker host administrators can still inspect them. This is a local development trust boundary.
+
+Image-status request and response types have one owner in `agentkeys-protocol::console`. Broker and daemon use those types directly; TypeScript clients are generated. Status uses immutable image IDs and generic image availability.
+
+The adapter has deterministic lifecycle and denial tests plus an explicit [real Docker qualification](wiki/docker-qualification.md). That test exercises actual creation, reuse, restart, image identity, loopback HTTP, cross-runtime network denial and scoped removal using a small public fixture image. A reproducible agent image and complete local service/model wiring remain required by #6/#7; the adapter alone is not a runnable local release.

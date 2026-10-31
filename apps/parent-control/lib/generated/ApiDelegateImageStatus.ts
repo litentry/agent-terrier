@@ -2,17 +2,13 @@
 
 export type ApiDelegateImageStatus = { device_key_hash: string, sandbox_id: string | null, sandbox_status: string | null, 
 /**
- * The instance's veFaaS lease deadline, verbatim (`null` on backends
- * without one).
+ * Optional lease deadline in RFC3339 format.
  */
-expire_at: string | null, booted_registration_id: string | null, 
+expire_at: string | null, booted_image_id: string | null, 
 /**
- * The frozen registration's source image ref — the VERSIONED tag the
- * instance actually booted (#598 `…:vYYYYMMDD-HHMMSS-g<sha8>`), the
- * human "which build is this delegate on" answer next to the fleet's
- * current `image` above.
+ * Image reference used when this instance was created.
  */
-booted_image_url: string | null, 
+booted_image_ref: string | null, 
 /**
  * The LIVE agent identity the instance's bridge reports (#577 follow-up):
  * agent name the bridge reports (`dsh` since #621), its running version (the bump
@@ -21,6 +17,6 @@ booted_image_url: string | null,
 agent_engine: string | null, agent_version: string | null, model: string | null, 
 /**
  * `true` = stale, `false` = current, `null` = unknowable (no live
- * instance / app-default image / no registration to compare).
+ * instance / no image identity to compare).
  */
 stale: boolean | null, error: string | null, };

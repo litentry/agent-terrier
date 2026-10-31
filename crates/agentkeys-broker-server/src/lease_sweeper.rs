@@ -1,13 +1,7 @@
 //! #594 — the delegate-sandbox LEASE SWEEPER: the "do it automatically" half
 //! of expiry relaunch (plan `docs/plan/issue-594-sandbox-checkpoint-relaunch.md`).
 //!
-//! A veFaaS instance hard-expires at `create_time + Timeout` (extensions are
-//! rejected at the cap by construction — #589), and nothing re-creates it
-//! until a resolve/pairing-poll happens — i.e. until the owner opens
-//! parent-control. Until then the delegate is chat-silent while every health
-//! surface stays green (the classic silent-chat failure class). This sweeper
-//! closes that gap: on a cadence it walks the durable #546 spawn-context rows
-//! (the set of delegates the broker can re-create at all) and
+//! Reconcile runtime availability against live chain authority.
 //!
 //! - **dead** (no live runtime — the lease already expired, or the instance
 //!   died): cold-create through `ensure_for_delegate`; the replacement
@@ -88,19 +82,7 @@ impl SweeperConfig {
     }
 }
 
-/// Parse an `ExpireAt` into unix seconds. Input is RFC3339, because
-/// [`ve_faas::normalize_expire_at`](crate::ve_faas::normalize_expire_at) has
-/// already converted the vendor's shape at the boundary; empty / `?` means no
-/// expiry (ECS, or a row without one).
-///
-/// This stays STRICT on purpose. The vendor's real layout is Go's `time.Time`
-/// (`2026-08-15 15:50:54 +0800 CST`), whose trailing zone abbreviation is
-/// ambiguous — teaching this parser to read it would put the format knowledge
-/// in two places, and the earlier revision that assumed RFC3339 here is
-/// exactly why no VE instance was ever warm-rotated (every sweep logged
-/// `unparseable ExpireAt`). One owner, at the boundary; anything that still
-/// arrives unrecognized is UNKNOWN and the caller does NOT rotate on a guess
-/// (evidence policy: never invent the vendor's format).
+/// Parse a normalized RFC3339 runtime deadline; unknown deadlines never trigger rotation.
 pub(crate) fn parse_expire_at(raw: &str) -> Option<i64> {
     let t = raw.trim();
     if t.is_empty() || t == "?" {
@@ -228,7 +210,7 @@ pub fn spawn_if_enabled(state: SharedState) {
         "#594 lease sweeper: starting (auto-relaunch of expired/expiring delegate sandboxes)"
     );
     tokio::spawn(async move {
-        // Clear of the boot burst (precache registration, tier-2 probes).
+        // Allow startup probes to finish before the first sweep.
         tokio::time::sleep(Duration::from_secs(60)).await;
         loop {
             sweep_once(&state, &cfg).await;
@@ -427,7 +409,7 @@ mod tests {
 
     #[test]
     fn parse_expire_at_reads_the_measured_vefaas_shape() {
-        // The pinned probe fixture shape (ve_faas.rs parse_instances test).
+        // Reject an unnormalized or ambiguous timezone.
         // Offset handling: +08:00 must land on the same instant as its UTC twin.
         let t = parse_expire_at("2026-07-06T00:00:00+08:00").expect("rfc3339 with offset");
         assert_eq!(Some(t), parse_expire_at("2026-07-05T16:00:00Z"));
@@ -464,7 +446,7 @@ mod tests {
             decide(now, &[Some(now - 60)], m30, m10),
             SweepAction::Rotate { force: true }
         );
-        // Live but unknowable expiry (ECS / unparseable) → never rotate.
+        // A live runtime with no known deadline is never rotated based on a guess.
         assert_eq!(decide(now, &[None], m30, m10), SweepAction::None);
         // Multiple runtimes: the earliest lease drives.
         assert_eq!(

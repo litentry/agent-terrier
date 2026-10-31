@@ -784,8 +784,8 @@ export interface AgentKeysClient {
     deviceKeyHash: string;
     force?: boolean;
   }): Promise<Result<ApiAgentUpdateResult>>;
-  /** #577 — which delegates run OLDER image bits than the current pre-cache
-   *  registration (the "Update available" badge source). */
+  /** #577 — which delegates run OLDER image bits than the current
+   *  image identity (the "Update available" badge source). */
   agentImageStatus(deviceKeyHashes: string[]): Promise<Result<ApiImageStatus>>;
   /** Kept namespaces of archived delegates, inheritable by AT MOST one live
    *  delegate (#429 bookkeeping — served from the #424 manifest). */

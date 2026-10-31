@@ -1,22 +1,5 @@
-//! #377 sandbox-lifecycle hooks — the glue between the delegation/pairing
-//! handlers and [`ve_faas`](crate::ve_faas):
-//!
-//! - **spawn** (`ensure_for_delegate`): called by `/v1/agent/pairing/poll`
-//!   (create-on-pair — the moment `J1_agent` is first minted) and
-//!   `/v1/agent/resolve` (every device boot). Idempotent; emits ONE
-//!   `SandboxSpawn` (op_kind 53) envelope when an instance was actually
-//!   created.
-//! - **teardown** (`teardown_for_confirmed_batch`): called by the shared
-//!   submit relay after a CONFIRMED receipt, killing the instances of every
-//!   device the batch `revokeAgentDevice`d (decoded from the on-chain
-//!   calldata — same truth source as the #97 audit decode) and emitting one
-//!   `SandboxTeardown` (op_kind 54) envelope per kill.
-//!
-//! Both hooks are BEST-EFFORT against the handler's main job: a veFaaS
-//! failure never fails the pairing poll / resolve / submit response — the
-//! error is surfaced IN the response (`sandbox.error`) and WARN-logged, never
-//! swallowed. The audit emits follow the audit_emit.rs posture (best-effort,
-//! loud on failure).
+//! Runtime lifecycle hooks for pairing, resolve, confirmed revocation and updates.
+//! Authorization remains with the caller; runtime failures are returned explicitly.
 
 use agentkeys_core::audit::{
     calldata::decode_calldata, envelope_for, AuditClient, AuditEnvelope, AuditOpKind, AuditResult,
@@ -28,11 +11,7 @@ use serde_json::json;
 use crate::sandbox_backend::SandboxBackend;
 use crate::state::SharedState;
 
-/// What a spawn hook hands back to its handler for the response body.
-/// `agent_url` is the device's runtime endpoint: the per-outcome URL when the
-/// backend hands one out (ECS per-task ENI, #440), else the backend's static
-/// gateway (veFaaS), else `null` (no URL exists — e.g. an ECS ensure failure,
-/// or a fresh task whose ENI hasn't attached; the device re-resolves).
+/// The runtime outcome exposed to a device.
 pub struct SandboxProvision {
     pub agent_url: Option<String>,
     pub sandbox_id: Option<String>,
@@ -68,16 +47,7 @@ impl SandboxProvision {
     }
 }
 
-/// The gate-provisioning outcome for a delegate CREATE — the SINGLE owner of the
-/// "call the gate → build the sandbox's LLM envs" policy (#543). Both the #427
-/// spawn ceremony (eager, it always creates + must record the status) and the
-/// resolve/poll cold-create path (lazy, via the [`SandboxBackend`] create-only
-/// callback) call [`provision_delegate_envs`], so the two never drift (#203).
-///
-/// `envs` carries the per-delegate `gk_` relay key as `ARK_API_KEY` plus the
-/// gate turn base — the presence of `ARK_API_KEY` is exactly what the fail-
-/// closed [`crate::sandbox_backend::direct_ark_guard`] checks, so an empty
-/// `envs` (not-configured / misconfigured / failed) fails closed on VE.
+/// Model-access provisioning result, evaluated only when a runtime is created.
 pub struct GateProvision {
     pub envs: Vec<(String, String)>,
     /// `provisioned` | `not-configured` | `misconfigured` | `failed`.
@@ -409,7 +379,7 @@ pub(crate) fn chat_link_env_sources() -> (Option<String>, Option<String>) {
 ///
 /// #546: a create here injects the SAME identity + chat env set the ceremony
 /// injects, reconstructed from the durable spawn-context row — a re-created
-/// sandbox (veFaaS expiry, backend desync, wake cold-start) comes back with
+/// sandbox (runtime loss or wake cold-start) comes back with
 /// its chat loop, not chat-silent. A delegate without a row (device-era
 /// binding, §10.2-paired agent whose K10 never touched the broker, pre-#546
 /// spawn) keeps today's env-less create.
@@ -699,7 +669,7 @@ pub async fn teardown_for_confirmed_batch(
                 tracing::warn!(
                     device_key_hash = %device_key_hash,
                     error = %format!("{e:#}"),
-                    "#377 unpair teardown FAILED — instance dies at its veFaaS timeout; revoked binding blocks any respawn"
+                    "unpair teardown failed; revoked binding blocks authorization and respawn"
                 );
             }
         }
@@ -728,8 +698,7 @@ async fn emit_spawn(
         SandboxSpawnBody {
             device_key_hash: device_key_hash.to_string(),
             sandbox_id: sandbox_id.to_string(),
-            // Wire name stays `function_id` (#203 discipline): the veFaaS
-            // application id, or `cluster/taskdef` on the ECS backend.
+            // The legacy wire name records the runtime namespace.
             function_id: backend.runtime_ref(),
         },
         AuditResult::Success,
