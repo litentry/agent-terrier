@@ -61,6 +61,8 @@ Software passkey commands require `AGENT_TERRIER_LOCAL_DEV=1`, the local develop
 
 Development passkeys are created as new owner-only files (0600) and reused without overwriting them. Loading rejects symlinks, hard links, other owners and group/world-readable files. Passkey contents never appear in CLI output. Unix file permissions are required for this development storage mode.
 
+Native device keys and development passkeys share `agentkeys-core::protected_file`. It validates the opened file before reading or truncating it, refuses special files without blocking, and bounds secret records to 64 KiB. New keys use exclusive creation; explicit updates also reject linked or loosely readable files. The CLI device session consumes `DeviceKey` for custody, addresses and proof signing instead of carrying a second implementation.
+
 Every software-key library call requires a `DevelopmentSigning` context constructed through the same local-profile guard. Agent and application signing commands additionally require a loopback service, refuse HTTP redirects, and recompute the operation hash against the generated profile's EntryPoint and chain ID before opening the key. Wire-to-packed operation conversion and hashing have one owner in `agentkeys-core::erc4337`, shared by broker and client. Seed derivation uses the same protected file reader; special files fail without blocking. These development checks do not attest to hardware custody.
 
 ## Contract tooling

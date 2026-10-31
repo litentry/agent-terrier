@@ -1809,66 +1809,12 @@ fn derive_p256_signing_key_from_seed_file(
 }
 
 fn read_software_passkey(path: &str) -> Result<zeroize::Zeroizing<String>, WebauthnError> {
-    use std::io::Read;
-    let mut options = fs::OpenOptions::new();
-    options.read(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
-    }
-    let mut file = options
-        .open(path)
-        .map_err(|error| WebauthnError::Io(error.to_string()))?;
-    let metadata = file
-        .metadata()
-        .map_err(|error| WebauthnError::Io(error.to_string()))?;
-    if !metadata.is_file() {
-        return Err(WebauthnError::Io(
-            "development passkey must be a regular file".into(),
-        ));
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::{MetadataExt, PermissionsExt};
-        if metadata.permissions().mode() & 0o077 != 0
-            || metadata.nlink() != 1
-            || metadata.uid() != unsafe { libc::geteuid() }
-        {
-            return Err(WebauthnError::Io(
-                "development passkey must be owner-only, owned by this user and have no hard links"
-                    .into(),
-            ));
-        }
-    }
-    #[cfg(not(unix))]
-    return Err(WebauthnError::Io(
-        "development passkey storage requires Unix file permissions".into(),
-    ));
-    let mut contents = zeroize::Zeroizing::new(String::new());
-    file.read_to_string(&mut contents)
-        .map_err(|error| WebauthnError::Io(error.to_string()))?;
-    Ok(contents)
+    agentkeys_core::protected_file::read_text(path)
+        .map_err(|error| WebauthnError::Io(error.to_string()))
 }
 
 fn write_new_software_passkey(path: &str, pem: &[u8]) -> Result<(), WebauthnError> {
-    use std::io::Write;
-    let mut options = fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    #[cfg(not(unix))]
-    return Err(WebauthnError::Io(
-        "development passkey storage requires Unix file permissions".into(),
-    ));
-    let mut file = options
-        .open(path)
-        .map_err(|error| WebauthnError::Io(error.to_string()))?;
-    file.write_all(pem)
-        .and_then(|()| file.sync_all())
+    agentkeys_core::protected_file::write(path, pem, true)
         .map_err(|error| WebauthnError::Io(error.to_string()))
 }
 

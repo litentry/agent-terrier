@@ -24,6 +24,8 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 tokio = { workspace = true }
 keyring = "2"
 anyhow = { workspace = true }
+libc = "0.2"
+zeroize = "1"
 
 # Issue #85 — S3CredentialBackend (client-side AES-256-GCM, OIDC-scoped writes
 # to s3://$BUCKET/bots/<wallet>/credentials/<service>.enc). Anonymous SDK

@@ -793,16 +793,11 @@ mod tests {
         assert!(claim_child_omni(&serde_json::json!({ "child_omni": " " }), "x").is_err());
     }
 
-    /// The owner's console (enrolled 2026-09-16) persisted the claim's bare
-    /// omni and every card-action tap died at cap mint — a load heals it.
     #[test]
     fn a_bare_persisted_omni_is_healed_on_load_and_rewritten() {
-        let dir = std::env::temp_dir().join(format!(
-            "agentkeys-console-device-heal-{}",
-            std::process::id()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let path = dir
+            .path()
             .join("console-device.json")
             .to_string_lossy()
             .to_string();
@@ -816,7 +811,7 @@ mod tests {
             broker_url: "https://broker.example".into(),
             enrolled_at: 1,
         };
-        std::fs::write(&path, serde_json::to_string(&dev).unwrap()).unwrap();
+        persist_to(&path, &dev).unwrap();
         let loaded = load_persisted_from(&path, Some("https://broker.example/")).unwrap();
         assert_eq!(loaded.actor_omni, format!("0x{bare}"));
         let rewritten: ConsoleDevice =
@@ -824,7 +819,6 @@ mod tests {
         assert_eq!(rewritten.actor_omni, format!("0x{bare}"));
         assert!(load_persisted_from(&path, Some("https://other.example")).is_none());
         assert!(load_persisted_from(&path, None).is_none());
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// The console's status read: a fresh daemon is not enrolled and suggests
