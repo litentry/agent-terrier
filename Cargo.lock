@@ -335,6 +335,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "agentkeys-local-store"
+version = "0.1.0"
+dependencies = [
+ "agentkeys-core",
+ "agentkeys-protocol",
+ "anyhow",
+ "axum",
+ "base64 0.22.1",
+ "clap",
+ "hex",
+ "libc",
+ "p256 0.13.2",
+ "rand_core 0.6.4",
+ "reqwest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "tokio",
+ "tower 0.5.3",
+]
+
+[[package]]
 name = "agentkeys-memory-engine"
 version = "0.1.0"
 

@@ -1,0 +1,26 @@
+[package]
+name = "agentkeys-local-store"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+agentkeys-core = { workspace = true }
+agentkeys-protocol = { workspace = true }
+anyhow = { workspace = true }
+axum = "0.7"
+base64 = "0.22"
+clap = { version = "4", features = ["derive"] }
+hex = "0.4"
+libc = "0.2"
+reqwest = { version = "0.12", features = ["json"] }
+rusqlite = { version = "0.31", features = ["bundled"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = "0.10"
+tokio = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
+p256 = { version = "0.13", features = ["pkcs8", "pem", "ecdsa"] }
+rand_core = { version = "0.6", features = ["std"] }
+tower = { version = "0.5", features = ["util"] }

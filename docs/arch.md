@@ -100,3 +100,9 @@ Relay-key mutations serialize behind one write lock and persist before becoming 
 Independent capability verification has one implementation in `agentkeys-core::capability_verify`, re-exported by the worker library. Each worker still invokes it at its own request boundary, including current on-chain device binding, scope and epoch checks. Actor proof of possession is mandatory; there is no environment switch to admit broker-only capabilities. Clients without an enrolled signing key are denied until enrollment is completed. This does not complete local storage or owner-session integration.
 
 Chain authority decoding rejects malformed lengths, noncanonical integer padding and boolean values other than zero or one. Broker and worker checks project the same decoded registry record; they never truncate malformed values or treat parse errors as unrevoked devices. Registered state derives from the decoded registration timestamp. Unknown or revoked entries remain subject to each caller’s explicit authorization policy.
+
+## Local object storage
+
+`agentkeys-local-store` owns the local SQLite object service. `agentkeys-protocol::object_store` owns its wire schema and capability-to-key/action rules. The service verifies signatures, actor proofs and current chain authority independently before any object operation; databases are bound to a single data class and have private file permissions. Expected-revision updates commit atomically. Database identity/version checks reject unrelated files.
+
+The [storage qualification](wiki/local-storage.md) covers real local contracts and a separate service process, with a deliberately untrusted test issuer. Product worker/client migration and real broker session/mint integration remain open. The local storage adapter is intended to replace the existing provider-specific object path; it is not a second product implementation to maintain alongside it.
