@@ -25,11 +25,6 @@ httparse = "1"
 # (one owner; the worker deserializes the SAME type).
 agentkeys-protocol = { workspace = true }
 agentkeys-web-core = { workspace = true }
-# #295 P1 §7a: the broker mints an operator-tagged OIDC internally + AssumeRoles
-# with a read-only exact-object session policy for delegated canonical-memory
-# reads, reusing assume_role_with_jwt — so the delegate never holds the operator
-# session bearer (Codex critical fix).
-agentkeys-provisioner = { path = "../agentkeys-provisioner" }
 axum = { version = "0.7", features = ["json"] }
 # #675 — browser-origin CORS for the device-mode web app (opt-in allowlist; cors.rs).
 tower-http = { version = "0.5", features = ["cors"] }
@@ -47,8 +42,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 sha2 = "0.10"
 hex = "0.4"
 aws-config = { version = "1", features = ["behavior-version-latest"] }
-aws-credential-types = "1"
-aws-sdk-sts = "1"
 # Real SES sender for email-link auth. Optional, gated behind
 # auth-email-link — without the feature the broker has no SES sender at
 # all (StubEmailSender remains for tests). Pulled in by Pass 1 of
@@ -70,13 +63,10 @@ k256 = { version = "0.13", features = ["ecdsa", "sha2"], optional = true }
 # dep is mandatory. The `auth-wallet-sig` feature still pulls it via
 # the explicit feature dep below; this just removes the optional gate.
 sha3 = "0.10"
-# hmac (unconditional): OAuth2 state HMAC (Phase A.2) AND the Volcengine
-# Signature V4 signer (ve_sign.rs — the VE STS AssumeRoleWithOIDC mint path).
-# `url` stays optional (OAuth2-only); it's a transitive reqwest dep so declaring
-# it directly costs nothing.
+# OAuth2 state authentication.
 hmac = "0.12"
 url = { version = "2", optional = true }
-# chrono: UTC timestamp for the VE Signature V4 `X-Date` header (YYYYMMDDTHHMMSSZ).
+# Runtime lease and schedule timestamps.
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
 [features]

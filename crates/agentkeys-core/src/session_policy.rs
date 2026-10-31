@@ -1,17 +1,7 @@
-//! #512 — the per-cloud SESSION-POLICY RENDERER (ADR
-//! `docs/spec/stacks/ve-sts-signing-split.md`, "pass intent, not policy").
-//!
-//! ONE owner for the per-actor scope-down dialects: callers hand a dialect-free
-//! [`ScopedAccessIntent`] and get the cloud's policy JSON back. The broker's
-//! `ve_session_policy` (ve_sts.rs) and the signer's `/dev/sign-sts` both render
-//! through here, so the two mint paths cannot drift — rule 2 of the ADR holds
-//! **by construction** (no caller-authored policy string exists to validate).
-//!
-//! Dialect facts this module owns (and its golden tests pin):
-//!   - VE policies carry NO `Version` field (canonical VE system-policy shape)
-//!     and the ListBucket prefix condition key is the LOWERCASE `tos:prefix`
-//!     (the only spelling VE's engine accepts — found live, 2026-07-02).
-//!   - AWS policies carry `Version: 2012-10-17` and `s3:prefix`.
+//! Legacy external policy renderer, pending adapter extraction.
+//! Callers pass a typed [`ScopedAccessIntent`] and receive the selected
+//! policy dialect. The local object service uses capability verification
+//! instead of these external storage policies.
 
 use serde_json::json;
 
