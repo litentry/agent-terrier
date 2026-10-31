@@ -766,36 +766,20 @@ pub(crate) struct ChainContracts {
 }
 
 impl ChainContracts {
-    /// Resolve from env using the AGENTKEYS_CHAIN profile (default local profile).
-    /// Pattern: env keys are `{NAME}_{PROFILE_UC}` where PROFILE_UC =
-    /// uppercased chain name with `-` → `_`. Matches the shape used in
-    /// scripts/operator-workstation.env so broker/worker/CLI/bash all
-    /// read the same value.
     pub(crate) fn from_state(_state: &SharedState) -> Result<Self, CapError> {
-        let profile = std::env::var("AGENTKEYS_CHAIN")
-            .unwrap_or_else(|_| agentkeys_core::chain_profile::DEFAULT_PROFILE.into());
-        let profile_uc = profile.to_uppercase().replace('-', "_");
-        let rpc_url = std::env::var("AGENTKEYS_CHAIN_RPC_HTTP")
-            .or_else(|_| std::env::var(format!("CHAIN_RPC_HTTP_{profile_uc}")))
-            .or_else(|_| std::env::var("HEIMA_RPC_HTTP"))
-            .map_err(|_| CapError::ChainRpc(format!(
-                "RPC URL not set (AGENTKEYS_CHAIN_RPC_HTTP or CHAIN_RPC_HTTP_{profile_uc} or HEIMA_RPC_HTTP)"
-            )))?;
-        let registry = profile_env(&profile_uc, "SIDECAR_REGISTRY_ADDRESS")?;
-        let scope = profile_env(&profile_uc, "SCOPE_CONTRACT_ADDRESS")?;
-        let epoch = profile_env(&profile_uc, "K3_EPOCH_COUNTER_ADDRESS")?;
+        let profile = crate::chain_config::profile().map_err(CapError::ChainRpc)?;
+        let contract =
+            |name| crate::chain_config::contract(&profile, name).map_err(CapError::ChainRpc);
+        let registry = contract("SidecarRegistry")?;
+        let scope = contract("AgentKeysScope")?;
+        let epoch = contract("K3EpochCounter")?;
         Ok(ChainContracts {
-            rpc_url,
+            rpc_url: profile.rpc.http,
             registry,
             scope,
             epoch,
         })
     }
-}
-
-fn profile_env(profile_uc: &str, base: &str) -> Result<String, CapError> {
-    let key = format!("{base}_{profile_uc}");
-    std::env::var(&key).map_err(|_| CapError::ChainRpc(format!("{key} unset")))
 }
 
 #[derive(Debug)]
