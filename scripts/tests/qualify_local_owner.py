@@ -34,11 +34,17 @@ class LocalOwnerTests(LocalOwnerFixture):
                 registered = self.owner(state, "register", "--name", "alice")
                 self.assertTrue(registered["registered"])
                 self.assertTrue(registered["verified"])
+                request_key = state / "owners/alice/device.key"
+                self.assertTrue(request_key.is_file(), "owner registration must enroll a real request-signing key")
+                request_secret = request_key.read_bytes()
+                self.assertEqual(request_key.stat().st_mode & 0o777, 0o600)
+                self.assertNotIn(request_secret.decode().removeprefix("0x"), json.dumps(registered))
                 operator = registered["operator_omni"]
                 before = chain.rpc(running["rpc_http"], "eth_blockNumber")
                 repeated = self.owner(state, "register", "--name", "alice")
                 self.assertFalse(repeated["registered"])
                 self.assertEqual(repeated["account"], registered["account"])
+                self.assertEqual(repeated["device_key_hash"], registered["device_key_hash"])
                 self.assertEqual(chain.rpc(running["rpc_http"], "eth_blockNumber"), before)
                 profile = local_state.read_json(Path(deployed["profile"]))
                 scope = next(item["address"] for item in profile["contracts"] if item["name"] == "AgentKeysScope")
@@ -56,6 +62,7 @@ class LocalOwnerTests(LocalOwnerFixture):
                 beneficiary, keystore, password_file = deployment.developer_wallet(state)
                 plan = owner.run_cli(REPOSITORY, Path(deployed["profile"]), ["prepare-owner", "grant",
                     "--operator-omni", operator, "--key-file", str(state / "owners/alice/passkey.pem"),
+                    "--device-key-file", str(request_key),
                     "--beneficiary", beneficiary, "--actor-omni", actor, "--service", service])
                 original_signature = plan["build"]["user_op"]["signature"].removeprefix("0x")
                 altered_signature = bytearray.fromhex(original_signature)
@@ -102,14 +109,28 @@ class LocalOwnerTests(LocalOwnerFixture):
                 self.invoke(state, "stop")
                 self.invoke(state, "start", "--port", str(port))
                 self.assertEqual(self.owner(state, "register", "--name", "alice")["account"], registered["account"])
+                self.assertEqual(request_key.read_bytes(), request_secret)
+                request_key.unlink()
+                before = chain.rpc(running["rpc_http"], "eth_blockNumber")
+                missing_request_key = self.owner(state, "register", "--name", "alice", success=False)
+                self.assertIn("owner request key is missing", missing_request_key.stderr)
+                self.assertFalse(request_key.exists())
+                self.assertEqual(chain.rpc(running["rpc_http"], "eth_blockNumber"), before)
+                local_state.write_private(request_key, (state / "owners/bob/device.key").read_bytes())
+                wrong_request_key = self.owner(state, "register", "--name", "alice", success=False)
+                self.assertIn("does not match the active on-chain master binding", wrong_request_key.stderr)
+                self.assertEqual(chain.rpc(running["rpc_http"], "eth_blockNumber"), before)
+                local_state.write_private(request_key, request_secret)
                 self.assertFalse(permitted())
                 environment = contracts.tool_environment()
                 environment["AGENTKEYS_CHAIN_PROFILE_FILE"] = deployed["profile"]
                 denied = subprocess.run([str(owner.executable(REPOSITORY)), "chain", "prepare-owner", "register",
                     "--operator-omni", operator, "--key-file", str(state / "forbidden.pem"),
+                    "--device-key-file", str(state / "forbidden-device.key"),
                     "--beneficiary", registered["account"]], env=environment, capture_output=True, text=True, timeout=15)
                 self.assertNotEqual(denied.returncode, 0)
                 self.assertFalse((state / "forbidden.pem").exists())
+                self.assertFalse((state / "forbidden-device.key").exists())
             finally:
                 self.invoke(state, "stop")
 

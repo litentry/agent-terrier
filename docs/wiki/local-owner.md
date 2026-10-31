@@ -11,9 +11,9 @@ cargo build -p agentkeys-cli
 ./terrier owner register --name developer
 ```
 
-The command generates a fresh operator identity and software passkey under the private local state directory. It deploys the counterfactual P256Account through EntryPoint and registers its master device in one passkey-signed operation. The local deployer only pays for submitting that operation; the account's P-256 signature authorizes its contents. Anvil supplies disposable development funds to the account.
+The command generates a fresh operator identity, software passkey and owner request-signing key (K10) under the private local state directory. It deploys the counterfactual P256Account through EntryPoint and registers the actual K10 device-key hash as its master device in one passkey-signed operation. The passkey authorizes contract mutations; K10 signs protected data requests. The local deployer only pays for submitting the operation. Anvil supplies disposable development funds to the account.
 
-The result includes the operator identity, account and verified operation/transaction hashes. Repeating the command verifies the same on-chain binding without another transaction. The same identity survives a normal chain stop/start. A different contract deployment or a missing original passkey is rejected; no replacement key silently takes over an existing owner.
+The result includes the operator identity, account, device-key hash and verified operation/transaction hashes. Repeating the command verifies the same on-chain binding without another transaction, including the K10, actor, owner, master tier, roles and passkey coordinates. The same identity survives a normal chain stop/start. A different contract deployment, missing original key or mismatched request key is rejected; no replacement key silently takes over an existing owner.
 
 ## Grant and revoke scope
 
@@ -54,11 +54,13 @@ Actor state lives in `devices/<name>/` under the private local state directory. 
 
 ## Keys, state and recovery
 
-Each named owner has `owners/<name>/identity.json` and `passkey.pem` beneath the configured local state directory, outside the source tree. Directories are 0700 and files are 0600. The existing passkey reader rejects symlinks, hard links, special files, other owners and group/world-readable files. Passkey contents are never emitted by the CLI.
+Each named owner has `owners/<name>/identity.json`, `passkey.pem` and `device.key` beneath the configured local state directory, outside the source tree. Directories are 0700 and files are 0600. Both key readers reject symlinks, hard links, special files, other owners and group/world-readable files. Key contents are never emitted by the CLI.
 
 These are development software keys without hardware or TEE custody. The localhost machine and Anvil administrator are trusted; they can change development balances or chain state. Registration is first-come for a fresh random local operator identity and does not establish ownership of an external account or email address.
 
-Preserve the original state directory to retain identities. If a passkey is lost, restore that original file from a private backup; do not substitute another owner's key. There is no automatic reset or key recovery command. Existing contracts provide recovery primitives, but the full public recovery workflow is still pending. Do not move development keys or chain state into a production deployment.
+Preserve the original state directory to retain identities. If either key is lost, restore that original file from a private backup; do not substitute another owner's key. There is no automatic reset or key recovery command. Existing contracts provide recovery primitives, but the full public recovery workflow is still pending. Do not move development keys or chain state into a production deployment.
+
+Earlier development owners used a deterministic passkey-only registry slot instead of a real K10 binding. They cannot satisfy mandatory request proofs. Registration does not silently replace that slot or its authority. Preserve the old state and register a fresh named local owner for the new flow, or use a separate fresh state directory as below. Automatic migration of those early development identities is not implemented.
 
 For a fresh development reset, stop the current local chain and select a new empty directory with `AGENT_TERRIER_STATE_DIR`, then repeat chain start, deployment and owner registration. This creates a separate contract deployment and fresh identities. Keep the old directory intact if you need to return to it; select it again with the same setting to restore its chain and identities together. Deleting only a key is not a reset and does not revoke its on-chain authority.
 
@@ -73,8 +75,11 @@ Local, from the public checkout after downloading contract dependencies, run the
 ```bash
 python3 scripts/tests/qualify_local_owner.py
 python3 scripts/tests/qualify_local_binding.py
+python3 scripts/tests/qualify_local_credentials.py
 ```
 
-It covers real registration, idempotence, grant/revoke, tampered-signature rejection with unchanged scope, wrong-owner rejection, inner-operation revert, protected key permissions, missing-key refusal and persistent restart. Fast CLI tests separately reject disabled development mode, a remote RPC and a production chain profile before writing a key.
+It covers real registration, idempotence, grant/revoke, tampered-signature rejection with unchanged scope, wrong-owner rejection, inner-operation revert, protected key permissions, missing-key and wrong-request-key refusal and persistent restart. Fast CLI tests separately reject disabled development mode, a remote RPC and a production chain profile before writing a key.
+
+The credential qualifier uses the actual worker executable, SQLite service and local contracts. It exercises owner store/fetch, delegated fetch, worker restart, malformed/missing proof and broker-signed unauthorized requests, then real scope and device revocations while owner access stays available. Its capability issuer is a test fixture; real broker session and mint integration remains open.
 
 The binding qualification uses actual contracts for device and delegate registration, slot accounting, proof/lineage rejection without chain changes, channel-only device grants, atomic unbind, existing scope revocation and restart persistence. It also verifies that public enrollment output contains no private key.

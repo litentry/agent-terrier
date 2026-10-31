@@ -2,6 +2,7 @@ use anyhow::{ensure, Context, Result};
 
 pub use agentkeys_protocol::chain_abi::DeviceRecord as DeviceProbe;
 
+pub const TIER_MASTER: u8 = 1;
 pub const TIER_AGENT: u8 = 2;
 pub const TIER_DEVICE: u8 = 3;
 
