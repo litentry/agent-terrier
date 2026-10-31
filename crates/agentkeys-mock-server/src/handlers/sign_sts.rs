@@ -16,9 +16,8 @@
 //!
 //! Rule 3 (on-chain grant re-verify, Variant B+) lands in #513.
 //!
-//! ONE signer codebase, both stacks (`signer.litentry.org` / AWS today,
-//! `signer.agentterrier.cn` / VE): cloud specificity enters only through the
-//! renderer dialect + the exchange driver. Only the VE driver is live; the
+//! Provider specificity enters through the renderer dialect and exchange
+//! driver. Only the VE driver is live; the
 //! AWS driver is gated on the #509 owner decision (default VE-only).
 //!
 //! Failure modes (every refusal loud, per the ADR table):

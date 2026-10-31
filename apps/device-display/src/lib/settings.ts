@@ -12,7 +12,7 @@ export type Locale = 'en' | 'zh';
 export type { ThemeName };
 
 export interface Settings {
-  /** The broker base URL, e.g. https://test-broker.agentterrier.cn */
+  /** The broker base URL, e.g. https://test-broker.secondary.example */
   brokerUrl: string;
   /** The display feed this device listens on + commands into (the app's display slot). */
   feedId: string;

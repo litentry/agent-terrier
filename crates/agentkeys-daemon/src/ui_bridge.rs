@@ -870,7 +870,7 @@ pub fn build_router(state: SharedUiBridgeState, allowed_origin: &str) -> Router 
 }
 
 /// Build the bridge state. `rp_id` is the WebAuthn relying-party id —
-/// always "localhost" for dev, "agentkeys.io" (or operator domain) in
+/// always "localhost" for dev, "console.example" (or operator domain) in
 /// production. `rp_origin` is the browser's window.location.origin.
 // Runtime-config constructor: the params ARE the daemon's config surface (RP +
 // broker/signer + chain + W3 memory). Bundling into a config struct is deferred
@@ -897,10 +897,8 @@ pub(crate) fn derive_worker_url(broker_url: &str, worker: &str) -> Option<String
 
 /// An explicit `AGENTKEYS_WORKER_<X>_URL` override wins ONLY when it can stand
 /// next to the broker (loopback, or the broker's own zone); a foreign-zone
-/// value is an inherited stack env — the #571 leak class (2026-09-10: an AWS
-/// test-env `weixin-test.litentry.org` inside the VE daemon pinned the
-/// Contacts page onto a host that does not exist) — so it is logged and
-/// IGNORED in favour of the derivation from the broker. Never a silent
+/// value may belong to another deployment, so it is logged and ignored in
+/// favour of the derivation from the current broker. Never a silent
 /// override in either direction: the refusal names both hosts.
 pub(crate) fn worker_url_override_or_derive(
     var: &str,
@@ -5271,15 +5269,15 @@ mod stack_list_tests {
     #[test]
     fn parses_the_fleet_injected_inventory() {
         let raw = r#"[
-            {"name":"prod","chain":"heima","broker_url":"https://broker.litentry.org"},
-            {"name":"base","chain":"base","broker_url":"https://broker-base.litentry.org"},
-            {"name":"ve","chain":"heima","broker_url":"https://broker.agentterrier.cn"}
+            {"name":"prod","chain":"heima","broker_url":"https://broker.primary.example"},
+            {"name":"base","chain":"base","broker_url":"https://broker-base.primary.example"},
+            {"name":"ve","chain":"heima","broker_url":"https://broker.secondary.example"}
         ]"#;
         let stacks = parse_stacks_json(Some(raw));
         assert_eq!(stacks.len(), 3);
         assert_eq!(
             stacks[2],
-            entry("ve", "heima", "https://broker.agentterrier.cn")
+            entry("ve", "heima", "https://broker.secondary.example")
         );
     }
 
@@ -5297,39 +5295,39 @@ mod stack_list_tests {
     // mark (or be marked as) the Heima-AWS stack, and vice versa.
     #[test]
     fn same_chain_different_broker_is_not_active() {
-        let aws = entry("prod", "heima", "https://broker.litentry.org");
-        let ve = entry("ve", "heima", "https://broker.agentterrier.cn");
+        let aws = entry("prod", "heima", "https://broker.primary.example");
+        let ve = entry("ve", "heima", "https://broker.secondary.example");
         // daemon bound to the AWS broker:
         assert!(stack_is_active(
             &aws,
             "heima",
-            Some("https://broker.litentry.org")
+            Some("https://broker.primary.example")
         ));
         assert!(!stack_is_active(
             &ve,
             "heima",
-            Some("https://broker.litentry.org")
+            Some("https://broker.primary.example")
         ));
         // daemon bound to the VE broker:
         assert!(stack_is_active(
             &ve,
             "heima",
-            Some("https://broker.agentterrier.cn")
+            Some("https://broker.secondary.example")
         ));
         assert!(!stack_is_active(
             &aws,
             "heima",
-            Some("https://broker.agentterrier.cn")
+            Some("https://broker.secondary.example")
         ));
     }
 
     #[test]
     fn active_matching_normalizes_case_and_trailing_slash() {
-        let ve = entry("ve", "heima", "https://broker.agentterrier.cn");
+        let ve = entry("ve", "heima", "https://broker.secondary.example");
         assert!(stack_is_active(
             &ve,
             "HEIMA",
-            Some("https://broker.agentterrier.cn/")
+            Some("https://broker.secondary.example/")
         ));
         // a brokerless daemon matches no inventory stack
         assert!(!stack_is_active(&ve, "heima", None));
@@ -5337,7 +5335,7 @@ mod stack_list_tests {
         assert!(!stack_is_active(
             &ve,
             "base",
-            Some("https://broker.agentterrier.cn")
+            Some("https://broker.secondary.example")
         ));
     }
 }
@@ -13409,7 +13407,7 @@ mod tests {
             wallet: String::new(),
             identity_only_reason: Some(
                 "the managed-wallet attestation (SIWE→J1) against signer \
-                 https://signer.agentterrier.cn failed: connection refused"
+                 https://signer.secondary.example failed: connection refused"
                     .into(),
             ),
         });
@@ -13472,28 +13470,28 @@ mod tests {
 
     #[test]
     fn foreign_zone_overrides_are_refused_and_derived() {
-        let ve = Some("https://broker.agentterrier.cn");
-        // the 2026-09-10 leak: an AWS test host next to the VE broker → derived
+        let ve = Some("https://broker.secondary.example");
+        // A foreign deployment override is rejected in favor of derivation.
         assert_eq!(
             worker_url_override_or_derive(
                 "X",
-                Some("https://weixin-test.litentry.org".into()),
+                Some("https://weixin-test.primary.example".into()),
                 ve,
                 "weixin"
             )
             .as_deref(),
-            Some("https://weixin.agentterrier.cn")
+            Some("https://weixin.secondary.example")
         );
         // same zone / loopback overrides stand (trailing slash trimmed)
         assert_eq!(
             worker_url_override_or_derive(
                 "X",
-                Some("https://weixin.agentterrier.cn/".into()),
+                Some("https://weixin.secondary.example/".into()),
                 ve,
                 "weixin"
             )
             .as_deref(),
-            Some("https://weixin.agentterrier.cn")
+            Some("https://weixin.secondary.example")
         );
         assert_eq!(
             worker_url_override_or_derive("X", Some("http://127.0.0.1:9101".into()), ve, "weixin")
@@ -13503,7 +13501,7 @@ mod tests {
         // no override → derived; nothing at all → None; blank override → derived
         assert_eq!(
             worker_url_override_or_derive("X", None, ve, "channel").as_deref(),
-            Some("https://channel.agentterrier.cn")
+            Some("https://channel.secondary.example")
         );
         assert_eq!(
             worker_url_override_or_derive("X", None, None, "channel"),
@@ -13511,7 +13509,7 @@ mod tests {
         );
         assert_eq!(
             worker_url_override_or_derive("X", Some("  ".into()), ve, "channel").as_deref(),
-            Some("https://channel.agentterrier.cn")
+            Some("https://channel.secondary.example")
         );
     }
 
@@ -13521,18 +13519,21 @@ mod tests {
         // (scripts/operator-workstation*.env) so the daemon reasons the URL from
         // the broker instead of a hardcoded per-stack env var.
         let cases = [
-            ("https://broker.litentry.org", "https://weixin.litentry.org"),
             (
-                "https://test-broker.litentry.org",
-                "https://weixin-test.litentry.org",
+                "https://broker.primary.example",
+                "https://weixin.primary.example",
             ),
             (
-                "https://test-broker.agentterrier.cn",
-                "https://weixin-test.agentterrier.cn",
+                "https://test-broker.primary.example",
+                "https://weixin-test.primary.example",
             ),
             (
-                "https://broker-base.litentry.org",
-                "https://weixin-base.litentry.org",
+                "https://test-broker.secondary.example",
+                "https://weixin-test.secondary.example",
+            ),
+            (
+                "https://broker-base.primary.example",
+                "https://weixin-base.primary.example",
             ),
         ];
         for (broker, want) in cases {
@@ -13543,26 +13544,25 @@ mod tests {
             );
         }
         // The channel worker the fleet conversation publishes to derives the same
-        // way — critically, the VE .cn stack, whose broker signs the cap the
-        // worker must verify (the #519 403 broker_sig_invalid was this drifting).
+        // way, so the worker verifies capabilities from the selected broker.
         assert_eq!(
-            derive_worker_url("https://broker.agentterrier.cn", "channel").as_deref(),
-            Some("https://channel.agentterrier.cn"),
-            "VE channel worker must reason from the .cn broker"
+            derive_worker_url("https://broker.secondary.example", "channel").as_deref(),
+            Some("https://channel.secondary.example"),
+            "channel worker must derive from the selected broker"
         );
         assert_eq!(
-            derive_worker_url("https://test-broker.litentry.org", "channel").as_deref(),
-            Some("https://channel-test.litentry.org")
+            derive_worker_url("https://test-broker.primary.example", "channel").as_deref(),
+            Some("https://channel-test.primary.example")
         );
         // The helper generalizes to any co-located worker.
         assert_eq!(
-            derive_worker_url("https://broker.litentry.org", "memory").as_deref(),
-            Some("https://memory.litentry.org")
+            derive_worker_url("https://broker.primary.example", "memory").as_deref(),
+            Some("https://memory.primary.example")
         );
         // A scheme-less / trailing-path broker host still resolves.
         assert_eq!(
-            derive_worker_url("broker-base.litentry.org/", "weixin").as_deref(),
-            Some("https://weixin-base.litentry.org")
+            derive_worker_url("broker-base.primary.example/", "weixin").as_deref(),
+            Some("https://weixin-base.primary.example")
         );
         // A local/dev broker (bare IP / localhost / single label) → None, so the
         // caller reports not-configured rather than fabricating a bogus host.

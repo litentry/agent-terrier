@@ -197,12 +197,12 @@ mod tests {
     fn the_sandbox_gate_origin_drops_the_openai_v1_base() {
         // The VE stack's turn URL: the daemon appends `/v1/chat/completions`.
         assert_eq!(
-            cfg("https://gate.agentterrier.cn/v1").origin(),
-            "https://gate.agentterrier.cn"
+            cfg("https://gate.secondary.example/v1").origin(),
+            "https://gate.secondary.example"
         );
         assert_eq!(
-            cfg("https://gate.agentterrier.cn/v1/").origin(),
-            "https://gate.agentterrier.cn"
+            cfg("https://gate.secondary.example/v1/").origin(),
+            "https://gate.secondary.example"
         );
         // A turn URL without the `/v1` base is already the origin.
         assert_eq!(

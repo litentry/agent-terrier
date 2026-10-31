@@ -13,9 +13,7 @@
 //!   never an empty `{}` — so an operator running `curl … | jq` sees an
 //!   explicit verdict instead of having to read the HTTP status code.
 //!
-//! Each check entry carries a `docs` URL anchor (Designer review #status-shape)
-//! so an operator paged at 2am can click straight to the runbook section
-//! that explains the failure mode.
+//! Each check entry links to the public service inspection guide.
 
 use std::sync::atomic::Ordering;
 
@@ -78,7 +76,7 @@ pub async fn readyz(State(state): State<SharedState>) -> impl IntoResponse {
                 "name": "tier2/ses",
                 "status": "unready",
                 "reason": "SES sender identity not yet verified since boot",
-                "docs": runbook_anchor("ses-verification"),
+                "docs": local_service_guide(),
             }));
         }
     }
@@ -98,7 +96,7 @@ pub async fn readyz(State(state): State<SharedState>) -> impl IntoResponse {
                 "name": "tier2/evm_rpc",
                 "status": "unready",
                 "reason": "EVM RPC eth_chainId probe has not succeeded since boot",
-                "docs": runbook_anchor("evm-rpc-reachability"),
+                "docs": local_service_guide(),
             }));
         }
         if evm_fee_payer_funded {
@@ -109,7 +107,7 @@ pub async fn readyz(State(state): State<SharedState>) -> impl IntoResponse {
                 "name": "tier2/evm_fee_payer",
                 "status": "unready",
                 "reason": "EVM fee-payer balance below BROKER_EVM_FEE_PAYER_MIN_BALANCE",
-                "docs": runbook_anchor("evm-fee-payer-balance"),
+                "docs": local_service_guide(),
             }));
         }
     }
@@ -166,31 +164,23 @@ fn readiness_to_json(name: &str, r: &Readiness) -> Value {
             "name": name,
             "status": "ready",
             "detail": detail,
-            "docs": runbook_anchor(name),
+            "docs": local_service_guide(),
         }),
         Readiness::Degraded { reason } => json!({
             "name": name,
             "status": "degraded",
             "reason": reason,
-            "docs": runbook_anchor(name),
+            "docs": local_service_guide(),
         }),
         Readiness::Unready { reason } => json!({
             "name": name,
             "status": "unready",
             "reason": reason,
-            "docs": runbook_anchor(name),
+            "docs": local_service_guide(),
         }),
     }
 }
 
-/// Per-check anchor in the operator runbook. Stage 7 phase 0 lands a
-/// stub doc URL; Phase E finalizes the runbook structure (US-015) and
-/// every anchor referenced here will exist as a heading in
-/// `docs/operator-runbook-stage7.md`.
-fn runbook_anchor(check_name: &str) -> String {
-    let slug = check_name.replace(['/', '_'], "-");
-    format!(
-        "https://docs.agentkeys.dev/operator-runbook-stage7#{}",
-        slug
-    )
+fn local_service_guide() -> &'static str {
+    "https://github.com/litentry/agent-terrier/blob/main/docs/wiki/local-services.md#inspect-and-stop"
 }

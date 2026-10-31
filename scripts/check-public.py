@@ -28,6 +28,15 @@ RULES = {
     ),
 }
 EXCEPTION_RULES = {"private-key", "cloud-access-key", "credential-literal", "personal-path"}
+PRIVATE_DOMAIN_HASHES = {
+    "cc98cb5809704135c4a46cdd091e9f92fd9430909f6408d7720ed37d8568a414",
+    "eab45d2ca67d327618c0283d827db80eb74775fba40e374f23efc46eb69a7269",
+    "792ff6e944250c9171075f18fc1211a373d992932d0ba43362c7327dfd1ef18f",
+    "910bdb26f0e7524eebbb10623fb92040e4d5f76733e363df6376a00db5eae22c",
+    "635e1575548fc031c6be553c651882cf364b52764e63515d7638bfac5f9959e8",
+    "f67484e69b9e281f48767db6908b30372b0bdd55c3ceb409432a1cb5cf5b8680",
+}
+HOSTNAME = re.compile(r"\b(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}\b", re.IGNORECASE)
 
 def load_exceptions(root):
     path = root / ".public-test-fixtures.json"
@@ -77,6 +86,14 @@ def inspect_file(root, path):
                 "path": str(relative), "rule": rule_name,
                 "line": line_number,
             })
+    domain_lines = set()
+    for match in HOSTNAME.finditer(contents):
+        labels = match.group().lower().split(".")
+        if any(hashlib.sha256(".".join(labels[index:]).encode()).hexdigest() in PRIVATE_DOMAIN_HASHES
+               for index in range(len(labels) - 1)):
+            domain_lines.add(bisect_right(newline_offsets, match.start()) + 1)
+    findings.extend({"path":str(relative), "rule":"private-deployment-domain", "line":line}
+                    for line in sorted(domain_lines))
     return findings
 
 def inspect_tree(root):

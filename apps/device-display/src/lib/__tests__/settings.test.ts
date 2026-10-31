@@ -8,7 +8,7 @@ function memStorage() {
 
 describe('settings', () => {
   it('normalizes the broker URL and ids', () => {
-    expect(normalizeBrokerUrl(' https://test-broker.agentterrier.cn/ ')).toBe('https://test-broker.agentterrier.cn');
+    expect(normalizeBrokerUrl(' https://test-broker.secondary.example/ ')).toBe('https://test-broker.secondary.example');
     expect(normalizeBrokerUrl('http://localhost:8091')).toBe('http://localhost:8091');
     expect(normalizeBrokerUrl('broker.example.test')).toBe('');
     expect(normalizeBrokerUrl('https://a.test/v1')).toBe('');
@@ -19,9 +19,9 @@ describe('settings', () => {
   it('URL params override stored settings once; defaults fill the rest', () => {
     const st = memStorage();
     saveSettings(st, { ...DEFAULT_SETTINGS, brokerUrl: 'https://old.test', feedId: 'old-feed' });
-    const s = loadSettings(st, '?broker=https://test-broker.agentterrier.cn/&feed=Kitchen-Display&lang=zh&theme=forest');
+    const s = loadSettings(st, '?broker=https://test-broker.secondary.example/&feed=Kitchen-Display&lang=zh&theme=forest');
     expect(s).toEqual({
-      brokerUrl: 'https://test-broker.agentterrier.cn',
+      brokerUrl: 'https://test-broker.secondary.example',
       feedId: 'kitchen-display',
       label: 'kitchen-display',
       locale: 'zh',

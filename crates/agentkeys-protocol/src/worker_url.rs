@@ -2,8 +2,8 @@
 //! (AGENTS.md "Worker URLs are DERIVED"). This is the ONE owner of that
 //! derivation, wasm-safe so the browser device client (`agentkeys-web-core`)
 //! and the daemon (`ui_bridge::derive_worker_url`, which delegates here) agree
-//! byte-for-byte: `derive_worker_url("https://broker.agentterrier.cn", "channel")`
-//! = `https://channel.agentterrier.cn`; the per-stack prefix maps
+//! byte-for-byte: `derive_worker_url("https://broker.secondary.example", "channel")`
+//! = `https://channel.secondary.example`; the per-stack prefix maps
 //! `broker.` → ``, `test-broker.` → `-test`, `broker-<x>.` → `-<x>`.
 
 /// `https://<worker><stack-suffix>.<zone>` for the broker at `broker_url`, or
@@ -51,11 +51,8 @@ fn url_host(u: &str) -> String {
 /// Whether an explicit `AGENTKEYS_WORKER_<X>_URL` override may stand next to
 /// `broker_url`: a loopback / `localhost` host always (a worker running on the
 /// operator's machine), otherwise only a host on the SAME zone as the broker.
-/// A foreign-zone override is almost always an inherited stack env — the
-/// #571 leak class: on 2026-09-10 an AWS test-env `weixin-test.litentry.org`
-/// rode into the VE console's daemon and pinned its Contacts page onto a host
-/// that does not exist (and is not the 备案 domain WeChat needs). Callers log
-/// the refusal and derive from the broker instead.
+/// A foreign-zone override may point at another deployment. Callers log the
+/// refusal and derive from the current broker instead.
 pub fn worker_override_matches_broker(override_url: &str, broker_url: &str) -> bool {
     let o = url_host(override_url);
     if o.is_empty() {
@@ -77,24 +74,24 @@ mod tests {
 
     #[test]
     fn overrides_stand_only_on_loopback_or_the_broker_zone() {
-        let ve = "https://broker.agentterrier.cn";
+        let ve = "https://broker.secondary.example";
         assert!(worker_override_matches_broker(
-            "https://weixin.agentterrier.cn",
+            "https://weixin.secondary.example",
             ve
         ));
         assert!(worker_override_matches_broker(
-            "https://weixin-test.agentterrier.cn/",
-            "https://test-broker.agentterrier.cn"
+            "https://weixin-test.secondary.example/",
+            "https://test-broker.secondary.example"
         ));
         assert!(worker_override_matches_broker("http://127.0.0.1:9101", ve));
         assert!(worker_override_matches_broker("http://localhost:9101/", ve));
-        // the 2026-09-10 leak: an AWS test host next to the VE broker
+        // An override on another deployment must not redirect this client.
         assert!(!worker_override_matches_broker(
-            "https://weixin-test.litentry.org",
+            "https://weixin-test.primary.example",
             ve
         ));
         assert!(!worker_override_matches_broker(
-            "https://weixin.agentterrier.cn",
+            "https://weixin.secondary.example",
             "http://127.0.0.1:8091"
         ));
         assert!(!worker_override_matches_broker("", ve));
@@ -104,16 +101,16 @@ mod tests {
     #[test]
     fn prod_test_and_named_stacks_derive_their_worker_hosts() {
         assert_eq!(
-            derive_worker_url("https://broker.agentterrier.cn", "channel").as_deref(),
-            Some("https://channel.agentterrier.cn")
+            derive_worker_url("https://broker.secondary.example", "channel").as_deref(),
+            Some("https://channel.secondary.example")
         );
         assert_eq!(
-            derive_worker_url("https://test-broker.agentterrier.cn/", "channel").as_deref(),
-            Some("https://channel-test.agentterrier.cn")
+            derive_worker_url("https://test-broker.secondary.example/", "channel").as_deref(),
+            Some("https://channel-test.secondary.example")
         );
         assert_eq!(
-            derive_worker_url("https://broker-base.litentry.org:443/v1", "memory").as_deref(),
-            Some("https://memory-base.litentry.org")
+            derive_worker_url("https://broker-base.primary.example:443/v1", "memory").as_deref(),
+            Some("https://memory-base.primary.example")
         );
     }
 

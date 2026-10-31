@@ -139,7 +139,7 @@ struct Args {
     ui_bridge_origin: String,
 
     /// WebAuthn Relying Party ID. Defaults to "localhost" for dev.
-    /// In production, set to the operator's domain (e.g. "agentkeys.io").
+    /// In production, set to the operator's domain (e.g. "console.example").
     #[arg(long, env = "AGENTKEYS_UI_BRIDGE_RP_ID", default_value = "localhost")]
     ui_bridge_rp_id: String,
 

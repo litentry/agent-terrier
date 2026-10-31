@@ -336,7 +336,7 @@ impl ChannelWorker {
     }
 }
 
-/// `https://channel-test.agentterrier.cn` from `https://test-broker.agentterrier.cn`
+/// `https://channel-test.secondary.example` from `https://test-broker.secondary.example`
 /// — the ONE derivation (`agentkeys_protocol::derive_worker_url`).
 #[wasm_bindgen(js_name = deriveWorkerUrl)]
 pub fn derive_worker_url(broker_url: String, worker: String) -> Option<String> {

@@ -505,7 +505,7 @@ function SettingsForm({
       {!settings.brokerUrl && <p style={{ margin: 0, opacity: 0.85 }}>{t.unconfigured}</p>}
       <label style={{ display: 'grid', gap: 4 }}>
         <span style={{ fontSize: 12, opacity: 0.7 }}>{t.broker}</span>
-        <input style={field} value={broker} onChange={(e) => setBroker(e.target.value)} placeholder="https://test-broker.agentterrier.cn" inputMode="url" />
+        <input style={field} value={broker} onChange={(e) => setBroker(e.target.value)} placeholder="https://test-broker.secondary.example" inputMode="url" />
       </label>
       <label style={{ display: 'grid', gap: 4 }}>
         <span style={{ fontSize: 12, opacity: 0.7 }}>{t.feed}</span>
