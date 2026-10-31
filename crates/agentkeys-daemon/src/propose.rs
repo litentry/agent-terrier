@@ -216,10 +216,6 @@ pub async fn propose_once(
         Some(cfg.memory_worker_url.clone()),
         None,
         None,
-        Some(bearer.to_string()),
-        None,
-        None,
-        std::env::var("AWS_REGION").unwrap_or_else(|_| "us-east-1".into()),
     );
     let client = credential.configure_client(client);
     let resp = agentkeys_cli::cred_admin::memory_inbox_push_with(

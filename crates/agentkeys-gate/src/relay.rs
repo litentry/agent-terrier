@@ -152,7 +152,7 @@ impl Relay {
         let auditor = config
             .audit_url
             .clone()
-            .map(|url| Arc::new(Auditor::new(url, config.aws_region.clone())));
+            .map(|url| Arc::new(Auditor::new(url)));
         let keys = Arc::new(crate::keys::KeyStore::from_config(&config));
         let speech = SpeechClient::new(config.speech_backend.clone());
         Self {

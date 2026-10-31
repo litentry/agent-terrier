@@ -68,18 +68,8 @@ impl SelfBackend {
     fn client(&self) -> BackendClient {
         let cred_url = crate::ui_bridge::derive_worker_url(&self.cfg.broker_url, "cred");
         let audit_url = crate::ui_bridge::derive_worker_url(&self.cfg.broker_url, "audit");
-        let client = BackendClient::new(
-            Some(self.cfg.broker_url.clone()),
-            None,
-            audit_url,
-            cred_url,
-            Some(self.bearer.clone()),
-            None,
-            std::env::var("AGENTKEYS_VAULT_ROLE_ARN")
-                .ok()
-                .filter(|s| !s.trim().is_empty()),
-            std::env::var("AWS_REGION").unwrap_or_else(|_| "us-east-1".into()),
-        );
+        let client =
+            BackendClient::new(Some(self.cfg.broker_url.clone()), None, audit_url, cred_url);
         self.credential.configure_client(client)
     }
 

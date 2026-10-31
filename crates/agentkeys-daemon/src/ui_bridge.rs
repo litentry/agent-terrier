@@ -7150,16 +7150,8 @@ pub(crate) async fn master_channel_cap(
             }
         }
     }
-    let client = agentkeys_backend_client::BackendClient::new(
-        Some(coords.broker.clone()),
-        None,
-        None,
-        None,
-        Some(coords.j1.clone()),
-        None,
-        None,
-        coords.region.clone(),
-    );
+    let client =
+        agentkeys_backend_client::BackendClient::new(Some(coords.broker.clone()), None, None, None);
     let cap = client
         .cap_mint(
             op,
@@ -10041,16 +10033,7 @@ async fn mint_master_cap(
         "cred-fetch" => CapMintOp::CredFetch,
         other => return Err(format!("mint_master_cap: unknown cap route {other}")),
     };
-    let mut client = BackendClient::new(
-        Some(broker.to_string()),
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        String::new(),
-    );
+    let mut client = BackendClient::new(Some(broker.to_string()), None, None, None);
     // Workers require a fresh actor proof for every capability.
     if let Some(dk) = agentkeys_core::device_crypto::load_device_key_from_env() {
         client = client.with_device_key(std::sync::Arc::new(dk));

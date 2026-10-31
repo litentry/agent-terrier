@@ -1,15 +1,4 @@
-//! `agentkeys-backend-client` — the single owner of the broker/worker client
-//! protocol (issue #203).
-//!
-//! It is the dual of `agentkeys-broker-server` / `agentkeys-worker-*`: where
-//! those crates *serve* the cap-mint + worker endpoints, this crate *calls*
-//! them. Everything the chain serializes — the four cap-mint endpoints, the
-//! STS relay, worker put/get, the `knowledge:<ns>` service builder, and the
-//! `0x`-omni normalizer — lives here once. The MCP server's `HttpBackend`
-//! delegates to [`BackendClient`]; the daemon's `ui_bridge` real-memory path
-//! calls it directly; the harness diffs its bash bodies against
-//! [`fixtures::canonical_fixtures`]. Re-typing any of these elsewhere is a
-//! compile error or a fixture mismatch, never a silent runtime drift.
+//! Native capability and worker client; wire types are owned by agentkeys-protocol.
 
 pub mod client;
 pub mod fixtures;

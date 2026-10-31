@@ -58,14 +58,13 @@ version = "0.1.0"
 dependencies = [
  "agentkeys-core",
  "agentkeys-protocol",
- "agentkeys-provisioner",
- "async-trait",
+ "axum",
  "reqwest",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
- "tracing",
 ]
 
 [[package]]
@@ -599,6 +598,7 @@ name = "agentkeys-worker-creds"
 version = "0.1.0"
 dependencies = [
  "aes-gcm",
+ "agentkeys-backend-client",
  "agentkeys-core",
  "agentkeys-local-store",
  "agentkeys-protocol",

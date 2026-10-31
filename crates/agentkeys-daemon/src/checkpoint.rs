@@ -1,35 +1,5 @@
-//! #594 — the delegate-side runtime CHECKPOINT loop + restore-on-boot
-//! (plan `docs/plan/issue-594-sandbox-checkpoint-relaunch.md`).
-//!
-//! A veFaaS instance hard-expires at its lease deadline, and the #577
-//! Hermes-home hand-off only works between two LIVE instances (broker-RAM
-//! relay) — at expiry there is nothing left to export. This loop makes the
-//! delegate's exportable runtime context DURABLE: periodically ask the local
-//! bridge for its runtime-home snapshot (`/v1/sandbox/mgmt/session/export`,
-//! the same #577 surface the broker relay uses) and persist it into the
-//! delegate's OWN `knowledge:<ns>` grant under the reserved keyed-object slot
-//! `agentkeys_protocol::CHECKPOINT_OBJECT_KEY`. At boot, the replacement
-//! instance runs the mirror image: fetch the checkpoint and import it BEFORE
-//! the first periodic save can overwrite it with a fresh (empty) home.
-//!
-//! A restore that does not CONCLUDE inside the boot window stays pending — a
-//! timeout is not a conclusion: the stored object may exist and simply was
-//! not read. Every tick then retries it instead of saving, and nothing is
-//! saved over that object until its restore concludes (restored, nothing
-//! stored, or refused for good). The engine workspace (#694) has one more
-//! outcome, HELD: the engine filled its workspace before the restore could
-//! land, so the stored workspace is kept for the next respawn — never
-//! unpacked over a live engine, never saved over.
-//!
-//! Authority is the delegate's own: the sandbox mints its own `MemoryPut`/
-//! `MemoryGet` caps (#552 signer PoP) over its own granted service — the
-//! broker cannot write a checkpoint and never holds one at rest (D2/D4), and
-//! the content lives in the per-actor encrypted memory plane (D6). Freshness
-//! races with the #577 relay import are settled bridge-side by the newer-wins
-//! `snapshot_at` guard, not by arrival order.
-//!
-//! Never load-bearing: every failure is a warn + retry next tick; chat and
-//! the sandbox's jobs are unaffected.
+//! Periodically persist actor runtime state and restore it before a new save.
+//! Pending restores protect the stored snapshot from replacement by an empty runtime.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -105,13 +75,6 @@ pub struct CheckpointConfig {
     pub engine_held_since: Option<std::time::Instant>,
     /// #693 — the lifecycle hub (`restoring` → the restore outcome).
     pub hub: Option<Arc<LifecycleHub>>,
-    /// The stack's data-plane credential provider (`AGENTKEYS_STS_PROVIDER`,
-    /// injected by the broker at create). `Some("ve")` + a signer URL ⇒ the
-    /// checkpoint mints its own-namespace storage credential at the signer's
-    /// chain-gated `/dev/sign-sts` with its own J1 (the #513 issuance gate) and
-    /// relays it to the worker — the broker is out of that loop. Anything else
-    /// ⇒ the session bearer only; the worker mints `/v1/cap/own-sts` (#716).
-    pub sts_provider: Option<String>,
 }
 
 impl CheckpointConfig {
@@ -218,7 +181,6 @@ impl CheckpointConfig {
             engine_hold_max: Duration::from_secs(engine_hold_max),
             engine_held_since: None,
             hub: None,
-            sts_provider: read(env_names::STS_PROVIDER).map(|v| v.trim().to_ascii_lowercase()),
         })
     }
 
@@ -235,33 +197,13 @@ impl CheckpointConfig {
         release_engine(&self.marker);
     }
 
-    /// Whether this checkpoint mints at the signer: the stack said `ve` AND a
-    /// signer URL exists (derived from the broker, or the override). Logged
-    /// once at boot by the loop so a delegate on the fallback path is visible.
-    fn mints_at_signer(&self) -> Option<&str> {
-        match (
-            self.sts_provider.as_deref(),
-            self.chat.signer_url.as_deref(),
-        ) {
-            (Some("ve"), Some(url)) if !url.trim().is_empty() => Some(url),
-            _ => None,
-        }
-    }
-
-    fn backend_client(&self, bearer: &str, credential: &DelegateCredential) -> BackendClient {
-        let mut client = BackendClient::new(
+    fn backend_client(&self, credential: &DelegateCredential) -> BackendClient {
+        let client = BackendClient::new(
             Some(self.chat.broker_url.clone()),
             Some(self.memory_worker_url.clone()),
             None,
             None,
-            Some(bearer.to_string()),
-            None,
-            None,
-            std::env::var("AWS_REGION").unwrap_or_else(|_| "us-east-1".into()),
         );
-        if let Some(signer) = self.mints_at_signer() {
-            client = client.with_signer_sts(signer, normalize_omni_0x(&self.chat.actor_omni));
-        }
         credential.configure_client(client)
     }
 }
@@ -275,17 +217,6 @@ pub fn spawn(cfg: CheckpointConfig, credential: Arc<DelegateCredential>) {
 }
 
 async fn run_loop(cfg: CheckpointConfig, credential: Arc<DelegateCredential>) {
-    match cfg.mints_at_signer() {
-        Some(signer) => tracing::info!(
-            signer = %signer,
-            "#594 checkpoint: own-namespace credential minted at the signer (stack sts_provider=ve, chain-gated issuance) — the broker is out of this loop"
-        ),
-        None => tracing::info!(
-            sts_provider = %cfg.sts_provider.as_deref().unwrap_or("(unset)"),
-            signer_url = %cfg.chat.signer_url.as_deref().unwrap_or("(none)"),
-            "#594 checkpoint: own-namespace credential minted server-side by the memory worker (/v1/cap/own-sts, #716)"
-        ),
-    }
     let http = match reqwest::Client::builder()
         .timeout(Duration::from_secs(90))
         .build()
@@ -888,7 +819,7 @@ async fn workspace_restore(
     let Some(ws) = &cfg.workspace else {
         return Ok(Restored::Done("no engine workspace on this box".into()));
     };
-    let client = cfg.backend_client(bearer, credential);
+    let client = cfg.backend_client(credential);
     let service = service_knowledge(&cfg.namespace);
     // The workspace object is the biggest thing the restore reads; a dropped
     // body stream on the worker's side (`502 s3_body`, measured once on
@@ -1004,7 +935,7 @@ async fn workspace_save(
     if bytes.len() > cfg.max_bytes {
         return Ok(SaveOutcome::TooLarge { bytes: bytes.len() });
     }
-    let client = cfg.backend_client(bearer, credential);
+    let client = cfg.backend_client(credential);
     let service = service_knowledge(&cfg.namespace);
     let cap = client
         .cap_mint(
@@ -1095,7 +1026,7 @@ async fn save_once(
     let plaintext =
         serde_json::to_vec(&envelope).map_err(|e| SaveError::Failed(format!("wrap: {e}")))?;
 
-    let client = cfg.backend_client(bearer, credential);
+    let client = cfg.backend_client(credential);
     let service = service_knowledge(&cfg.namespace);
     let cap = client
         .cap_mint(
@@ -1229,7 +1160,7 @@ async fn restore_once(
     credential: &DelegateCredential,
     bearer: &str,
 ) -> Result<String, RestoreError> {
-    let client = cfg.backend_client(bearer, credential);
+    let client = cfg.backend_client(credential);
     let service = service_knowledge(&cfg.namespace);
     let cap = client
         .cap_mint(
@@ -1427,41 +1358,6 @@ mod tests {
         let cfg = CheckpointConfig::from_lookup(&read, chat("opchat-w")).expect("enabled");
         assert_eq!(cfg.interval.as_secs(), 900);
         assert_eq!(cfg.max_bytes, 8 * 1024 * 1024);
-    }
-
-    /// The stack's provider decides the credential path: `ve` + a signer URL
-    /// mints at the signer; anything else (or no signer) keeps the worker-minted
-    /// own-sts fallback — never a guess.
-    #[test]
-    fn provider_selects_the_signer_mint_only_on_ve_with_a_signer() {
-        let read = lookup(&[
-            ("AGENTKEYS_SANDBOX_MGMT_TOKEN", "smt1_x"),
-            ("AGENTKEYS_STS_PROVIDER", " VE "),
-        ]);
-        let cfg = CheckpointConfig::from_lookup(&read, chat("opchat-chef")).unwrap();
-        assert_eq!(cfg.sts_provider.as_deref(), Some("ve"));
-        assert_eq!(
-            cfg.mints_at_signer(),
-            Some("https://signer.agentterrier.cn"),
-            "ve + the derived signer url → signer mint"
-        );
-        let mut no_signer = chat("opchat-chef");
-        no_signer.signer_url = None;
-        let cfg = CheckpointConfig::from_lookup(&read, no_signer).unwrap();
-        assert_eq!(
-            cfg.mints_at_signer(),
-            None,
-            "no signer → the own-sts fallback"
-        );
-        let aws = lookup(&[
-            ("AGENTKEYS_SANDBOX_MGMT_TOKEN", "smt1_x"),
-            ("AGENTKEYS_STS_PROVIDER", "aws"),
-        ]);
-        let cfg = CheckpointConfig::from_lookup(&aws, chat("opchat-chef")).unwrap();
-        assert_eq!(cfg.mints_at_signer(), None, "aws → the relay/own-sts path");
-        let unset = lookup(&[("AGENTKEYS_SANDBOX_MGMT_TOKEN", "smt1_x")]);
-        let cfg = CheckpointConfig::from_lookup(&unset, chat("opchat-chef")).unwrap();
-        assert_eq!(cfg.sts_provider, None);
     }
 
     #[test]

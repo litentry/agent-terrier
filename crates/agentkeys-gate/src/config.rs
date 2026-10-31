@@ -50,9 +50,6 @@ pub struct Cli {
     pub audit_url: Option<String>,
     #[arg(long, env = "AGENTKEYS_GATE_REQUIRE_AUDIT", default_value_t = false)]
     pub require_audit: bool,
-    // Removed with the remaining storage client dependency migration.
-    #[arg(long, env = "AWS_REGION", default_value = "us-east-1")]
-    pub aws_region: String,
     #[arg(long, env = "AGENTKEYS_GATE_SEARCH_URL")]
     pub search_url: Option<String>,
     #[arg(long, env = "AGENTKEYS_GATE_SEARCH_ENGINES", default_value = "")]
@@ -132,7 +129,6 @@ pub struct GateConfig {
     pub keys_file: Option<PathBuf>,
     pub audit_url: Option<String>,
     pub require_audit: bool,
-    pub aws_region: String,
     pub speech_backend: Option<Arc<dyn SpeechBackend>>,
     pub search: Option<SearchConfig>,
     pub decision: DecisionUpstreams,
@@ -289,7 +285,6 @@ impl GateConfig {
             keys_file: cli.keys_file,
             audit_url: cli.audit_url,
             require_audit: cli.require_audit,
-            aws_region: cli.aws_region,
             speech_backend: None,
             search,
             decision: DecisionUpstreams {
@@ -327,7 +322,6 @@ mod tests {
             keys_file: None,
             audit_url: None,
             require_audit: false,
-            aws_region: "us-east-1".into(),
             speech_backend: None,
             search: None,
             decision: DecisionUpstreams::default(),
@@ -360,7 +354,6 @@ mod tests {
             admin_token: None,
             audit_url: None,
             require_audit: false,
-            aws_region: "us-east-1".into(),
         }
     }
 

@@ -272,10 +272,6 @@ async fn mirror_namespace(
         Some(cfg.memory_worker_url.clone()),
         None,
         None,
-        Some(bearer.to_string()),
-        None,
-        None,
-        std::env::var("AWS_REGION").unwrap_or_else(|_| "us-east-1".into()),
     );
     let client = credential.configure_client(client);
     let dkh = credential.device_key_hash();
@@ -1002,10 +998,6 @@ pub(crate) async fn fetch_own_context(
         Some(cfg.memory_worker_url.clone()),
         None,
         None,
-        Some(bearer.to_string()),
-        None,
-        None,
-        std::env::var("AWS_REGION").unwrap_or_else(|_| "us-east-1".into()),
     );
     let client = credential.configure_client(client);
     let dkh = credential.device_key_hash();

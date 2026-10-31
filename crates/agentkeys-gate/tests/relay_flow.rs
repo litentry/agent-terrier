@@ -276,7 +276,6 @@ async fn spawn_gate(budget: Option<u64>) -> TestGate {
         keys_file: None,
         audit_url: Some(format!("http://{audit_addr}")),
         require_audit: false,
-        aws_region: "us-east-1".into(),
         speech_backend: None,
         search: None,
         // #722 — the mock upstream doubles as TypeSafe (same host, own key);
@@ -1025,7 +1024,6 @@ async fn search_call_pins_engines_maps_results_and_audits() {
         keys_file: None,
         audit_url: Some(format!("http://{audit_addr}")),
         require_audit: false,
-        aws_region: "us-east-1".into(),
         speech_backend: None,
         search: Some(agentkeys_gate::config::SearchConfig {
             base_url: format!("http://{searx_addr}"),
@@ -1233,7 +1231,6 @@ async fn systemone_is_503_when_no_endpoint_is_configured() {
         keys_file: None,
         audit_url: None,
         require_audit: false,
-        aws_region: "us-east-1".into(),
         speech_backend: None,
         search: None,
         decision: DecisionUpstreams::default(),
@@ -1369,7 +1366,6 @@ async fn systemone_refuses_an_unknown_model_and_503s_an_unarmed_provider() {
         keys_file: None,
         audit_url: None,
         require_audit: false,
-        aws_region: "us-east-1".into(),
         speech_backend: None,
         search: None,
         decision: DecisionUpstreams {

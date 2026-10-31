@@ -518,17 +518,8 @@ impl SessionHandle {
         }
     }
 
-    pub(crate) fn client(&self, bearer: &str) -> BackendClient {
-        let client = BackendClient::new(
-            Some(self.cfg.broker_url.clone()),
-            None,
-            None,
-            None,
-            Some(bearer.to_string()),
-            None,
-            None,
-            std::env::var("AWS_REGION").unwrap_or_else(|_| "us-east-1".into()),
-        );
+    pub(crate) fn client(&self) -> BackendClient {
+        let client = BackendClient::new(Some(self.cfg.broker_url.clone()), None, None, None);
         self.credential.configure_client(client)
     }
 }
@@ -947,7 +938,7 @@ async fn poll_feed(
                 continue;
             }
         };
-        let client = session.client(&bearer);
+        let client = session.client();
 
         // 2. Subscribe cap (cached, #563) + one long-poll round.
         let sub_cap = match sub_caps.fresh() {
@@ -2255,7 +2246,7 @@ impl Publisher {
             return Ok((c, String::new()));
         }
         let bearer = self.session.bearer().await?;
-        let client = self.session.client(&bearer);
+        let client = self.session.client();
         let (op, service) = if publish {
             (
                 CapMintOp::ChannelPublish,

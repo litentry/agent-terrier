@@ -1332,6 +1332,159 @@ async fn browser_client_uses_real_scoped_memory_without_cloud_credentials() {
     broker_task.abort();
 }
 
+#[tokio::test]
+async fn native_client_uses_scoped_memory_and_inbox_without_cloud_credentials() {
+    use agentkeys_backend_client::{BackendClient, BackendError, MemoryGetInput, MemoryPutInput};
+    let fixture = Fixture::new_for(
+        DataClass::Memory,
+        agentkeys_worker_memory::handlers::build_router,
+        true,
+    )
+    .await;
+    let cap = |owner, operation, service: &str| {
+        let mut cap = fixture.cap(owner, operation);
+        cap.payload.service = service.into();
+        fixture.sign(&mut cap, owner);
+        serde_json::to_value(cap).unwrap()
+    };
+    let (url, task) = serve(fixture.worker.clone()).await;
+    let client = BackendClient::new(None, Some(url), None, None);
+    for (owner, value) in [(true, "canonical"), (false, "working")] {
+        client
+            .memory_put(MemoryPutInput {
+                cap: cap(owner, CapOp::Store, "knowledge:notes"),
+                namespace: "notes".into(),
+                plaintext_b64: STANDARD.encode(value),
+                object_key: None,
+                expected_content_hash: Some(String::new()),
+            })
+            .await
+            .unwrap();
+    }
+    let read = |operation| MemoryGetInput {
+        cap: cap(false, operation, "knowledge:notes"),
+        namespace: "notes".into(),
+        object_key: None,
+    };
+    assert_eq!(
+        client
+            .memory_get(read(CapOp::Fetch))
+            .await
+            .unwrap()
+            .plaintext_b64,
+        STANDARD.encode("working")
+    );
+    assert_eq!(
+        client
+            .memory_canonical_get(read(CapOp::CanonicalFetch))
+            .await
+            .unwrap()
+            .plaintext_b64,
+        STANDARD.encode("canonical")
+    );
+    let proposal = client
+        .memory_inbox_append(
+            cap(false, CapOp::Append, "proposal:notes"),
+            "lesson".into(),
+            STANDARD.encode(PLAINTEXT),
+            agentkeys_protocol::ContextKind::Knowledge,
+        )
+        .await
+        .unwrap();
+    let list = client
+        .memory_inbox_list(cap(true, CapOp::Fetch, "inbox"))
+        .await
+        .unwrap();
+    assert_eq!(list.len(), 1);
+    let item = client
+        .memory_inbox_get(cap(true, CapOp::Fetch, "inbox"), proposal.s3_key.clone())
+        .await
+        .unwrap();
+    assert_eq!(item.body_b64, STANDARD.encode(PLAINTEXT));
+    assert_eq!(
+        item.source_delegate_omni.trim_start_matches("0x"),
+        "22".repeat(32)
+    );
+    assert!(client
+        .memory_inbox_delete(cap(true, CapOp::Teardown, "inbox"), proposal.s3_key)
+        .await
+        .unwrap());
+    assert!(client
+        .memory_inbox_list(cap(true, CapOp::Fetch, "inbox"))
+        .await
+        .unwrap()
+        .is_empty());
+    let stored = fixture.snapshot();
+    let calls = fixture.storage.calls.load(Ordering::SeqCst);
+    fixture.chain.lock().unwrap().allowed = false;
+    let error = client
+        .memory_inbox_append(
+            cap(false, CapOp::Append, "proposal:notes"),
+            "forbidden".into(),
+            STANDARD.encode(PLAINTEXT),
+            agentkeys_protocol::ContextKind::Knowledge,
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, BackendError::Http {status:403, ref body} if serde_json::from_str::<serde_json::Value>(body).unwrap()["reason"] == "service_not_in_scope")
+    );
+    assert_eq!(fixture.storage.calls.load(Ordering::SeqCst), calls);
+    assert_eq!(fixture.snapshot(), stored);
+    let error = client
+        .memory_canonical_get(read(CapOp::CanonicalFetch))
+        .await
+        .unwrap_err();
+    assert!(matches!(error, BackendError::Http { status: 403, .. }));
+    assert_eq!(fixture.storage.calls.load(Ordering::SeqCst), calls);
+    assert_eq!(fixture.snapshot(), stored);
+    task.abort();
+}
+
+#[tokio::test]
+async fn native_client_uses_scoped_credentials_without_cloud_credentials() {
+    use agentkeys_backend_client::{BackendClient, BackendError, CredFetchInput, CredStoreInput};
+    let fixture = Fixture::new().await;
+    let (url, task) = serve(fixture.worker.clone()).await;
+    let client = BackendClient::new(None, None, None, Some(url));
+    client
+        .cred_store(CredStoreInput {
+            cap: serde_json::to_value(fixture.cap(true, CapOp::Store)).unwrap(),
+            plaintext_b64: STANDARD.encode(PLAINTEXT),
+        })
+        .await
+        .unwrap();
+    let fetch = || CredFetchInput {
+        cap: serde_json::to_value(fixture.cap(false, CapOp::Fetch)).unwrap(),
+    };
+    assert_eq!(
+        client.cred_fetch(fetch()).await.unwrap().plaintext_b64,
+        Some(STANDARD.encode(PLAINTEXT))
+    );
+    let stored = fixture.snapshot();
+    let calls = fixture.storage.calls.load(Ordering::SeqCst);
+    let error = client
+        .cred_store(CredStoreInput {
+            cap: serde_json::to_value(fixture.cap(false, CapOp::Store)).unwrap(),
+            plaintext_b64: STANDARD.encode(b"forbidden"),
+        })
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, BackendError::Http {status:403, ref body} if serde_json::from_str::<serde_json::Value>(body).unwrap()["reason"] == "cred_store_not_master_self")
+    );
+    assert_eq!(fixture.storage.calls.load(Ordering::SeqCst), calls);
+    assert_eq!(fixture.snapshot(), stored);
+    fixture.chain.lock().unwrap().allowed = false;
+    let error = client.cred_fetch(fetch()).await.unwrap_err();
+    assert!(
+        matches!(error, BackendError::Http {status:403, ref body} if serde_json::from_str::<serde_json::Value>(body).unwrap()["reason"] == "service_not_in_scope")
+    );
+    assert_eq!(fixture.storage.calls.load(Ordering::SeqCst), calls);
+    assert_eq!(fixture.snapshot(), stored);
+    task.abort();
+}
+
 struct WorkerProcess {
     child: tokio::process::Child,
     url: String,

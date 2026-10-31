@@ -662,10 +662,6 @@ pub(crate) async fn publish_as_console_or_master(
                 None,
                 None,
                 None,
-                Some(jwt.clone()),
-                None,
-                None,
-                coords.region.clone(),
             )
             .with_device_key(std::sync::Arc::new(dk));
             let cap = client

@@ -27,18 +27,9 @@ pub fn result_code(outcome: &str) -> u8 {
 }
 
 impl Auditor {
-    pub fn new(audit_url: String, aws_region: String) -> Self {
+    pub fn new(audit_url: String) -> Self {
         Self {
-            client: BackendClient::new(
-                None,
-                None,
-                Some(audit_url),
-                None,
-                None,
-                None,
-                None,
-                aws_region,
-            ),
+            client: BackendClient::new(None, None, Some(audit_url), None),
         }
     }
 

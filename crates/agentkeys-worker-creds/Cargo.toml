@@ -45,6 +45,7 @@ aws-sdk-s3 = "1"
 clap = { version = "4", features = ["derive", "env"] }
 
 [dev-dependencies]
+agentkeys-backend-client = { workspace = true }
 agentkeys-web-core = { workspace = true }
 agentkeys-worker-channel = { path = "../agentkeys-worker-channel" }
 agentkeys-worker-memory = { path = "../agentkeys-worker-memory" }
