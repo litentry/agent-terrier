@@ -149,8 +149,10 @@ def run(repository, lane, components, online=False, report_path=None, plan=False
         check(name, "execution", [executable, test_filter], directory, rust_test=True)
     for component in dict.fromkeys(components):
         if component in ("ui", "dsh"):
-            directory = repository / ("apps/parent-control" if component == "ui" else "packages/agentkeys-dsh")
+            directory = repository / ("apps/parent-control" if component == "ui" else "packages")
             check(component + "-types", "build", ["npm", "run", "typecheck"], directory)
+            if component == "dsh":
+                check(component + "-build", "build", ["npm", "run", "build"], directory)
             check(component, "execution", ["npm", "test"], directory)
     elapsed = round(time.monotonic() - started, 3)
     target = 30 if lane == "focused" else 180

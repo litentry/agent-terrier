@@ -12,12 +12,11 @@ Local, from the repository root, regenerate names:
 cargo run -p agentkeys-protocol --example export-model-runtime > packages/agentkeys-dsh/src/generated/model-runtime.ts
 ```
 
-Local, from this package directory:
+Local, from the public repository root, use the shared workspace lockfile:
 
 ```sh
-npm install --ignore-scripts
-npm run typecheck
-npm test
+npm ci --prefix packages --ignore-scripts
+python3 terrier test focused --component dsh
 ```
 
-The public container image and complete application journey remain under qualification. Passing these plugin checks does not prove that journey is ready.
+The [local runtime image](../../docs/wiki/local-agent-image.md) reuses these plugins. Its component checks and the complete application journey have separate qualification status.

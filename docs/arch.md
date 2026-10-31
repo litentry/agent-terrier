@@ -17,6 +17,7 @@ This document describes the public source tree. The complete local runtime is st
 | Local service supervision | `scripts/terrier_local/services.py` | `terrier services`, future local manager and explicit qualification |
 | UI tokens and components | `design-system` | `apps/parent-control`, `apps/device-display` |
 | Agent runtime plugins | `packages/agentkeys-dsh` | Agent environments |
+| Local agent composition and image | `packages/agent-terrier-runtime` | Local component development and image qualification |
 | Protocol examples | `e2e/fixtures` | Shared drift and conformance checks |
 
 The device-core crate contains reusable protocol and cryptographic primitives. It does not require firmware or a hardware toolchain for the public workspace build.
@@ -106,7 +107,7 @@ Each actor runtime runs as an unprivileged user with a read-only root filesystem
 
 Image-status request and response types have one owner in `agentkeys-protocol::console`. Broker and daemon use those types directly; TypeScript clients are generated. Status uses immutable image IDs and generic image availability.
 
-The adapter has deterministic lifecycle and denial tests plus an explicit [real Docker qualification](wiki/docker-qualification.md). That test exercises actual creation, reuse, restart, image identity, loopback HTTP, cross-runtime network denial and scoped removal using a small public fixture image. A reproducible agent image and complete local service/model wiring remain required by #6/#7; the adapter alone is not a runnable local release.
+The adapter has deterministic lifecycle and denial tests plus an explicit [real Docker qualification](wiki/docker-qualification.md). That test exercises actual creation, reuse, restart, image identity, loopback HTTP, cross-runtime network denial and scoped removal using a small public fixture image. The [local agent image](wiki/local-agent-image.md) composes shared runtime plugins with one packages workspace lockfile and a restricted build context. Native real-model chat/restart and container fixture checks pass. The isolated container cannot yet reach the host model endpoint; service transport, persistent container storage and broker-driven startup remain required by #6/#7. Neither component qualification is a complete local release.
 
 ## Local model capabilities
 

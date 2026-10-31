@@ -1,0 +1,67 @@
+The public runtime composition and image are available for component development. They reuse the shared agent loop, authenticated bridge, grant guards and session persistence. They are not yet the complete localhost deployment: broker-driven startup, container persistence, signer/service connectivity and the lightweight manager remain open in [epic #1](https://github.com/litentry/agent-terrier/issues/1).
+
+## Build and test
+
+Local, from the public checkout, install the single packages workspace lockfile and run its CLI lane:
+
+```sh
+npm ci --prefix packages --ignore-scripts
+python3 terrier test focused --component dsh
+```
+
+The lane builds shared plugins, checks types, runs their deterministic tests and starts real runtime processes for authentication, tool-denial and restart checks. It uses local fixture servers and loads no models.
+
+Local, from the public checkout with Docker running:
+
+```sh
+docker build --file packages/agent-terrier-runtime/Dockerfile \
+  --tag agent-terrier-runtime:local .
+docker build --file packages/agent-terrier-runtime/Dockerfile \
+  --target qualification --tag agent-terrier-runtime:tests .
+docker run --rm --pull=never --network=none --read-only \
+  --cap-drop=ALL --security-opt=no-new-privileges --user=1000:1000 \
+  --pids-limit=256 --memory=512m --cpus=1 \
+  --tmpfs=/tmp:rw,nosuid,nodev,size=128m agent-terrier-runtime:tests
+```
+
+The Dockerfile pins its public base image by digest. Its adjacent context allowlist includes runtime source, package manifests, the model recipe and license notices. Installation scripts are disabled. The final image contains production dependencies and compiled plugins; the qualification target adds tests without changing runtime code. Models, credentials, private documentation, host state and test files are absent from the final image.
+
+## Explicit configuration
+
+`packages/agent-terrier-runtime/start.mjs` requires `--state-dir`, `--work-dir`, `--port` and `--daemon-url`. It listens only on loopback. State and work paths must be canonical, private, owned directories without linked ancestors. Startup refuses incomplete configuration before opening the listener.
+
+| Environment | Purpose |
+|---|---|
+| `AGENTKEYS_MODEL_BASE_URL` | Explicit local compatibility endpoint or model relay |
+| `AGENTKEYS_MODEL_API_KEY` | Per-runtime relay proof |
+| `AGENTKEYS_MODEL_ID` | Explicit model selection |
+| `AGENTKEYS_BRIDGE_TOKEN` | Proof required for chat and context changes |
+
+Endpoints accept local HTTP origins only, without embedded credentials, query strings or fragments. Model environment names come from generated protocol definitions. The recipe owns context capacity; the composition bounds reply output. No provider discovery, credential file loading, shell tool or unrestricted filesystem tool is mounted. Advertised daemon actions retain both the shared grant guard and the daemon's independent authorization.
+
+Session logs live under the private state directory; agent-process restart resumes them. Persistence through container replacement is not yet established. Docker engine administrators can inspect container state; this development image does not claim production wallet custody.
+
+## Real-model qualification
+
+Prepare the pinned models using [local models](./local-models.md). Local, from the public checkout on macOS:
+
+```sh
+python3 scripts/tests/qualify_local_models.py \
+  --models-dir "${OLLAMA_MODELS:?Set the existing model directory}" \
+  --agent-runtime
+```
+
+This reuses the capability probe's owned model runner and OS-level outbound network restriction. It starts the actual agent, refuses a wrong bridge proof, generates a real-model reply, restarts the agent process and checks conversation recall. Its daemon fixture exposes no actions; this is not a real-chain authorization qualification.
+
+Local, from the public checkout on macOS after building the qualification image, the separate container probe is:
+
+```sh
+python3 scripts/tests/qualify_local_models.py \
+  --models-dir "${OLLAMA_MODELS:?Set the existing model directory}" \
+  --runtime-image agent-terrier-runtime:tests \
+  --docker-socket "${AGENT_TERRIER_DOCKER_SOCKET:?Set the local Docker Unix socket}"
+```
+
+**Known failure:** on the qualified Mac, the internal container network cannot reach the host model endpoint. The probe fails and removes its owned container/network. An independent local HTTP control returned `ENETUNREACH` with host-gateway mapping, timed out with default host-name resolution, and succeeded on Docker's ordinary bridge. Service transport must be completed while retaining isolation; this command is not a passing release gate yet.
+
+Recorded component evidence on macOS arm64: 123 shared plugin tests; two process integration cases covering wrong proofs, denied tool effects with a granted positive control, restart recovery, missing configuration and unsafe directories. The same two cases pass inside the Linux arm64 image under Node 24.22.2 with a read-only filesystem and no network. Real-model process chat/restart recall passed in 5.91 seconds. These are component measurements, not independent clean-install or full application acceptance.

@@ -13,6 +13,7 @@ import tempfile
 import threading
 import time
 import urllib.request
+import uuid
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from terrier_local import contracts, models, owner
@@ -44,7 +45,49 @@ def build_gate_test():
     return executables[0]
 
 
-def qualify(model_directory, binary, gate=False):
+def qualify_runtime_image(image, docker_socket, endpoint, environment, state):
+    if not docker_socket.is_absolute() or not docker_socket.is_socket():
+        raise ValueError("Container qualification requires an explicit local Docker socket")
+    configuration = state / "docker-client"
+    configuration.mkdir(mode=0o700)
+    docker_environment = dict(environment, DOCKER_CONFIG=str(configuration))
+    docker = ["docker", "--host", "unix://" + str(docker_socket)]
+
+    def execute(arguments, timeout=60):
+        result = subprocess.run([*docker, *arguments], env=docker_environment,
+            capture_output=True, text=True, timeout=timeout)
+        if result.returncode:
+            raise RuntimeError("Container runtime qualification operation failed: " + result.stderr.strip())
+        return result.stdout
+
+    if not image or image.startswith("-") or any(character.isspace() for character in image):
+        raise ValueError("Invalid qualification image reference")
+    metadata = json.loads(execute(["image", "inspect", image]))[0]
+    identity = metadata["Id"]
+    namespace = "terrier-model-check-" + uuid.uuid4().hex
+    execute(["network", "create", "--internal", "--label", "org.agent-terrier.qualification=" + namespace, namespace])
+    try:
+        network = json.loads(execute(["network", "inspect", namespace]))[0]
+        if not network["Internal"]:
+            raise RuntimeError("Qualification network is not internal")
+        report = execute(["run", "--pull=never", "--name", namespace,
+            "--label", "org.agent-terrier.qualification=" + namespace, "--network", namespace,
+            "--add-host", "host.docker.internal:host-gateway", "--read-only", "--cap-drop=ALL",
+            "--security-opt=no-new-privileges", "--user=1000:1000", "--pids-limit=256",
+            "--memory=512m", "--cpus=1", "--tmpfs=/tmp:rw,nosuid,nodev,size=128m",
+            "--entrypoint", "node", identity, "packages/agent-terrier-runtime/qualify-model.mjs",
+            "--model-endpoint", endpoint.replace(LOOPBACK_HOST, "host.docker.internal") + "/v1"], timeout=180)
+        return dict(json.loads(report), image_id=identity, image_platform=metadata["Os"] + "/" + metadata["Architecture"],
+            container_network_internal=True, published_ports=False, host_mounts=False)
+    finally:
+        containers = execute(["container", "ls", "--all", "--quiet", "--filter",
+            "label=org.agent-terrier.qualification=" + namespace]).split()
+        for container in containers:
+            execute(["container", "rm", "--force", container])
+        execute(["network", "rm", namespace])
+
+
+def qualify(model_directory, binary, gate=False, agent_runtime=False, runtime_image=None, docker_socket=None):
     if sys.platform != "darwin" or not shutil.which("sandbox-exec"):
         raise ValueError("This offline qualification requires macOS sandbox-exec; the model probe itself is portable")
     recipe = models.run(REPOSITORY, "config")
@@ -145,6 +188,16 @@ def qualify(model_directory, binary, gate=False):
                     if relay_report["embedding_dimensions"] != recipe["embedding"]["dimension"]:
                         raise ValueError("Relay embedding dimension differs from the pinned recipe")
                     relay_seconds = round(time.monotonic()-relay_started,3)
+                agent_report = None
+                if agent_runtime:
+                    agent_result = subprocess.run([*restriction, "node",
+                        str(REPOSITORY / "packages/agent-terrier-runtime/qualify-model.mjs"),
+                        "--model-endpoint", endpoint + "/v1"], cwd=REPOSITORY, env=environment,
+                        capture_output=True, text=True, timeout=180)
+                    if agent_result.returncode:
+                        raise RuntimeError("Real agent runtime qualification failed: " + agent_result.stderr.strip())
+                    agent_report = json.loads(agent_result.stdout)
+                image_report = qualify_runtime_image(runtime_image, docker_socket, endpoint, environment, state) if runtime_image else None
                 return {
                     "qualification":"local-model-capabilities", "external_network_denied":True,
                     "operating_system":platform.mac_ver()[0], "architecture":platform.machine(),
@@ -157,6 +210,8 @@ def qualify(model_directory, binary, gate=False):
                     "peak_runner_process_rss_kib":peak_rss[0], "capabilities":capabilities,
                     "authenticated_relay":relay_report,
                     "relay_probe_seconds":relay_seconds,
+                    "agent_runtime":agent_report,
+                    "agent_runtime_image":image_report,
                 }
             finally:
                 finished.set()
@@ -174,11 +229,17 @@ if __name__ == "__main__":
     parser.add_argument("--models-dir",type=Path,required=True,help="Existing downloaded model directory; no downloads or pruning")
     parser.add_argument("--ollama",default=shutil.which("ollama"),help="Local Ollama executable")
     parser.add_argument("--gate",action="store_true",help="Also qualify the authenticated relay using the same real models and network restriction")
+    parser.add_argument("--agent-runtime",action="store_true",help="Also qualify real agent chat and restart recall; build the packages workspace first")
+    parser.add_argument("--runtime-image",help="Already-loaded qualification image built from the runtime Dockerfile's qualification target")
+    parser.add_argument("--docker-socket",type=Path,help="Explicit local Docker socket required with --runtime-image")
     arguments = parser.parse_args()
     try:
         if not arguments.ollama:
             raise ValueError("Install the recipe's Ollama version first")
-        print(json.dumps(qualify(arguments.models_dir,arguments.ollama,arguments.gate),indent=2))
+        if bool(arguments.runtime_image) != bool(arguments.docker_socket):
+            raise ValueError("Set --runtime-image and --docker-socket together")
+        print(json.dumps(qualify(arguments.models_dir,arguments.ollama,arguments.gate,arguments.agent_runtime,
+            arguments.runtime_image,arguments.docker_socket),indent=2))
     except (OSError,ValueError,RuntimeError,subprocess.TimeoutExpired) as error:
         print(f"model qualification: {error}",file=sys.stderr)
         raise SystemExit(1)
