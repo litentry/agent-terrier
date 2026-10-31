@@ -1,4 +1,4 @@
-The local service launcher starts the real broker, development signer and four storage workers, each with its own persistent object database. It uses the existing chain controller, signing implementation, key generators, protected state files and worker executables. It does not start the full agent image, model server or web console yet.
+The local service launcher starts the real broker, development signer, authenticated model relay and four storage workers, each with its own persistent object database. It uses the existing chain controller, signing implementation, key generators, protected state files and worker executables. It does not start the full agent image, model server or web console yet.
 
 ## Start the services
 
@@ -8,7 +8,8 @@ Local, from the public checkout, prepare dependencies and binaries:
 ./terrier contracts setup
 cargo build -p agentkeys-cli -p agentkeys-broker-server -p agentkeys-local-store \
   -p agentkeys-worker-creds -p agentkeys-worker-config \
-  -p agentkeys-worker-memory -p agentkeys-worker-channel -p agentkeys-mock-server
+  -p agentkeys-worker-memory -p agentkeys-worker-channel -p agentkeys-mock-server \
+  -p agentkeys-gate
 ./terrier chain start
 ./terrier chain deploy
 ./terrier services start
@@ -16,11 +17,19 @@ cargo build -p agentkeys-cli -p agentkeys-broker-server -p agentkeys-local-store
 
 State lives outside the source checkout in the same private directory used by `terrier chain` and `terrier owner`. `AGENT_TERRIER_STATE_DIR` selects an explicit directory. `--bin-dir` or `AGENT_TERRIER_BIN_DIR` selects built service binaries; the default is the checkout's `target/debug` directory. No build, model download or cloud discovery happens implicitly during startup.
 
-The first start generates fresh broker signing keys, a development signer master key and a separate development encryption key for every data class. It chooses and persists a broker port; `--broker-port` can select that port on the first start. Later starts retain the issuer address so existing sessions continue to work. Signer, worker and object-service ports are assigned locally and reported in structured output. Every listener is loopback-only.
+The first start generates fresh broker signing keys, a development signer master key, a model-relay admin token and a separate development encryption key for every data class. It chooses and persists a broker port; `--broker-port` can select that port on the first start. Later starts retain the issuer address so existing sessions continue to work. Signer, relay, worker and object-service ports are assigned locally and reported in structured output. Every listener is loopback-only.
 
 Repeating `services start` reuses a healthy owned supervisor. It refuses changed ports, another deployment, unhealthy existing services and missing original keys. Startup failures stop only the children launched by that supervisor. An unrelated listener on the selected port is preserved. No process is stopped using a PID found in a state file.
 
-The service manifest is version 2. Stop a running version-1 supervisor before starting the updated launcher. Its one-time migration verifies existing broker/worker state, creates only the newly introduced signer key and preserves all existing keys and data. Once migrated, a missing signer key is an error requiring restoration; it is never silently regenerated.
+The service manifest is version 3. Stop an older supervisor before starting the updated launcher. Migration verifies existing state and creates only newly introduced files: the signer key for version 1, and relay admin/key-registry files for versions 1 and 2. It preserves existing keys and data. Once introduced, a missing file requires restoration; migration never regenerates a previously required key.
+
+## Local model relay
+
+The launcher starts the existing `agentkeys-gate` executable using the [local model recipe](./local-models.md). The model runner itself must be started separately. The relay binds to loopback and explicitly rejects a remote upstream. It starts with no authorized inference callers. The broker receives the relay endpoint and a path to the same protected admin token; the token is absent from command arguments and child environment values.
+
+The broker and relay consume one shared provisioning schema in `agentkeys-protocol::model_relay`. Provisioned credentials include the selected model ID through the canonical runtime environment builder. Admin mutations require the admin token; inference and usage require a provisioned, enabled caller credential. The protected key registry persists creation and revocation before reporting success. Partial or conflicting admin configuration fails startup without falling back.
+
+`services doctor` checks the relay's credential-persistence/readiness status along with the other services. It does not execute inference or prove that the model runner is available; run `terrier models probe` for real model capability checks. Usage counters remain process-local. The full broker-to-delegate session and managed-container wiring are still being completed.
 
 ## Development signing
 
@@ -78,6 +87,6 @@ python3 scripts/tests/qualify_local_services.py
 python3 scripts/tests/qualify_local_credential_cli.py
 ```
 
-The explicit qualifier starts actual contracts and all ten service processes, registers and logs in an owner, verifies a real signature, stores/fetches a credential, and restarts the service group without replacing its keys, derived signing address or issuer. It checks unauthenticated and cross-actor signing denial, missing-key and changed-deployment refusal, preserves an unrelated listener, injects a component startup failure, verifies cleanup and confirms the chain remains owned and running. It then restarts successfully and reads the same credential. This is separate from the fast default unit-test loop and from the remaining complete agent/model journey.
+The explicit qualifier starts actual contracts and all eleven service processes, registers and logs in an owner, verifies a real signature, stores/fetches a credential, and restarts the service group without replacing its keys, derived signing address or issuer. It checks unauthenticated and cross-actor signing denial, missing-key and changed-deployment refusal, preserves an unrelated listener, injects a component startup failure, verifies cleanup and confirms the chain remains owned and running. It also proves missing/wrong relay admin credentials cannot change the key registry, authorized provisioning survives restart, revocation survives restart, and missing relay files are refused. It then restarts successfully and reads the same credential. This is separate from the fast default unit-test loop and from the remaining complete agent/model journey.
 
 The credential qualifier drives `terrier cred` through real owner sessions. It checks exact round-trip bytes and restart persistence, cross-owner isolation, expired/invalid/mismatched sessions, private-file permissions, missing keys, deployment mismatch, input bounds and remote endpoint refusal. Redirect and proxy controls prove no follow-on request reaches the alternate listener. Denied stores must leave the database unchanged, and error output must omit bearer and credential values.

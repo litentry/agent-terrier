@@ -38,7 +38,7 @@ class LocalServicesQualification(LocalOwnerFixture):
                 self.services(state, "doctor", success=False)
                 running = self.services(state, "start")
                 self.assertTrue(running["ready"])
-                self.assertEqual(len(running["services"]), 10)
+                self.assertEqual(len(running["services"]), 11)
                 self.assertEqual(self.services(state, "start"), running)
                 self.assertTrue(self.services(state, "doctor")["ready"])
                 broker = running["services"]["broker"]["url"]
@@ -68,6 +68,23 @@ class LocalServicesQualification(LocalOwnerFixture):
                     return result["address"]
 
                 original_signer_address = signing_check()
+                relay = running["services"]["model_relay"]["url"]
+                registry = state / "services/relay/keys.json"
+                admin_key = state / "services/relay/admin.key"
+                with open(local_state.open_private(admin_key)) as source:
+                    admin_token = source.read().strip()
+                provision_body = {"key_id":"fixture-delegate", "user_omni":alice["operator_omni"],
+                                  "delegate_omni":"0x" + "91" * 32, "device_id":"fixture-delegate", "label":"test"}
+                before = registry.read_bytes()
+                for token in (None, "wrong-admin-token"):
+                    self.assertEqual(request(relay + "/v1/admin/keys", provision_body, token)[0], 401)
+                    self.assertTrue(registry.read_bytes() == before, "denied provisioning changed relay keys")
+                status, response = request(relay + "/v1/admin/keys", provision_body, admin_token)
+                self.assertEqual(status, 200)
+                relay_token = json.loads(response)["secret"]
+                for token in (None, "wrong-relay-token"):
+                    self.assertEqual(request(relay + "/v1/usage", bearer=token)[0], 401)
+                self.assertEqual(request(relay + "/v1/usage", bearer=relay_token)[0], 200)
                 synthetic = "synthetic-service-check-" + secrets.token_hex(16)
                 environment = contracts.tool_environment()
                 environment.update(AGENTKEYS_OPERATOR_OMNI=alice["operator_omni"],
@@ -98,7 +115,7 @@ class LocalServicesQualification(LocalOwnerFixture):
                     local_state.write_json(profile_path, profile)
                 self.assertTrue(self.services(state, "doctor")["ready"])
                 manifest = local_state.read_json(state / "services/manifest.json")
-                keys = [state / "services/broker/oidc.json", state / "services/broker/session.json", state / "services/signer/master.key",
+                keys = [state / "services/broker/oidc.json", state / "services/broker/session.json", state / "services/signer/master.key", admin_key, registry,
                         *[state / "services" / name / "development.key" for name in services.WORKERS]]
                 preserved = {path:path.read_bytes() for path in keys}
                 self.assertTrue(self.services(state, "stop")["state_preserved"])
@@ -109,7 +126,22 @@ class LocalServicesQualification(LocalOwnerFixture):
                 self.assertEqual(signing_check(), original_signer_address)
                 credential("fetch")
                 self.assertTrue(all(path.read_bytes() == value for path, value in preserved.items()), "service restart replaced a key")
+                relay = running["services"]["model_relay"]["url"]
+                self.assertEqual(request(relay + "/v1/usage", bearer=relay_token)[0], 200)
+                before = registry.read_bytes()
+                disable_url = relay + "/v1/admin/keys/fixture-delegate/disable"
+                self.assertEqual(request(disable_url, {}, "wrong-admin-token")[0], 401)
+                self.assertTrue(registry.read_bytes() == before, "denied revocation changed relay keys")
+                self.assertEqual(request(disable_url, {}, admin_token)[0], 200)
+                self.assertEqual(request(relay + "/v1/usage", bearer=relay_token)[0], 401)
                 self.services(state, "stop")
+                for missing_relay in (admin_key, registry):
+                    original = missing_relay.read_bytes()
+                    missing_relay.unlink()
+                    refused = self.services(state, "start", success=False)
+                    self.assertIn("relay state is missing", refused.stderr)
+                    self.assertFalse(missing_relay.exists())
+                    local_state.write_private(missing_relay, original)
                 missing = state / "services/memory/development.key"
                 original = missing.read_bytes()
                 missing.unlink()
@@ -164,12 +196,15 @@ class LocalServicesQualification(LocalOwnerFixture):
                     listener.bind(("127.0.0.1", manifest["broker_port"]))
                 self.assertEqual(self.invoke(state, "status")["instance_id"], running_chain["instance_id"])
                 running = self.services(state, "start")
+                self.assertEqual(request(running["services"]["model_relay"]["url"] + "/v1/usage", bearer=relay_token)[0], 401)
                 credential("fetch")
                 for path in keys:
                     self.assertEqual(path.stat().st_mode & 0o777, 0o600)
                 logs = b"".join(path.read_bytes() for path in (state / "services").glob("*.log"))
                 self.assertTrue(session.encode() not in logs and synthetic.encode() not in logs, "service logs exposed credentials")
                 self.assertTrue(signer_key.read_bytes() not in logs, "service logs exposed signing material")
+                self.assertTrue(admin_token.encode() not in logs and relay_token.encode() not in logs,
+                                "service logs exposed relay credentials")
             finally:
                 self.services(state, "stop")
                 self.invoke(state, "stop")

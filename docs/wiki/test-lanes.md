@@ -31,3 +31,5 @@ For a machine-readable report, pass `--report` with a new absolute path outside 
 The hosted core job restores a cache keyed by the toolchain and dependency manifests. Only a successful main-branch push saves that cache. Checkout credentials are not persisted. The job has a 15-minute failure ceiling for initial toolchain/dependency builds; this is not its warm performance target. Cold and hosted timings still require measurement. The cheaper source job remains separate for early feedback.
 
 Untrusted contributions run on GitHub-hosted infrastructure without private deployment credentials. A future personal-machine schedule must consume reviewed revisions only. This page describes public qualification; deployment checks belong to the deployment repository.
+
+The `relay` focused component runs model-relay unit, process-configuration and HTTP-flow tests with deterministic upstream fixtures: `./terrier test focused --component relay`. The explicit real-model qualifier remains separate.

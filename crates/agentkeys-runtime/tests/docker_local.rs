@@ -42,6 +42,7 @@ fn environment(actor: &str, count: Arc<AtomicUsize>) -> CreateEnvProvider {
             environment.extend(agentkeys_protocol::model_runtime::relay_environment(
                 "http://host.docker.internal:8077/v1",
                 "synthetic-local-model".into(),
+                "fixture-model",
             ));
             environment
         })

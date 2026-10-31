@@ -78,7 +78,21 @@ class LocalServicesTests(unittest.TestCase):
                 services.prepare(root, root, root, None)
                 self.assertTrue(secret.read_bytes() == original, "signer key was replaced")
                 self.assertEqual((broker / "session.json").read_bytes(), b"synthetic-original")
+                for name in ("admin.key", "keys.json"):
+                    relay_file = directory / "relay" / name
+                    original_relay = relay_file.read_bytes()
+                    self.assertEqual(relay_file.stat().st_mode & 0o777, 0o600)
+                    relay_file.unlink()
+                    with self.assertRaisesRegex(ValueError, "relay state is missing"):
+                        services.prepare(root, root, root, None)
+                    self.assertFalse(relay_file.exists())
+                    local_state.write_private(relay_file, original_relay)
                 secret.unlink()
+                with self.assertRaisesRegex(ValueError, "signer key is missing"):
+                    services.prepare(root, root, root, None)
+                self.assertFalse(secret.exists())
+                previous = dict(manifest, version=2)
+                local_state.write_json(directory / "manifest.json", previous)
                 with self.assertRaisesRegex(ValueError, "signer key is missing"):
                     services.prepare(root, root, root, None)
                 self.assertFalse(secret.exists())

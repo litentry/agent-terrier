@@ -20,6 +20,8 @@ pub struct Cli {
     /// Explicit compatible endpoint; defaults to the local model recipe.
     #[arg(long, env = "AGENTKEYS_GATE_UPSTREAM_BASE_URL")]
     pub upstream_base_url: Option<String>,
+    #[arg(long, default_value_t = false)]
+    pub require_local_upstream: bool,
     /// Optional explicit credential. Prefer the protected file form.
     #[arg(
         long,
@@ -44,8 +46,15 @@ pub struct Cli {
     pub keys_file: Option<PathBuf>,
     #[arg(long, env = "AGENTKEYS_GATE_DEFAULT_BUDGET_TOKENS")]
     pub default_budget_tokens: Option<u64>,
-    #[arg(long, env = "AGENTKEYS_GATE_ADMIN_TOKEN", hide_env_values = true)]
+    #[arg(
+        long,
+        env = "AGENTKEYS_GATE_ADMIN_TOKEN",
+        hide_env_values = true,
+        conflicts_with = "admin_token_file"
+    )]
     pub admin_token: Option<String>,
+    #[arg(long, env = "AGENTKEYS_GATE_ADMIN_TOKEN_FILE")]
+    pub admin_token_file: Option<PathBuf>,
     #[arg(long, env = "AGENTKEYS_AUDIT_URL")]
     pub audit_url: Option<String>,
     #[arg(long, env = "AGENTKEYS_GATE_REQUIRE_AUDIT", default_value_t = false)]
@@ -193,17 +202,26 @@ fn endpoint_file(endpoint: Option<EndpointFile>) -> anyhow::Result<Option<Decisi
 }
 
 fn read_credential(path: &Path) -> anyhow::Result<String> {
-    let value = read_protected(path)?;
-    let value = value.trim();
-    anyhow::ensure!(
-        !value.is_empty() && !value.contains(['\n', '\r']),
-        "credential file must contain one nonempty token"
-    );
-    Ok(value.to_owned())
+    Ok(protected_file::read_token(path)?.to_string())
 }
 
 impl GateConfig {
     pub fn from_cli(cli: Cli) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            cli.admin_token.is_none() || cli.admin_token_file.is_none(),
+            "choose one admin credential source"
+        );
+        let admin_token = match &cli.admin_token_file {
+            Some(path) => Some(read_credential(path)?),
+            None => cli.admin_token.clone(),
+        };
+        anyhow::ensure!(
+            admin_token.as_ref().is_none_or(|value| !value.is_empty()
+                && !value
+                    .bytes()
+                    .any(|byte| byte.is_ascii_control() || byte.is_ascii_whitespace())),
+            "admin credential must be one nonempty token"
+        );
         anyhow::ensure!(
             cli.upstream_api_key.is_none() || cli.upstream_api_key_file.is_none(),
             "choose one upstream credential source"
@@ -223,6 +241,13 @@ impl GateConfig {
             .upstream_base_url
             .unwrap_or_else(|| models::default_base_url().to_owned());
         models::base_url(&base_url)?;
+        if cli.require_local_upstream {
+            models::require_local_endpoint(&base_url)?;
+            anyhow::ensure!(
+                cli.listen.ip().is_loopback(),
+                "local relay must listen on loopback"
+            );
+        }
         let default_model = cli
             .default_model
             .unwrap_or_else(|| models::default_chat_model().to_owned());
@@ -281,7 +306,7 @@ impl GateConfig {
             keys,
             user_budgets,
             default_budget_tokens: default_budget,
-            admin_token: cli.admin_token,
+            admin_token,
             keys_file: cli.keys_file,
             audit_url: cli.audit_url,
             require_audit: cli.require_audit,
@@ -342,9 +367,11 @@ mod tests {
         Cli {
             listen: "127.0.0.1:0".parse().unwrap(),
             upstream_base_url: None,
+            require_local_upstream: false,
             upstream_api_key: None,
             upstream_api_key_file: None,
             default_model: None,
+            admin_token_file: None,
             decision_config: None,
             search_url: None,
             search_engines: "bing".into(),
@@ -369,6 +396,49 @@ mod tests {
         assert!(config.keys.is_empty() && config.admin_token.is_none());
         assert!(config.speech_backend.is_none() && config.search.is_none());
         assert!(config.decision.jev.is_none() && config.decision.kev.is_none());
+    }
+
+    #[test]
+    fn local_relay_reads_protected_admin_file_and_refuses_remote_configuration() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("admin.key");
+        protected_file::write(path.to_str().unwrap(), b"synthetic-admin-token\n", true).unwrap();
+        let mut cli = cli_min();
+        cli.admin_token_file = Some(path.clone());
+        cli.require_local_upstream = true;
+        assert_eq!(
+            GateConfig::from_cli(cli.clone())
+                .unwrap()
+                .admin_token
+                .as_deref(),
+            Some("synthetic-admin-token")
+        );
+        let mut conflicting = cli.clone();
+        conflicting.admin_token = Some("synthetic-other-token".into());
+        assert!(GateConfig::from_cli(conflicting).is_err());
+        let mut remote = cli.clone();
+        remote.upstream_base_url = Some("https://models.example/v1".into());
+        assert!(GateConfig::from_cli(remote).is_err());
+        let mut public = cli.clone();
+        public.listen = "0.0.0.0:0".parse().unwrap();
+        assert!(GateConfig::from_cli(public).is_err());
+        for value in [
+            "",
+            "synthetic-admin-token second",
+            "synthetic-admin-token\nsecond",
+        ] {
+            protected_file::write(path.to_str().unwrap(), value.as_bytes(), false).unwrap();
+            let error = GateConfig::from_cli(cli.clone())
+                .err()
+                .expect("invalid token must fail")
+                .to_string();
+            assert!(!error.contains("synthetic-admin-token"));
+        }
+        protected_file::write(path.to_str().unwrap(), b"synthetic-admin-token", false).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(GateConfig::from_cli(cli).is_err());
+        assert_eq!(std::fs::read(path).unwrap(), b"synthetic-admin-token");
     }
 
     #[test]

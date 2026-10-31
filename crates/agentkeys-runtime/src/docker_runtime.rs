@@ -1679,6 +1679,7 @@ mod tests {
         let provisioned = agentkeys_protocol::model_runtime::relay_environment(
             "http://localhost:8077/v1",
             "synthetic-relay-key".into(),
+            "fixture-model",
         );
         let output =
             environment_input(&actor(), &test_identity_environment(), provisioned).unwrap();
