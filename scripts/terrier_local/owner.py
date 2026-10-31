@@ -105,7 +105,8 @@ def execute(repository, state, action, name, actor=None, services=None, read_onl
         local_state.write_json(identity_path, identity)
     beneficiary, keystore, password_file = deployment.developer_wallet(state)
     arguments = ["prepare-owner", action, "--operator-omni", identity["operator_omni"],
-                 "--key-file", str(directory / "passkey.pem"), "--beneficiary", beneficiary]
+                 "--key-file", str(directory / "passkey.pem"), "--device-key-file", str(directory / "device.key"),
+                 "--beneficiary", beneficiary]
     if actor:
         arguments.extend(["--actor-omni", actor])
     if enrollment_file:
@@ -116,7 +117,8 @@ def execute(repository, state, action, name, actor=None, services=None, read_onl
         arguments.append("--read-only")
     plan = run_cli(repository, profile_path, arguments)
     if action == "register" and plan["already_registered"]:
-        return {"registered":False, "verified":True, "development_only":True, "operator_omni":identity["operator_omni"], "account":plan["account"]}
+        return {"registered":False, "verified":True, "development_only":True, "operator_omni":identity["operator_omni"],
+                "account":plan["account"], "device_key_hash":plan["device_key_hash"]}
     endpoint = running["rpc_http"]
     chain.node_identity(endpoint, profile["chain_id"], running["instance_id"])
     funding = int(profile["funding"]["account_deposit_wei"])
@@ -135,7 +137,7 @@ def execute(repository, state, action, name, actor=None, services=None, read_onl
         raise RuntimeError("Owner operation submission failed; retry the same command to inspect current chain state")
     receipt = json.loads(result.stdout)
     verified = run_cli(repository, profile_path, ["verify-owner", "--transaction", receipt["transactionHash"]], json.dumps(plan))
-    verified.update(operator_omni=identity["operator_omni"], action=action)
+    verified.update(operator_omni=identity["operator_omni"], device_key_hash=plan["device_key_hash"], action=action)
     if action == "register":
         verified["registered"] = True
     return verified

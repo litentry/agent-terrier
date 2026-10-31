@@ -35,6 +35,8 @@ The encrypted v2 development flow and client-encrypted v3 envelope flow keep the
 
 The worker integration test runs the actual worker router, cryptography, HTTP adapter and SQLite service with controlled chain responses. It proves encrypted store/read, delegated fetch, owner listing/deletion, rejection before storage access, independent storage denial and deletion-error reporting. It does not establish real broker enrollment or a complete product journey. Other workers still use their previous storage path until migrated.
 
+After building the public CLI and preparing contract dependencies, run `python3 scripts/tests/qualify_local_credentials.py` locally from the public checkout for the explicit real-contract credential qualification. It uses the actual credential-worker executable and newly enrolled owner/delegate request keys, verifies encrypted storage and readback, restarts the worker, and applies real scope and device revocations. Owner access remains available after the delegate is revoked. The issuer remains a deliberately untrusted fixture; this does not claim real broker login or mint acceptance.
+
 ## Explicit real-chain qualification
 
 Install the pinned Rust toolchain and Foundry, prepare the contract cache with `terrier contracts setup`, and build the CLI. Run locally from the public repository root:

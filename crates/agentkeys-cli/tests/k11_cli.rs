@@ -100,6 +100,7 @@ fn local_owner_commands_reject_production_configuration_before_key_access() {
     for mode in ["flag-disabled", "remote-rpc", "production-profile"] {
         let (mut command, directory) = isolated_cmd();
         let key_path = directory.path().join("owner.pem");
+        let request_key_path = directory.path().join("device.key");
         match mode {
             "flag-disabled" => {
                 command.env_remove("AGENT_TERRIER_LOCAL_DEV");
@@ -124,11 +125,17 @@ fn local_owner_commands_reject_production_configuration_before_key_access() {
             &hex::encode([1; 32]),
             "--key-file",
             key_path.to_str().unwrap(),
+            "--device-key-file",
+            request_key_path.to_str().unwrap(),
             "--beneficiary",
             &hex::encode([2; 20]),
         ]);
         command.assert().failure().stderr(contains("development"));
         assert!(!key_path.exists(), "{mode} wrote an owner key");
+        assert!(
+            !request_key_path.exists(),
+            "{mode} wrote an owner request key"
+        );
     }
 }
 

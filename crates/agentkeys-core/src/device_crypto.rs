@@ -40,10 +40,7 @@ pub fn device_key_hash(addr: &str) -> Result<String> {
     Ok(agentkeys_device_core::device_key_hash(addr)?)
 }
 
-/// The MASTER device key hash, derived deterministically from the operator omni
-/// (issue #220 — `keccak256(operator_omni_bytes)`, the `cast keccak "0x$OMNI"`
-/// convention). Thin `anyhow` wrapper over
-/// [`agentkeys_device_core::device_key_hash_from_omni`].
+/// Legacy passkey-only registry slot, not an actor request-signing key hash.
 pub fn device_key_hash_from_omni(omni: &str) -> Result<String> {
     Ok(agentkeys_device_core::device_key_hash_from_omni(omni)?)
 }
@@ -124,6 +121,17 @@ pub struct DeviceKey {
 }
 
 impl DeviceKey {
+    pub fn load(key_file: &str) -> Result<Self> {
+        let raw = crate::protected_file::read_text(&expand_home(key_file))?;
+        let bytes = zeroize::Zeroizing::new(
+            hex::decode(raw.trim().trim_start_matches("0x"))
+                .context("device key file is not hex")?,
+        );
+        let sk = SigningKey::from_slice(&bytes).context("invalid secp256k1 device key")?;
+        let address = evm_address(sk.verifying_key());
+        Ok(Self { sk, address })
+    }
+
     /// Load the owner-only key file if present (rejecting loose perms / symlinks),
     /// else generate a fresh key and persist it `0600`. `regen` forces a fresh
     /// key. `key_file` may use a leading `~/`.
@@ -138,13 +146,10 @@ impl DeviceKey {
             std::fs::remove_file(&key_path)
                 .context("remove the explicitly regenerated device key")?;
         }
-        let sk = if Path::new(&key_path).exists() {
-            let raw = crate::protected_file::read_text(&key_path)?;
-            let raw = raw.trim().trim_start_matches("0x");
-            let bytes =
-                zeroize::Zeroizing::new(hex::decode(raw).context("device key file is not hex")?);
-            SigningKey::from_slice(&bytes).context("invalid secp256k1 device key")?
-        } else {
+        if Path::new(&key_path).exists() {
+            return Self::load(&key_path);
+        }
+        let sk = {
             let sk = SigningKey::random(&mut rand_core::OsRng);
             if let Some(dir) = Path::new(&key_path).parent() {
                 if !dir.as_os_str().is_empty() {
@@ -329,8 +334,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let kf = dir.path().join("dev.key");
         let a = DeviceKey::load_or_generate(kf.to_str().unwrap(), false).unwrap();
-        let b = DeviceKey::load_or_generate(kf.to_str().unwrap(), false).unwrap();
+        let b = DeviceKey::load(kf.to_str().unwrap()).unwrap();
         assert_eq!(a.address(), b.address());
+    }
+
+    #[test]
+    fn load_never_replaces_a_missing_key() {
+        let directory = tempfile::tempdir().unwrap();
+        let key_file = directory.path().join("missing.key");
+        assert!(DeviceKey::load(key_file.to_str().unwrap()).is_err());
+        assert!(!key_file.exists());
     }
 
     #[test]

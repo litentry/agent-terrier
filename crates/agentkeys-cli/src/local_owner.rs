@@ -5,7 +5,7 @@ use agentkeys_core::chain_profile::{rpc_http_override, ChainProfile};
 use agentkeys_core::erc4337::*;
 use agentkeys_core::registry::{
     device_probe_calldata, parse_device_probe, verify_agent_pop, DeviceProbe, TIER_AGENT,
-    TIER_DEVICE,
+    TIER_DEVICE, TIER_MASTER,
 };
 use anyhow::{anyhow, ensure, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -32,6 +32,8 @@ pub struct OwnerOptions {
     pub operator_omni: String,
     #[arg(long)]
     pub key_file: String,
+    #[arg(long)]
+    pub device_key_file: String,
     #[arg(long, default_value = "localhost")]
     pub rp_id: String,
     #[arg(long)]
@@ -329,11 +331,28 @@ pub async fn prepare(context: &CommandContext, options: &OwnerOptions) -> Result
         registered == [0; 32] || registered == predicted,
         "owner key does not match the on-chain master account"
     );
+    let request_key = if options.action == OwnerAction::Register && registered == [0; 32] {
+        agentkeys_core::device_crypto::DeviceKey::load_or_generate(&options.device_key_file, false)?
+    } else {
+        agentkeys_core::device_crypto::DeviceKey::load(&options.device_key_file).context(
+            "owner request key is missing or unreadable; restore its original device.key (older passkey-only owners require a fresh local owner)",
+        )?
+    };
+    let request_key_hash = fixed::<32>(&request_key.device_key_hash()?)?;
+    if registered == predicted {
+        let record = chain.device(&registry, &request_key_hash).await?;
+        ensure!(record.is_registered() && !record.revoked
+            && record.operator_omni == operator && record.actor_omni == operator
+            && record.tier == TIER_MASTER && record.roles == LOCAL_MASTER_ROLES
+            && record.k11_cred_id == credential && record.k11_rp_id_hash == rp_id_hash
+            && record.k11_pub_x == public_x && record.k11_pub_y == public_y,
+            "owner request key does not match the active on-chain master binding; restore its original device.key");
+    }
     let mut plan = OwnerPlan {
         development_only: true,
         operator_omni: hex_value(&operator),
         account: hex_value(&account),
-        device_key_hash: hex_value(&master_device_key_hash(&operator)),
+        device_key_hash: hex_value(&request_key_hash),
         already_registered: registered == predicted,
         build: None,
         transaction_data: None,
@@ -361,7 +380,7 @@ pub async fn prepare(context: &CommandContext, options: &OwnerOptions) -> Result
         OwnerAction::Register => register_batch_calldata(
             &registry,
             &RegisterFirstMaster {
-                device_key_hash: master_device_key_hash(&operator),
+                device_key_hash: request_key_hash,
                 operator_omni: operator,
                 actor_omni: operator,
                 cred_id_hash: credential,

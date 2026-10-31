@@ -184,12 +184,8 @@ pub fn master_account_salt(operator_omni: &[u8; 32]) -> [u8; 32] {
     keccak256(preimage.as_bytes())
 }
 
-/// The first master's `deviceKeyHash`: `keccak256(operator_omni)` over the RAW 32
-/// omni bytes — NOT a string preimage. `_erc4337_lib.sh` runs
-/// `cast keccak "0x$OPERATOR_OMNI"`, and `cast keccak` of a `0x`-hex string hashes
-/// the DECODED bytes (verified: omni `0x22…` → `0xc4bd59e1…`), so this hashes the
-/// 32-byte array directly (unlike [`master_cred_id_hash`] / [`master_account_salt`]
-/// whose `:0x`-prefixed preimages are non-hex strings hashed as ASCII).
+/// Legacy passkey-only registry slot: keccak256 of the operator's raw bytes.
+/// This is not a K10 key hash; local request-signing owners use DeviceKey instead.
 pub fn master_device_key_hash(operator_omni: &[u8; 32]) -> [u8; 32] {
     keccak256(operator_omni)
 }

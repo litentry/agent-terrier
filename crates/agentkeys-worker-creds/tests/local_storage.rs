@@ -197,54 +197,21 @@ impl Fixture {
     }
 
     fn cap(&self, owner: bool, op: CapOp) -> CapToken {
-        let (_, now) = fresh_cap_pop_nonce_ts();
-        let mut cap = CapToken {
-            payload: CapPayload {
-                operator_omni: "11".repeat(32),
-                actor_omni: if owner { "11" } else { "22" }.repeat(32),
-                service: SERVICE.into(),
-                op,
-                data_class: DataClass::Credentials,
-                device_key_hash: if owner { &self.owner } else { &self.agent }
-                    .device_key_hash()
-                    .unwrap(),
-                k3_epoch: 1,
-                issued_at: now,
-                expires_at: now + 60,
-                nonce: "fixture".into(),
-            },
-            broker_sig: String::new(),
-            client_sig: None,
-            client_nonce: None,
-            client_ts: None,
-            delegation_path: None,
-        };
-        self.sign(&mut cap, owner);
-        cap
+        cap_for(
+            &self.signer,
+            if owner { &self.owner } else { &self.agent },
+            &"11".repeat(32),
+            &if owner { "11" } else { "22" }.repeat(32),
+            op,
+        )
     }
 
     fn sign(&self, cap: &mut CapToken, owner: bool) {
-        let (nonce, timestamp) = fresh_cap_pop_nonce_ts();
-        let payload = &cap.payload;
-        cap.client_sig = Some(
-            if owner { &self.owner } else { &self.agent }
-                .cap_pop_sig(
-                    &payload.operator_omni,
-                    &payload.actor_omni,
-                    &payload.service,
-                    payload.op.as_str(),
-                    payload.data_class.as_str(),
-                    &nonce,
-                    timestamp,
-                )
-                .unwrap(),
+        sign_cap(
+            &self.signer,
+            if owner { &self.owner } else { &self.agent },
+            cap,
         );
-        cap.client_nonce = Some(nonce);
-        cap.client_ts = Some(timestamp);
-        let signature: Signature = self
-            .signer
-            .sign(&Sha256::digest(serde_json::to_vec(payload).unwrap()));
-        cap.broker_sig = URL_SAFE_NO_PAD.encode(signature.to_bytes());
     }
 
     async fn call(
@@ -307,6 +274,58 @@ impl Fixture {
         );
         assert_eq!(self.snapshot(), before, "denial changed data");
     }
+}
+
+fn cap_for(
+    signer: &SigningKey,
+    key: &DeviceKey,
+    operator: &str,
+    actor: &str,
+    op: CapOp,
+) -> CapToken {
+    let (_, now) = fresh_cap_pop_nonce_ts();
+    let mut cap = CapToken {
+        payload: CapPayload {
+            operator_omni: operator.into(),
+            actor_omni: actor.into(),
+            service: SERVICE.into(),
+            op,
+            data_class: DataClass::Credentials,
+            device_key_hash: key.device_key_hash().unwrap(),
+            k3_epoch: 1,
+            issued_at: now,
+            expires_at: now + 60,
+            nonce: "fixture".into(),
+        },
+        broker_sig: String::new(),
+        client_sig: None,
+        client_nonce: None,
+        client_ts: None,
+        delegation_path: None,
+    };
+    sign_cap(signer, key, &mut cap);
+    cap
+}
+
+fn sign_cap(signer: &SigningKey, key: &DeviceKey, cap: &mut CapToken) {
+    let (nonce, timestamp) = fresh_cap_pop_nonce_ts();
+    let payload = &cap.payload;
+    cap.client_sig = Some(
+        key.cap_pop_sig(
+            &payload.operator_omni,
+            &payload.actor_omni,
+            &payload.service,
+            payload.op.as_str(),
+            payload.data_class.as_str(),
+            &nonce,
+            timestamp,
+        )
+        .unwrap(),
+    );
+    cap.client_nonce = Some(nonce);
+    cap.client_ts = Some(timestamp);
+    let signature: Signature = signer.sign(&Sha256::digest(serde_json::to_vec(payload).unwrap()));
+    cap.broker_sig = URL_SAFE_NO_PAD.encode(signature.to_bytes());
 }
 
 async fn serve(app: Router) -> (String, tokio::task::JoinHandle<()>) {
@@ -464,4 +483,243 @@ async fn real_sqlite_http_worker_flow_and_authority_denials() {
         .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(body["reason"], "object_not_found");
+}
+
+struct WorkerProcess {
+    child: tokio::process::Child,
+    url: String,
+}
+
+impl WorkerProcess {
+    async fn start(
+        profile: &std::path::Path,
+        public_key: &std::path::Path,
+        storage_url: &str,
+        encryption_key: &std::path::Path,
+    ) -> Self {
+        use std::{process::Stdio, time::Duration};
+        use tokio::io::AsyncBufReadExt;
+        let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_agentkeys-worker-creds"))
+            .env_clear()
+            .arg("--development")
+            .arg("--profile")
+            .arg(profile)
+            .arg("--broker-public-key")
+            .arg(public_key)
+            .arg("--storage-url")
+            .arg(storage_url)
+            .arg("--development-kek-file")
+            .arg(encryption_key)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let mut output = tokio::io::BufReader::new(child.stdout.take().unwrap());
+        let mut line = String::new();
+        tokio::time::timeout(Duration::from_secs(10), output.read_line(&mut line))
+            .await
+            .unwrap()
+            .unwrap();
+        let startup: serde_json::Value =
+            serde_json::from_str(&line).expect("worker did not report startup");
+        assert_eq!(startup["development_only"], true);
+        Self {
+            child,
+            url: format!("http://{}", startup["listen"].as_str().unwrap()),
+        }
+    }
+
+    async fn stop(&mut self) {
+        self.child.kill().await.unwrap();
+        self.child.wait().await.unwrap();
+    }
+
+    async fn call(
+        &self,
+        route: &str,
+        cap: CapToken,
+        store: bool,
+    ) -> (StatusCode, serde_json::Value) {
+        let mut body = serde_json::json!({"cap":cap});
+        if store {
+            body["plaintext_b64"] = STANDARD.encode(PLAINTEXT).into();
+        }
+        let response = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap()
+            .post(format!("{}{route}", self.url))
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        (response.status(), response.json().await.unwrap())
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires the explicit real-chain credential qualification fixture"]
+async fn real_chain_credential_worker() {
+    use agentkeys_core::{chain_profile::ChainProfile, protected_file};
+    use rand_core::RngCore;
+    use std::path::PathBuf;
+    let required =
+        |name| PathBuf::from(std::env::var(name).expect("explicit qualification input missing"));
+    let profile_path = required("AGENT_TERRIER_QUALIFICATION_PROFILE");
+    let directory = required("AGENT_TERRIER_QUALIFICATION_STORE");
+    let owner_key = required("AGENT_TERRIER_QUALIFICATION_OWNER_KEY");
+    let agent_key = required("AGENT_TERRIER_QUALIFICATION_DEVICE_KEY");
+    let phase = std::env::var("AGENT_TERRIER_QUALIFICATION_PHASE").unwrap();
+    let operator = std::env::var("AGENT_TERRIER_QUALIFICATION_OPERATOR").unwrap();
+    let enrollment: agentkeys_protocol::EndpointEnrollment = serde_json::from_slice(
+        &std::fs::read(required("AGENT_TERRIER_QUALIFICATION_ENROLLMENT")).unwrap(),
+    )
+    .unwrap();
+    protected_file::open_read(owner_key.to_str().unwrap()).unwrap();
+    protected_file::open_read(agent_key.to_str().unwrap()).unwrap();
+    let owner = DeviceKey::load_or_generate(owner_key.to_str().unwrap(), false).unwrap();
+    let agent = DeviceKey::load_or_generate(agent_key.to_str().unwrap(), false).unwrap();
+    let signer = SigningKey::random(&mut rand_core::OsRng);
+    let public = p256::PublicKey::from(*signer.verifying_key())
+        .to_public_key_pem(LineEnding::LF)
+        .unwrap();
+    let public_key_file = directory.join("issuer-public.pem");
+    protected_file::write(public_key_file.to_str().unwrap(), public.as_bytes(), false).unwrap();
+    let encryption_key_file = directory.join("worker-encryption.key");
+    if !encryption_key_file.exists() {
+        assert_eq!(phase, "active");
+        let mut key = [0; 32];
+        rand_core::OsRng.fill_bytes(&mut key);
+        protected_file::write(
+            encryption_key_file.to_str().unwrap(),
+            hex::encode(key).as_bytes(),
+            true,
+        )
+        .unwrap();
+    }
+    let profile = ChainProfile::load_from_file(&profile_path).unwrap();
+    profile.require_local_development(true, None).unwrap();
+    let database = directory.join("credentials.db");
+    let store = Arc::new(
+        LocalStore::open(
+            &database,
+            DataClass::Credentials,
+            AuthorityConfig::from_profile(&profile, public).unwrap(),
+        )
+        .unwrap(),
+    );
+    let (storage_url, storage_task) = serve(agentkeys_local_store::router(store)).await;
+    let mut worker = WorkerProcess::start(
+        &profile_path,
+        &public_key_file,
+        &storage_url,
+        &encryption_key_file,
+    )
+    .await;
+    let owner_cap = |op| cap_for(&signer, &owner, &operator, &operator, op);
+    let agent_cap = |op| cap_for(&signer, &agent, &operator, &enrollment.actor_omni, op);
+    let snapshot = || {
+        let connection = rusqlite::Connection::open_with_flags(
+            &database,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let mut statement = connection
+            .prepare("SELECT key,value FROM objects ORDER BY key")
+            .unwrap();
+        statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+    };
+    if phase == "active" {
+        let (status, body) = worker
+            .call("/v1/cred/store", owner_cap(CapOp::Store), true)
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let (status, body) = worker
+            .call("/v1/cred/fetch", agent_cap(CapOp::Fetch), false)
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(
+            STANDARD
+                .decode(body["plaintext_b64"].as_str().unwrap())
+                .unwrap(),
+            PLAINTEXT
+        );
+        let before = snapshot();
+        assert_eq!(before.len(), 1);
+        assert!(!before[0]
+            .1
+            .windows(PLAINTEXT.len())
+            .any(|bytes| bytes == PLAINTEXT));
+        for (mutation, reason) in [
+            (0, "cap_pop_invalid"),
+            (1, "device_binding_mismatch"),
+            (2, "service_not_in_scope"),
+            (3, "cap_data_class_mismatch"),
+        ] {
+            let mut cap = agent_cap(CapOp::Fetch);
+            match mutation {
+                0 => cap.client_sig = None,
+                1 => {
+                    cap.payload.actor_omni = format!("0x{}", "33".repeat(32));
+                    sign_cap(&signer, &agent, &mut cap);
+                }
+                2 => {
+                    cap.payload.service = "ungranted".into();
+                    sign_cap(&signer, &agent, &mut cap);
+                }
+                _ => {
+                    cap.payload.data_class = DataClass::Memory;
+                    sign_cap(&signer, &agent, &mut cap);
+                }
+            }
+            let (status, body) = worker.call("/v1/cred/fetch", cap, false).await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+            assert_eq!(body["reason"], reason);
+            assert!(body.get("plaintext_b64").is_none());
+            assert_eq!(snapshot(), before);
+        }
+        worker.stop().await;
+        worker = WorkerProcess::start(
+            &profile_path,
+            &public_key_file,
+            &storage_url,
+            &encryption_key_file,
+        )
+        .await;
+    } else {
+        let before = snapshot();
+        let (status, body) = worker
+            .call("/v1/cred/fetch", agent_cap(CapOp::Fetch), false)
+            .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+        assert_eq!(
+            body["reason"],
+            match phase.as_str() {
+                "scope_revoked" => "service_not_in_scope",
+                "device_revoked" => "device_inactive",
+                _ => panic!("unknown qualification phase"),
+            }
+        );
+        assert!(body.get("plaintext_b64").is_none());
+        assert_eq!(snapshot(), before);
+    }
+    let (status, body) = worker
+        .call("/v1/cred/fetch", owner_cap(CapOp::Fetch), false)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        STANDARD
+            .decode(body["plaintext_b64"].as_str().unwrap())
+            .unwrap(),
+        PLAINTEXT
+    );
+    worker.stop().await;
+    storage_task.abort();
 }
