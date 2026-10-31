@@ -1,4 +1,4 @@
-The local object service is a qualified storage component. The credential, configuration and memory workers use it for encrypted data operations. Integration with the other workers, product clients, broker sessions and complete local application remains open in [#5](https://github.com/litentry/agent-terrier/issues/5).
+The local object service is a qualified storage component. The credential, configuration, memory and channel workers use it for encrypted data operations. Integration with product clients, broker sessions and the complete local application remains open in [#5](https://github.com/litentry/agent-terrier/issues/5).
 
 ## Ownership and boundaries
 
@@ -72,6 +72,24 @@ python3 scripts/tests/qualify_local_memory.py
 ```
 
 The shared deterministic fixture exercises own/canonical separation, keyed checkpoints, competing writes, proposal provenance, append-only behavior and read-versus-delete denials at both worker and storage boundaries. The explicit qualifier uses the actual memory executable and local contracts for canonical access, persistence and real scope/device revocation. Its issuer is still a test fixture, so complete broker-session and product-client acceptance remains pending.
+
+### Channel messages and attachments
+
+The channel worker shares local startup options and requires its own protected `--development-kek-file` and a database bound to `channel`. Publish grants create events and attachments; they cannot read, overwrite or delete. Each encrypted record is bound to its exact storage key; copying it under another name fails decryption. The retained wire field `s3_key` names a local object key and does not require a cloud service. Subscribe grants read only the signed owner's channel. Owner deletion uses `/v1/cap/channel-teardown`, with `channel-pub:<id>` as the service and a signed teardown operation. The request's `channel_id` does not override that signed scope. Deletion covers both events and attachments, follows pagination and reports a storage failure.
+
+Polling reads one page after the cursor. A tail request follows all pages to find the latest events. Long polls retain a notification that arrives during the initial read, scope notifications by owner and channel, and recheck authority at storage after waking. A revoked subscriber receives no messages even if its request began while authorized.
+
+`--max-poll-seconds`, `--inline-max-bytes` and `--blob-max-bytes` can lower the supported limits: 25 seconds, 1 MiB and 16 MiB respectively. The optional `--wake-url` is the complete local application-wake URL; pair it with `--wake-token-file` pointing to an owner-only file. Redirects and inherited proxies are disabled. Without these options, messaging works but application auto-wake is disabled. A wake failure is logged after the message has been stored; it does not discard the message. Full application lifecycle wiring remains pending.
+
+Run locally from the public checkout:
+
+```bash
+cargo test -p agentkeys-worker-creds --test local_storage
+cargo test -p agentkeys-worker-channel
+python3 scripts/tests/qualify_local_channel.py
+```
+
+The explicit qualifier starts the actual channel executable with local contracts, checks encrypted persistence across restart and revokes the subscriber's grant and device. As with the other worker qualifiers, its issuer is a fixture; it does not complete broker-session or whole-application acceptance.
 
 ### Object service
 

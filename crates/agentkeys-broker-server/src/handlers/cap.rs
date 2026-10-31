@@ -131,6 +131,35 @@ pub async fn cap_memory_get(
         .map(Json)
 }
 
+pub async fn cap_channel_teardown(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(req): Json<CapRequest>,
+) -> Result<Json<CapToken>, CapError> {
+    enforce_channel_teardown_owner(&req)?;
+    mint_cap(state, headers, req, CapOp::Teardown, DataClass::Channel)
+        .await
+        .map(Json)
+}
+
+fn enforce_channel_teardown_owner(req: &CapRequest) -> Result<(), CapError> {
+    let operator = normalize_hex32(&req.operator_omni)
+        .map_err(|error| CapError::InvalidInput(error.to_string()))?;
+    let actor = normalize_hex32(&req.actor_omni)
+        .map_err(|error| CapError::InvalidInput(error.to_string()))?;
+    let valid_service = req
+        .service
+        .strip_prefix("channel-pub:")
+        .is_some_and(agentkeys_protocol::console::valid_channel_id);
+    if operator != actor || !valid_service {
+        return Err(CapError::Forbidden(
+            "channel deletion requires owner-self authority for one channel".into(),
+            "channel_delete_not_owner",
+        ));
+    }
+    Ok(())
+}
+
 pub async fn cap_memory_inbox_delete(
     State(state): State<SharedState>,
     headers: HeaderMap,
@@ -1209,6 +1238,26 @@ mod tests {
             enforce_inbox_delete_owner(&request),
             Err(CapError::Forbidden(_, "inbox_delete_not_owner"))
         ));
+    }
+
+    #[test]
+    fn channel_delete_mint_requires_owner_and_one_valid_channel() {
+        let mut request = cap_req_with(&"11".repeat(32), String::new(), String::new(), 0);
+        request.actor_omni = request.operator_omni.clone();
+        request.service = "channel-pub:chat".into();
+        assert!(enforce_channel_teardown_owner(&request).is_ok());
+        request.actor_omni = "22".repeat(32);
+        assert!(enforce_channel_teardown_owner(&request).is_err());
+        request.actor_omni = request.operator_omni.clone();
+        for service in [
+            "channel-sub:chat",
+            "channel-pub:",
+            "channel-pub:../other",
+            "knowledge:notes",
+        ] {
+            request.service = service.into();
+            assert!(enforce_channel_teardown_owner(&request).is_err());
+        }
     }
 
     #[test]

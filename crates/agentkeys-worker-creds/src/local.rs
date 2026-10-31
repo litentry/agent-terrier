@@ -37,7 +37,7 @@ impl LocalWorkerOptions {
 
 pub async fn serve(
     options: LocalWorkerOptions,
-    router: fn(Arc<WorkerState>) -> axum::Router,
+    router: impl FnOnce(Arc<WorkerState>) -> axum::Router,
 ) -> Result<()> {
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
