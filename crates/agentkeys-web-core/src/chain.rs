@@ -64,16 +64,17 @@ pub fn parse_device_entry(
     raw: &[u8],
     device_key_hash: &[u8; 32],
 ) -> Result<ConsoleChainDevice, String> {
-    let tier = u8::try_from(integer(raw, 6)?).map_err(|_| "invalid device tier")?;
+    let record = agentkeys_protocol::chain_abi::decode_device_record(raw)?;
+    let tier = record.tier;
     if !(1..=3).contains(&tier) {
         return Err("unknown device tier".into());
     }
     Ok(ConsoleChainDevice {
         device_key_hash: format!("0x{}", hex::encode(device_key_hash)),
-        operator_omni: format!("0x{}", hex::encode(chain_word(raw, 0)?)),
-        actor_omni: format!("0x{}", hex::encode(chain_word(raw, 1)?)),
+        operator_omni: format!("0x{}", hex::encode(record.operator_omni)),
+        actor_omni: format!("0x{}", hex::encode(record.actor_omni)),
         tier,
-        revoked: boolean(raw, 10)?,
+        revoked: record.revoked,
     })
 }
 

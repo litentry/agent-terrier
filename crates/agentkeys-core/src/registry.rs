@@ -1,13 +1,6 @@
 use anyhow::{ensure, Context, Result};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct DeviceProbe {
-    pub operator_omni: [u8; 32],
-    pub actor_omni: [u8; 32],
-    pub tier: u8,
-    pub registered: bool,
-    pub revoked: bool,
-}
+pub use agentkeys_protocol::chain_abi::DeviceRecord as DeviceProbe;
 
 pub const TIER_AGENT: u8 = 2;
 pub const TIER_DEVICE: u8 = 3;
@@ -19,28 +12,20 @@ pub fn device_probe_calldata(device_key_hash: &[u8; 32]) -> Vec<u8> {
 }
 
 pub fn parse_device_probe(raw: &str) -> Result<DeviceProbe> {
-    let bytes = hex::decode(raw.strip_prefix("0x").unwrap_or(raw))?;
-    ensure!(
-        bytes.len() == 11 * 32,
-        "getDevice requires eleven ABI words"
-    );
-    let word =
-        |index: usize| -> [u8; 32] { bytes[index * 32..(index + 1) * 32].try_into().unwrap() };
-    for (index, width) in [(6, 1), (7, 1), (8, 8), (9, 4), (10, 1)] {
-        ensure!(
-            word(index)[..32 - width].iter().all(|byte| *byte == 0),
-            "getDevice has noncanonical integer padding"
-        );
-    }
-    let revoked = word(10)[31];
-    ensure!(revoked <= 1, "getDevice has an invalid boolean");
-    Ok(DeviceProbe {
-        operator_omni: word(0),
-        actor_omni: word(1),
-        tier: word(6)[31],
-        registered: word(8) != [0; 32],
-        revoked: revoked == 1,
-    })
+    let bytes = decode_hex(raw)?;
+    agentkeys_protocol::chain_abi::decode_device_record(&bytes).map_err(anyhow::Error::msg)
+}
+
+pub fn parse_bool(raw: &str) -> Result<bool> {
+    agentkeys_protocol::chain_abi::decode_bool(&decode_hex(raw)?).map_err(anyhow::Error::msg)
+}
+
+pub fn parse_u64(raw: &str) -> Result<u64> {
+    agentkeys_protocol::chain_abi::decode_u64(&decode_hex(raw)?).map_err(anyhow::Error::msg)
+}
+
+fn decode_hex(raw: &str) -> Result<Vec<u8>> {
+    hex::decode(raw.strip_prefix("0x").unwrap_or(raw)).context("invalid ABI hex encoding")
 }
 
 pub fn verify_agent_pop(device_key_hash: &str, signature: &str) -> Result<String> {
@@ -71,11 +56,9 @@ mod tests {
     fn registry_decoder_rejects_malformed_authority() {
         let mut record = vec![0; 11 * 32];
         record[8 * 32 + 31] = 1;
-        assert!(
-            parse_device_probe(&hex::encode(&record))
-                .unwrap()
-                .registered
-        );
+        assert!(parse_device_probe(&hex::encode(&record))
+            .unwrap()
+            .is_registered());
         record[10 * 32 + 31] = 2;
         assert!(parse_device_probe(&hex::encode(&record)).is_err());
         record[10 * 32 + 31] = 0;

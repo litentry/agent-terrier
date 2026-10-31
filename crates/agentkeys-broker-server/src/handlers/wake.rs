@@ -196,7 +196,8 @@ pub async fn sandbox_wake(
             }
         };
         let operator_omni_hex = hex::encode(probe.operator_omni);
-        if !probe.registered || probe.revoked || probe.tier != 2 || operator_omni_hex != owner {
+        if !probe.is_registered() || probe.revoked || probe.tier != 2 || operator_omni_hex != owner
+        {
             skipped += 1;
             continue;
         }

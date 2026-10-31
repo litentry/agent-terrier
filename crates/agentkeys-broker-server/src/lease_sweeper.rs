@@ -276,7 +276,7 @@ async fn sweep_once(state: &SharedState, cfg: &SweeperConfig) {
                 continue;
             }
         };
-        if !probe.registered || probe.revoked || probe.tier != 2 {
+        if !probe.is_registered() || probe.revoked || probe.tier != 2 {
             // Revoked outside the broker → the row is stale; the confirmed-
             // revoke hook normally deletes it, so just leave it alone here.
             continue;

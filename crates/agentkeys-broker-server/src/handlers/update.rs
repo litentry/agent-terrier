@@ -105,7 +105,7 @@ pub(crate) async fn probe_owned_delegate(
     let data = format!("0x{}{}", selector("getDevice(bytes32)"), hex::encode(hash));
     let raw = eth_call(&state.http, rpc_url, registry, &data).await?;
     let probe = parse_device_probe(&raw)?;
-    if !probe.registered || probe.revoked {
+    if !probe.is_registered() || probe.revoked {
         return Err("binding is revoked or was never registered".into());
     }
     let operator_bytes: [u8; 32] = hex::decode(session_omni)

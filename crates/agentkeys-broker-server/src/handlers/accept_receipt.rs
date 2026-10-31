@@ -443,7 +443,7 @@ async fn current_lifecycle_calldata(
             .map_err(|error| aerr(StatusCode::BAD_GATEWAY, error))?;
         let probe = crate::handlers::revoke::parse_device_probe(&raw)
             .map_err(|error| aerr(StatusCode::BAD_GATEWAY, error))?;
-        if probe.operator_omni != operator || !probe.registered {
+        if probe.operator_omni != operator || !probe.is_registered() {
             continue;
         }
         let matching = if decoded.function == "revokeAgentDevice" {

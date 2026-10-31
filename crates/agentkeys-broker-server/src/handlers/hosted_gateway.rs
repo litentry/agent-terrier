@@ -155,7 +155,7 @@ async fn forward(
         .map_err(|_| aerr(StatusCode::BAD_GATEWAY, "gateway_chain_verification_failed"))?;
     let binding = parse_device_probe(&raw)
         .map_err(|_| aerr(StatusCode::BAD_GATEWAY, "gateway_chain_verification_failed"))?;
-    if !binding.registered
+    if !binding.is_registered()
         || binding.revoked
         || binding.tier != GATEWAY_DEVICE_TIER
         || hex::encode(binding.actor_omni) != norm_omni(actor)
