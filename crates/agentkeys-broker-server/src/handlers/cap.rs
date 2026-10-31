@@ -5,38 +5,7 @@
 //! credentials-service worker (arch.md §15.1) re-verifies before any
 //! AES-256-GCM encrypt/decrypt + S3 PUT/GET.
 //!
-//! ## Auth chain
-//! 1. Session JWT (Bearer in `Authorization`) — broker's existing OIDC.
-//!    Verifies the caller holds the operator's session, and the JWT's
-//!    `agentkeys.omni_account` MUST match the requested `operator_omni`
-//!    in the body.
-//! 2. On-chain `SidecarRegistry.getDevice(deviceKeyHash)` — decoded fully.
-//!    The device entry's `operatorOmni`, `actorOmni`, and `roles` MUST
-//!    match the request. `revoked` MUST be false. `registeredAt` > 0.
-//!    `roles & ROLE_CAP_MINT (=1)` MUST be non-zero.
-//! 3. On-chain `AgentKeysScope.isServiceInScope(operator, actor,
-//!    keccak(service))` MUST be true.
-//! 4. On-chain `K3EpochCounter.currentEpoch` is embedded in the cap so
-//!    the worker can re-verify against the latest epoch and reject
-//!    stale-epoch caps after rotation.
-//! 5. Cap payload includes an explicit `op` discriminator so the worker
-//!    can refuse a fetch-cap submitted to /store etc.
-//! 6. **K10 proof-of-possession (issue #76 — the broker-SPOF fix).** When a
-//!    cap-mint request carries a `client_sig` (an EIP-191 signature by the
-//!    caller's K10 device key over `device_crypto::cap_pop_payload(operator,
-//!    actor, service, op, data_class, client_nonce, client_ts)`), the broker
-//!    validates that it recovers to an address whose `keccak == device_key_hash`
-//!    (which step 2 already bound on-chain to this operator/actor), then carries
-//!    the PoP in the returned `CapToken` so the WORKER re-verifies it
-//!    independently (`verify::check_client_pop`). The K10 private key never
-//!    reaches the broker, so a compromised broker cannot forge it. **OPTIONAL +
-//!    staged rollout:** the PoP is verified WHEN PRESENT here; a MISSING PoP is
-//!    rejected only at the worker under `AGENTKEYS_WORKER_REQUIRE_CAP_POP=1`
-//!    (default off until every actor's K10 — incl. the master's, via
-//!    `heima-register-master-k10.sh` — is registered). Flipping that flag is the
-//!    point at which the broker SPOF is fully closed; until then the agent path
-//!    (which always signs) is already verified. Supersedes the former stage-1
-//!    simplification (§22b.4, "session JWT only, no K10 signature").
+//! Workers require a fresh actor proof for every capability.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -551,13 +520,7 @@ async fn mint_cap(
         return Err(CapError::DeviceRoleMissing);
     }
 
-    // 1b. K10 proof-of-possession (issue #76 — the broker-SPOF fix). Step 1
-    //     bound `device_key_hash → (operator, actor)` on chain. When the caller
-    //     supplies a `client_sig`, validate it proves possession of that K10 (a
-    //     compromised broker cannot forge it). OPTIONAL during rollout — a cap
-    //     with no PoP is minted as-is; the WORKER is the authoritative gate that
-    //     rejects a missing PoP when AGENTKEYS_WORKER_REQUIRE_CAP_POP=1. The
-    //     worker re-verifies any supplied proof independently regardless.
+    // Workers require a fresh actor proof for every capability.
     verify_cap_pop(&req, op, data_class)?;
 
     // 2. AgentKeysScope.isServiceInScope(operator, actor, keccak(service)).
@@ -657,12 +620,7 @@ const CAP_POP_MAX_AGE_SECS: u64 = 300;
 
 /// Validate the K10 cap-mint proof-of-possession (issue #76) when present.
 ///
-/// OPTIONAL + verify-when-present (staged rollout): a cap-mint that carries no
-/// `client_sig` is a no-op here — the cap is minted without a PoP, and the WORKER
-/// is the authoritative gate that rejects a missing PoP when
-/// `AGENTKEYS_WORKER_REQUIRE_CAP_POP=1`. When a PoP IS supplied, it must recover
-/// to an address whose `keccak == device_key_hash` (already bound on-chain to
-/// this operator/actor) and be fresh — what a compromised broker cannot forge.
+/// Workers require a fresh actor proof for every capability.
 fn verify_cap_pop(req: &CapRequest, op: CapOp, data_class: DataClass) -> Result<(), CapError> {
     let (Some(client_sig), Some(client_nonce), Some(client_ts)) = (
         req.client_sig.as_deref(),
@@ -1386,9 +1344,7 @@ mod tests {
 
     #[test]
     fn verify_cap_pop_is_noop_when_no_pop_supplied() {
-        // Staged rollout (issue #76): a cap-mint with NO PoP is accepted at the
-        // broker — the worker is the gate that rejects a missing PoP under
-        // AGENTKEYS_WORKER_REQUIRE_CAP_POP=1.
+        // Workers require a fresh actor proof for every capability.
         let req = CapRequest {
             operator_omni: format!("0x{}", "a".repeat(64)),
             actor_omni: format!("0x{}", "b".repeat(64)),

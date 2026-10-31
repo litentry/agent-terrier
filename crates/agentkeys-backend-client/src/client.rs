@@ -321,15 +321,7 @@ impl BackendClient {
     ) -> Result<CapToken, BackendError> {
         let url = format!("{}{}", self.broker()?, op.broker_path());
 
-        // K10 cap-mint proof-of-possession (issue #76 — the broker-SPOF fix).
-        // OPTIONAL + graceful (staged rollout): when this client holds the
-        // actor's K10, sign the request — the broker validates it and the worker
-        // re-verifies it independently, so a compromised broker cannot mint a
-        // usable cap, and `device_key_hash` is derived from the SAME key we sign
-        // with (consistent with the broker's `keccak(ecrecover)==device_key_hash`
-        // check). When no K10 is configured (e.g. a master before its K10 is
-        // registered), send NO PoP and the caller-supplied `device_key_hash`;
-        // the worker accepts it unless AGENTKEYS_WORKER_REQUIRE_CAP_POP=1.
+        // Workers require a fresh actor proof for every capability.
         let body = if let Some(remote) = self.remote_cap_pop.as_ref() {
             // #552 signer custody: nonce/ts generated here (same generator as
             // the local path), digest recomputed + signed signer-side. The
