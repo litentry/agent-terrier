@@ -113,11 +113,17 @@ async fn healthz() -> &'static str {
     "ok"
 }
 
-/// Readiness, the broker's `/healthz` + `/readyz` split: 503 while the latest
-/// upstream answer refused the ACCOUNT (every relayed call fails, whatever key
-/// sends it — `refusal.rs`), 200 otherwise. It clears on the next upstream
-/// 2xx; a restart starts ready, since nothing is known until a call is made.
+/// Readiness requires usable credential persistence and no standing upstream refusal.
 async fn readyz(State(relay): State<Arc<Relay>>) -> Response {
+    if !relay.keys.is_available() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "status":"unready", "credential_persistence_failed":true
+            })),
+        )
+            .into_response();
+    }
     match relay.upstream_account.current() {
         None => Json(serde_json::json!({ "status": "ready" })).into_response(),
         Some(refusal) => (
@@ -128,6 +134,38 @@ async fn readyz(State(relay): State<Arc<Relay>>) -> Response {
             })),
         )
             .into_response(),
+    }
+}
+
+#[cfg(test)]
+mod persistence_tests {
+    use super::*;
+    use crate::config::{Cli, GateConfig};
+    use clap::Parser;
+
+    #[tokio::test]
+    async fn failed_persistence_disables_readiness_and_caller_access() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = directory.path().join("state");
+        std::fs::create_dir(&state).unwrap();
+        let path = state.join("keys.json");
+        agentkeys_core::protected_file::write(path.to_str().unwrap(),
+            serde_json::json!({"keys":[{"key":"synthetic-test-key","key_id":"actor","user_omni":"ab".repeat(32),"device_id":"device"}]}).to_string().as_bytes(),true).unwrap();
+        let config = GateConfig::from_cli(
+            Cli::try_parse_from(["gate", "--keys-file", path.to_str().unwrap()]).unwrap(),
+        )
+        .unwrap();
+        let relay = Arc::new(Relay::new(config));
+        assert_eq!(readyz(State(relay.clone())).await.status(), StatusCode::OK);
+        assert!(relay.keys.authenticate("synthetic-test-key").is_ok());
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_dir(state).unwrap();
+        assert!(relay.keys.disable("actor").is_err());
+        assert_eq!(
+            readyz(State(relay.clone())).await.status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert!(relay.keys.authenticate("synthetic-test-key").is_err());
     }
 }
 

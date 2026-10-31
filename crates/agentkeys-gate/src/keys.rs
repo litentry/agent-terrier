@@ -9,7 +9,10 @@
 //! never what a caller may do (control stays hooks + caps, arch.md §22d).
 
 use std::path::PathBuf;
-use std::sync::RwLock;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    RwLock,
+};
 
 use rand_core::RngCore;
 
@@ -82,11 +85,12 @@ struct PersistCtx {
 pub struct KeyStore {
     keys: RwLock<Vec<RelayKey>>,
     persist: Option<PersistCtx>,
+    persistence_failed: AtomicBool,
 }
 
 /// The provision result — the secret is returned ONCE (the caller injects it
 /// into the sandbox env and drops it; the file keeps it for restarts, 0600).
-#[derive(Debug, serde::Serialize)]
+#[derive(serde::Serialize)]
 pub struct ProvisionedKey {
     pub key_id: String,
     pub secret: String,
@@ -121,17 +125,17 @@ impl KeyStore {
         Self {
             keys: RwLock::new(canonicalize_boot_keys(&config.keys)),
             persist,
+            persistence_failed: AtomicBool::new(false),
         }
     }
 
     /// Resolve a bearer token to its key record. A DISABLED key is refused
     /// with the same 401 as an unknown one (no oracle on which it was).
     pub fn authenticate(&self, token: &str) -> GateResult<RelayKey> {
-        self.keys
-            .read()
-            .expect("key store lock poisoned")
-            .iter()
-            .find(|k| !k.disabled && ct_eq(k.key.as_bytes(), token.as_bytes()))
+        let keys = self.keys.read().expect("key store lock poisoned");
+        self.require_available()?;
+        keys.iter()
+            .find(|key| !key.disabled && ct_eq(key.key.as_bytes(), token.as_bytes()))
             .cloned()
             .ok_or_else(|| GateError::Unauthorized("unknown relay key".into()))
     }
@@ -161,7 +165,9 @@ impl KeyStore {
         rand_core::OsRng.fill_bytes(&mut secret_bytes);
         let secret = format!("gk_{}", hex_encode(&secret_bytes));
         let superseded = {
-            let mut keys = self.keys.write().expect("key store lock poisoned");
+            let mut committed = self.keys.write().expect("key store lock poisoned");
+            self.require_available()?;
+            let mut keys = committed.clone();
             let record = RelayKey {
                 key: secret.clone(),
                 key_id: key_id.clone(),
@@ -189,6 +195,8 @@ impl KeyStore {
             if !placed {
                 keys.push(record);
             }
+            self.write_through(&keys)?;
+            *committed = keys;
             superseded
         };
         if superseded > 0 {
@@ -198,7 +206,6 @@ impl KeyStore {
                 "relay key re-provisioned — its other rows (a 0x/bare spelling split) are removed"
             );
         }
-        self.write_through()?;
         Ok(ProvisionedKey { key_id, secret })
     }
 
@@ -208,7 +215,9 @@ impl KeyStore {
     pub fn disable(&self, key_id: &str) -> GateResult<bool> {
         let key_id = canonical_key_id(key_id);
         let changed = {
-            let mut keys = self.keys.write().expect("key store lock poisoned");
+            let mut committed = self.keys.write().expect("key store lock poisoned");
+            self.require_available()?;
+            let mut keys = committed.clone();
             let mut changed = false;
             for k in keys
                 .iter_mut()
@@ -217,11 +226,12 @@ impl KeyStore {
                 k.disabled = true;
                 changed = true;
             }
+            if changed {
+                self.write_through(&keys)?;
+                *committed = keys;
+            }
             changed
         };
-        if changed {
-            self.write_through()?;
-        }
         Ok(changed)
     }
 
@@ -237,30 +247,39 @@ impl KeyStore {
             .and_then(|k| k.budget_tokens)
     }
 
-    /// Atomic write-through of the full keys file (tmp + rename, 0600). A
-    /// failure is a hard error to the admin caller — a mutation the file
-    /// doesn't carry would silently vanish on restart.
-    fn write_through(&self) -> GateResult<()> {
-        let Some(ctx) = &self.persist else {
+    pub fn is_available(&self) -> bool {
+        !self.persistence_failed.load(Ordering::SeqCst)
+    }
+
+    fn require_available(&self) -> GateResult<()> {
+        if self.is_available() {
+            Ok(())
+        } else {
+            Err(GateError::Unavailable(
+                "credential persistence failed; restore the private state and restart the relay"
+                    .into(),
+            ))
+        }
+    }
+
+    fn write_through(&self, keys: &[RelayKey]) -> GateResult<()> {
+        let Some(context) = &self.persist else {
             return Ok(());
         };
-        let doc = KeysFile {
-            default_budget_tokens: ctx.default_budget_tokens,
-            users: ctx.users.clone(),
-            keys: self.keys.read().expect("key store lock poisoned").clone(),
+        let document = KeysFile {
+            default_budget_tokens: context.default_budget_tokens,
+            users: context.users.clone(),
+            keys: keys.to_vec(),
         };
-        let json = serde_json::to_string_pretty(&doc)
-            .map_err(|e| GateError::Internal(format!("keys file serialize: {e}")))?;
-        let tmp = ctx.path.with_extension("json.tmp");
-        std::fs::write(&tmp, &json)
-            .map_err(|e| GateError::Internal(format!("keys file write {tmp:?}: {e}")))?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+        let result = (|| -> anyhow::Result<()> {
+            let encoded = zeroize::Zeroizing::new(serde_json::to_vec(&document)?);
+            agentkeys_core::protected_file::replace_atomic(&context.path, &encoded)
+        })();
+        if let Err(error) = result {
+            self.persistence_failed.store(true, Ordering::SeqCst);
+            tracing::error!(error = %error, "relay credential persistence failed; refusing new requests until restart");
+            return self.require_available();
         }
-        std::fs::rename(&tmp, &ctx.path)
-            .map_err(|e| GateError::Internal(format!("keys file rename → {:?}: {e}", ctx.path)))?;
         Ok(())
     }
 }
@@ -308,6 +327,112 @@ mod tests {
             budget_tokens: None,
             disabled: false,
         }
+    }
+
+    #[test]
+    fn failed_rotation_preserves_the_last_committed_records() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("missing").join("keys.json");
+        let store = KeyStore::from_config(&cfg(
+            vec![boot_key("synthetic_original", "actor")],
+            Some(path),
+        ));
+        assert!(store.authenticate("synthetic_original").is_ok());
+        assert!(store
+            .provision("actor", &"aa".repeat(32), None, "device", "", None)
+            .is_err());
+        assert_eq!(store.keys.read().unwrap()[0].key, "synthetic_original");
+        assert!(!store.is_available());
+        assert!(matches!(
+            store.authenticate("synthetic_original"),
+            Err(GateError::Unavailable(_))
+        ));
+        assert!(store
+            .provision("another", &"aa".repeat(32), None, "device", "", None)
+            .is_err());
+        assert_eq!(store.keys.read().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn failed_revocation_preserves_committed_records_but_refuses_all_new_requests() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("missing").join("keys.json");
+        let store = KeyStore::from_config(&cfg(
+            vec![boot_key("synthetic_original", "actor")],
+            Some(path),
+        ));
+        assert!(store.authenticate("synthetic_original").is_ok());
+        assert!(store.disable("actor").is_err());
+        assert!(!store.keys.read().unwrap()[0].disabled);
+        assert!(!store.is_available());
+        assert!(matches!(
+            store.authenticate("synthetic_original"),
+            Err(GateError::Unavailable(_))
+        ));
+    }
+
+    #[test]
+    fn concurrent_provisions_and_revocation_round_trip_without_lost_records() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("keys.json");
+        let store = std::sync::Arc::new(KeyStore::from_config(&cfg(vec![], Some(path.clone()))));
+        let threads: Vec<_> = (0..8)
+            .map(|number| {
+                let store = store.clone();
+                std::thread::spawn(move || {
+                    store
+                        .provision(
+                            &format!("actor-{number}"),
+                            &"aa".repeat(32),
+                            None,
+                            "device",
+                            "",
+                            None,
+                        )
+                        .unwrap()
+                })
+            })
+            .collect();
+        let minted: Vec<_> = threads
+            .into_iter()
+            .map(|thread| thread.join().unwrap())
+            .collect();
+        let persisted: KeysFile = serde_json::from_str(
+            &agentkeys_core::protected_file::read_text(path.to_str().unwrap()).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(persisted.keys.len(), 8);
+        for key in &minted {
+            assert!(store.authenticate(&key.secret).is_ok());
+        }
+        store.disable(&minted[0].key_id).unwrap();
+        let persisted: KeysFile = serde_json::from_str(
+            &agentkeys_core::protected_file::read_text(path.to_str().unwrap()).unwrap(),
+        )
+        .unwrap();
+        let restarted = KeyStore::from_config(&cfg(persisted.keys, Some(path)));
+        assert!(restarted.authenticate(&minted[0].secret).is_err());
+        for key in &minted[1..] {
+            assert!(restarted.authenticate(&key.secret).is_ok());
+        }
+    }
+
+    #[test]
+    fn predictable_temporary_symlink_cannot_receive_credentials() {
+        use std::os::unix::fs::symlink;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("keys.json");
+        let target = directory.path().join("untouched");
+        agentkeys_core::protected_file::write(target.to_str().unwrap(), b"unchanged", true)
+            .unwrap();
+        symlink(&target, path.with_extension("json.tmp")).unwrap();
+        let store = KeyStore::from_config(&cfg(vec![], Some(path.clone())));
+        let minted = store
+            .provision("actor", &"aa".repeat(32), None, "device", "", None)
+            .unwrap();
+        assert!(store.authenticate(&minted.secret).is_ok());
+        assert_eq!(std::fs::read(&target).unwrap(), b"unchanged");
+        assert!(!std::fs::symlink_metadata(&path).unwrap().is_symlink());
     }
 
     #[test]
@@ -362,8 +487,8 @@ mod tests {
     fn write_through_persists_boot_keys_plus_minted_ones() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("gate-keys.json");
-        std::fs::write(
-            &path,
+        agentkeys_core::protected_file::write(
+            path.to_str().unwrap(),
             serde_json::json!({
                 "default_budget_tokens": 1000,
                 "users": [],
@@ -372,10 +497,12 @@ mod tests {
                     "user_omni": "aa".repeat(32), "device_id": "esp32-01"
                 }]
             })
-            .to_string(),
+            .to_string()
+            .as_bytes(),
+            true,
         )
         .unwrap();
-        // Simulate boot: parse like from_cli_with does.
+        // Simulate protected boot configuration.
         let parsed: KeysFile =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         let mut config = cfg(parsed.keys, Some(path.clone()));

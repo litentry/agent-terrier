@@ -80,3 +80,103 @@ pub fn write(path: &str, contents: &[u8], create_new: bool) -> Result<()> {
     file.sync_all()?;
     Ok(())
 }
+
+/// Caller serializes writers. An error after rename requires fail-closed recovery.
+#[cfg(unix)]
+pub fn replace_atomic(path: &std::path::Path, contents: &[u8]) -> Result<()> {
+    use std::ffi::CString;
+    use std::os::{
+        fd::{AsRawFd, FromRawFd},
+        unix::{
+            ffi::OsStrExt,
+            fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
+        },
+    };
+
+    ensure!(
+        contents.len() as u64 <= MAX_SECRET_FILE_BYTES,
+        "secret file exceeds size limit"
+    );
+    let parent = path
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let filename = CString::new(
+        path.file_name()
+            .ok_or_else(|| anyhow::anyhow!("secret path needs a filename"))?
+            .as_bytes(),
+    )?;
+    let directory = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(parent)?;
+    let metadata = directory.metadata()?;
+    ensure!(
+        metadata.uid() == unsafe { libc::geteuid() } && metadata.permissions().mode() & 0o022 == 0,
+        "secret directory must be owned by this user and not writable by group or others"
+    );
+    let directory_fd = directory.as_raw_fd();
+    let existing_fd = unsafe {
+        libc::openat(
+            directory_fd,
+            filename.as_ptr(),
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC,
+        )
+    };
+    if existing_fd >= 0 {
+        let existing = unsafe { File::from_raw_fd(existing_fd) };
+        validate(&existing)?;
+    } else {
+        let error = std::io::Error::last_os_error();
+        if error.kind() != std::io::ErrorKind::NotFound {
+            return Err(error.into());
+        }
+    }
+    let random: [u8; 16] = rand::random();
+    let temporary = CString::new(format!(".agent-terrier-{}.tmp", hex::encode(random)))?;
+    let temporary_fd = unsafe {
+        libc::openat(
+            directory_fd,
+            temporary.as_ptr(),
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            0o600,
+        )
+    };
+    ensure!(
+        temporary_fd >= 0,
+        "could not create private temporary file: {}",
+        std::io::Error::last_os_error()
+    );
+    let mut file = unsafe { File::from_raw_fd(temporary_fd) };
+    let result = (|| -> Result<()> {
+        validate(&file)?;
+        file.write_all(contents)?;
+        file.sync_all()?;
+        let renamed = unsafe {
+            libc::renameat(
+                directory_fd,
+                temporary.as_ptr(),
+                directory_fd,
+                filename.as_ptr(),
+            )
+        };
+        ensure!(
+            renamed == 0,
+            "could not replace secret file: {}",
+            std::io::Error::last_os_error()
+        );
+        directory.sync_all()?;
+        Ok(())
+    })();
+    if result.is_err() {
+        unsafe {
+            libc::unlinkat(directory_fd, temporary.as_ptr(), 0);
+        }
+    }
+    result
+}
+
+#[cfg(not(unix))]
+pub fn replace_atomic(_path: &std::path::Path, _contents: &[u8]) -> Result<()> {
+    anyhow::bail!("secret storage requires Unix file permissions")
+}
