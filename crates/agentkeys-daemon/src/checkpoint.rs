@@ -1278,14 +1278,14 @@ mod tests {
 
     fn chat(channel: &str) -> ChatLoopConfig {
         ChatLoopConfig {
-            broker_url: "https://broker.agentterrier.cn".into(),
-            channel_worker_url: "https://channel.agentterrier.cn".into(),
+            broker_url: "https://broker.secondary.example".into(),
+            channel_worker_url: "https://channel.secondary.example".into(),
             chat_channel_id: channel.into(),
             actor_omni: format!("0x{}", "ab".repeat(32)),
             operator_omni: format!("0x{}", "cd".repeat(32)),
             device_key_hex: None,
             session_jwt: Some("jwt".into()),
-            signer_url: Some("https://signer.agentterrier.cn".into()),
+            signer_url: Some("https://signer.secondary.example".into()),
             bridge_url: "http://127.0.0.1:8090".into(),
             bridge_token: None,
             speech_url: None,
@@ -1311,7 +1311,7 @@ mod tests {
         let cfg = CheckpointConfig::from_lookup(&read, chat("opchat-watchdog")).expect("enabled");
         assert_eq!(cfg.namespace, "watchdog");
         // The worker URL is DERIVED from the broker host (never pre-composed).
-        assert_eq!(cfg.memory_worker_url, "https://memory.agentterrier.cn");
+        assert_eq!(cfg.memory_worker_url, "https://memory.secondary.example");
         assert_eq!(cfg.interval.as_secs(), 900);
         assert_eq!(cfg.max_bytes, 8 * 1024 * 1024);
     }

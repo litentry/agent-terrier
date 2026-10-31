@@ -234,7 +234,7 @@ mod tests {
             lookup(&[
                 ("OPENVIKING_EMBED_MODEL", "ep-embed"),
                 ("ARK_API_KEY", "gk_relay"),
-                ("ARK_BASE_URL", "https://gate.agentterrier.cn/v1"),
+                ("ARK_BASE_URL", "https://gate.secondary.example/v1"),
             ]),
             no_file,
         );
@@ -248,7 +248,7 @@ mod tests {
         assert_eq!(config["embedding"]["dense"]["api_key"], "gk_relay");
         assert_eq!(
             config["embedding"]["dense"]["api_base"],
-            "https://gate.agentterrier.cn/v1"
+            "https://gate.secondary.example/v1"
         );
         assert!(
             summary.contains("key=<set>") && !summary.contains("gk_relay"),
@@ -264,7 +264,7 @@ mod tests {
                 ("OPENVIKING_EMBED_API_KEY", "raw-key"),
                 ("OPENVIKING_EMBED_DIMENSION", "1024"),
                 ("ARK_API_KEY", "gk_relay"),
-                ("ARK_BASE_URL", "https://gate.agentterrier.cn/v1"),
+                ("ARK_BASE_URL", "https://gate.secondary.example/v1"),
             ]),
             no_file,
         );

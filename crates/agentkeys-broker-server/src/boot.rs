@@ -832,27 +832,27 @@ mod tests {
     #[test]
     fn email_landing_base_defaults_to_oidc_issuer() {
         assert_eq!(
-            email_landing_base(None, "https://broker.litentry.org/"),
-            "https://broker.litentry.org/auth/email/landing"
+            email_landing_base(None, "https://broker.primary.example/"),
+            "https://broker.primary.example/auth/email/landing"
         );
         // Empty/whitespace override falls back too (systemd Environment= with
         // an empty value must not produce a scheme-less landing URL).
         assert_eq!(
-            email_landing_base(Some("  ".into()), "https://broker.litentry.org"),
-            "https://broker.litentry.org/auth/email/landing"
+            email_landing_base(Some("  ".into()), "https://broker.primary.example"),
+            "https://broker.primary.example/auth/email/landing"
         );
     }
 
     #[cfg(feature = "auth-email-link")]
     #[test]
     fn email_landing_base_override_wins_over_issuer() {
-        // The VE shape: issuer = TOS-bucket JWKS URL, landing = broker vhost.
+        // The landing URL can differ from the identity-token issuer.
         assert_eq!(
             email_landing_base(
-                Some("https://broker.agentterrier.cn/".into()),
-                "https://agentterrier-oidc-2127642244.tos-s3-cn-beijing.volces.com"
+                Some("https://broker.secondary.example/".into()),
+                "https://identity.secondary.example"
             ),
-            "https://broker.agentterrier.cn/auth/email/landing"
+            "https://broker.secondary.example/auth/email/landing"
         );
     }
 

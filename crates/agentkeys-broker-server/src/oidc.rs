@@ -253,7 +253,7 @@ mod tests {
         let kp = OidcKeypair::generate_and_persist(&tmp.path().join("kp.json")).unwrap();
 
         let claims = serde_json::json!({
-            "iss": "https://oidc.agentkeys.dev",
+            "iss": "https://oidc.primary.example",
             "sub": "agentkeys:agent:0xabc",
             "aud": "sts.amazonaws.com",
             "exp": 9_999_999_999_u64,
@@ -268,7 +268,7 @@ mod tests {
             DecodingKey::from_ec_components(&kp.public_x_b64, &kp.public_y_b64).unwrap();
         let mut validation = Validation::new(Algorithm::ES256);
         validation.set_audience(&["sts.amazonaws.com"]);
-        validation.set_issuer(&["https://oidc.agentkeys.dev"]);
+        validation.set_issuer(&["https://oidc.primary.example"]);
 
         let token_data: jsonwebtoken::TokenData<serde_json::Value> =
             decode(&jwt, &decoding_key, &validation).expect("public-key verify");

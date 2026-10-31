@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 
 scanner_path = Path(__file__).resolve().parents[1] / "check-public.py"
 module_spec = importlib.util.spec_from_file_location("public_check", scanner_path)
@@ -23,6 +24,19 @@ class PublicContentsTests(unittest.TestCase):
         report = self.check_text("http://localhost:8080\nhttps://github.com/litentry/agent-terrier/issues/1\n")
         self.assertEqual(report["findings"], [])
         self.assertEqual(report["scanned_files"], 1)
+
+    def test_private_domain_hash_blocks_subdomains_without_echoing_names(self):
+        domain = "synthetic-private.example"
+        digest = hashlib.sha256(domain.encode()).hexdigest()
+        with mock.patch.object(public_check, "PRIVATE_DOMAIN_HASHES", {digest}, create=True):
+            for spelling in (domain, "broker." + domain, "GATE." + domain.upper()):
+                report = self.check_text("https://" + spelling + "/v1")
+                self.assertEqual(report["findings"], [{
+                    "path":"example.txt", "rule":"private-deployment-domain", "line":1,
+                }])
+                self.assertNotIn(domain, json.dumps(report))
+            for spelling in ("broker.public.example", domain + ".public.example", "x" + domain):
+                self.assertEqual(self.check_text("https://" + spelling)["findings"], [])
 
     def test_rejects_private_key_without_printing_it(self):
         canary = "-----BEGIN " + "PRIVATE KEY-----\n" + "synthetic-test-material"

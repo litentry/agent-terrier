@@ -25,6 +25,8 @@ The public source excludes hardware firmware, inherited operator documentation a
 
 `.public-source.json` is the source-surface allowlist; `scripts/check-public.py` enforces it and checks source/artifact contents without printing matched credentials. Synthetic negative-test exceptions require an exact source-line hash and a review reason. They cannot exempt files, directories or unapproved repository links. The scanner supplements manual diff review; it does not prove arbitrary binary or encoded data safe.
 
+Public source and artifact checks reject inherited deployment hostnames by comparing domain suffix hashes, including mixed-case and subdomain spellings. The public scanner stores no plaintext list of those domains and reports only file, line and rule. Synthetic examples use reserved `.example` domains. This supplements manual privacy review; it does not certify source history or replace the remaining provider-adapter extraction.
+
 Browser compilation remaps Rust source paths. The display build also makes route-manifest source metadata relative to the app root: the framework otherwise embeds workstation paths in its production manifest. Asset URLs and route behavior are unchanged; the artifact privacy check must pass after a framework update.
 
 The card schema has one owner in `agentkeys-protocol::card`. Its TypeScript output lives in `design-system/generated/`; the renderer and both apps consume those generated types. Existing `CardView*` names are aliases, not separate field definitions. Regenerate with `cargo test -p agentkeys-protocol -p agentkeys-daemon export_bindings` after changing a card field.

@@ -34,8 +34,8 @@ function freshStorage(): Storage {
   } as Storage;
 }
 
-const AWS = 'https://broker.litentry.org';
-const VE = 'https://broker.agentterrier.ai';
+const AWS = 'https://broker.primary.example';
+const VE = 'https://broker.secondary.example';
 
 beforeEach(() => {
   (globalThis as { localStorage?: Storage }).localStorage = freshStorage();
@@ -124,7 +124,7 @@ describe('one-shot migration ladder', () => {
   });
 
   it('never clobbers an existing stack-scoped value with a legacy one', () => {
-    localStorage.setItem(`ak_master_cred_id:heima@broker.litentry.org`, 'current');
+    localStorage.setItem(`ak_master_cred_id:heima@broker.primary.example`, 'current');
     localStorage.setItem('ak_master_cred_id:heima', 'stale-legacy');
 
     setActiveStack('heima', AWS);
@@ -142,7 +142,7 @@ describe('brokerless daemon (pre-#373 behavior preserved)', () => {
 
 describe('brokerScope', () => {
   it('namespaces by host incl. port, falling back to the raw string', () => {
-    expect(brokerScope('https://broker.agentterrier.ai')).toBe('broker.agentterrier.ai');
+    expect(brokerScope('https://broker.secondary.example')).toBe('broker.secondary.example');
     expect(brokerScope('http://localhost:8091/')).toBe('localhost:8091');
     expect(brokerScope('not a url')).toBe('not a url');
     expect(brokerScope('  ')).toBe('');

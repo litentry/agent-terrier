@@ -47,7 +47,7 @@ const SIWE_TTL_SECONDS: i64 = 45 * 60;
 pub struct SiweWalletAuth {
     nonce_store: Arc<AuthNonceStore>,
     /// SIWE `domain` field — typically the host portion of `BROKER_OIDC_ISSUER`
-    /// (e.g. `"broker.agentkeys.dev"`). Plumbed in from boot.rs.
+    /// (e.g. `"broker.primary.example"`). Plumbed in from boot.rs.
     domain: String,
     /// SIWE `uri` field — full URL form of `BROKER_OIDC_ISSUER`.
     uri: String,
