@@ -23,13 +23,16 @@ The explicit ignored-test invocation keeps ordinary unit tests independent of Do
 ## What the check proves
 
 - One create and one credential callback, followed by reuse without another mint.
-- Immutable image selection, an unprivileged process, a read-only root and temporary writable storage.
+- Immutable image selection, an unprivileged process, a read-only root, temporary scratch space and a private actor-owned state volume.
 - Management HTTP reachable through an authenticated host-loopback stream; container ports are unpublished, with no host-directory or Docker-socket mounts.
 - Foreign actor and namespace denial, with the authorized runtime preserved.
 - Both HTTP targets work independently; direct cross-runtime network access fails without changing its target. Host forwarding refuses missing proof, another runtime's proof and an unauthenticated request from the other container.
-- A stopped runtime is replaced with a new credential; removal clears discovery and preserves the other device.
+- A stopped runtime is replaced with a new credential while saved bytes survive. Ordinary removal clears discovery and preserves both saved state and the other device.
+- Another actor cannot adopt or reset saved state after removal, and denial mints no credential. The original actor can restore the same bytes. Reset refuses an active container; after removal, explicit reset is idempotent and a new runtime starts without the old data.
 
-Each run uses a random ownership namespace. Cleanup removes only that run's containers, networks and fixture image. It retains the downloaded base image for repeat runs. A failed assertion still attempts scoped cleanup; a killed test process can leave resources with its `terrier-check-` namespace for manual inspection.
+Each run uses a random ownership namespace. Cleanup removes only that run's containers, networks, state volumes and fixture image. It retains the downloaded base image for repeat runs. A failed assertion still attempts scoped cleanup; a killed test process can leave resources with its `terrier-check-` namespace for manual inspection.
+
+Runtime images initialize the directory named by `agentkeys-protocol::runtime_layout::STATE_DIRECTORY` with its canonical user/group and mode 0700. The Docker owner mounts a named local volume there; it accepts no volume driver options, remote driver or host bind mount. It checks namespace/device/actor labels and mounted volume identity before reuse or removal. Ordinary `kill_for_device` retains state; the separate `reset_state_for_device` API checks actor ownership and refuses while any device container remains. This is host-controlled development storage, not a credential vault or production custody boundary.
 
 The Docker host remains trusted. Its administrators can inspect container environments. The adapter sends values over stdin and does not put credentials in command arguments or error output. The host client receives only `PATH`, `HOME`, `TMPDIR` and an explicitly supplied `DOCKER_CONFIG`, so inherited cloud settings and Docker context variables do not select another engine.
 

@@ -4,10 +4,13 @@ use std::process::Stdio;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
+use agentkeys_protocol::runtime_layout::{GROUP_ID, STATE_DIRECTORY, USER_ID};
 use anyhow::{ensure, Context, Result};
 use async_trait::async_trait;
 use serde::Deserialize;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+mod state_volume;
 
 use crate::sandbox_backend::{
     CreateEnvProvider, DelegateLocks, EnsureOutcome, InstanceImageInfo, LiveRuntime, RuntimeImage,
@@ -227,6 +230,7 @@ struct Container {
     config: ContainerConfig,
     state: ContainerState,
     network_settings: NetworkSettings,
+    mounts: Vec<serde_json::Value>,
 }
 
 impl Container {
@@ -443,6 +447,7 @@ impl DockerRuntime {
                 "refusing a container outside this runtime namespace"
             );
             normalize_identity(&container.id)?;
+            self.verify_state_mount(container).await?;
         }
         Ok(containers)
     }
@@ -796,8 +801,11 @@ impl SandboxRuntime for DockerRuntime {
             }
         }
         let image = self.current_image().await?;
+        self.state_volume_metadata(&device, &actor).await?;
+        self.network_metadata(&device).await?;
         let input = environment_input(&actor, base_envs, on_create().await)?;
         let network = self.ensure_network(&device).await?;
+        let state_volume = self.ensure_state_volume(&device, &actor).await?;
         for container in &existing {
             self.remove(container).await?;
         }
@@ -820,12 +828,14 @@ impl SandboxRuntime for DockerRuntime {
             "--read-only".into(),
             "--cap-drop=ALL".into(),
             "--security-opt=no-new-privileges".into(),
-            "--user=1000:1000".into(),
+            format!("--user={USER_ID}:{GROUP_ID}"),
             format!("--pids-limit={PROCESS_LIMIT}"),
             format!("--memory={}m", self.config.memory_mib),
             format!("--cpus={}", self.config.cpu_count),
             "--tmpfs=/tmp:rw,nosuid,nodev,size=256m".into(),
             "--tmpfs=/home/agent:rw,nosuid,nodev,uid=1000,gid=1000,size=512m".into(),
+            "--mount".into(),
+            format!("type=volume,source={state_volume},target={STATE_DIRECTORY}"),
             "--env-file=/dev/stdin".into(),
         ];
         arguments.push(image.id);
@@ -926,14 +936,35 @@ mod tests {
         assert_eq!(arguments, ["--host", "unix:///tmp/test-docker.sock"]);
     }
 
-    #[derive(Default)]
     struct FakeEngine {
         container: Mutex<Option<serde_json::Value>>,
+        volume: Mutex<Option<serde_json::Value>>,
         calls: Mutex<Vec<RecordedCommand>>,
         image_missing: std::sync::atomic::AtomicBool,
         network_exists: std::sync::atomic::AtomicBool,
         foreign_network: std::sync::atomic::AtomicBool,
         start_fails: std::sync::atomic::AtomicBool,
+    }
+
+    impl Default for FakeEngine {
+        fn default() -> Self {
+            Self {
+                container: Mutex::default(),
+                volume: Mutex::new(Some(state_volume())),
+                calls: Mutex::default(),
+                image_missing: Default::default(),
+                network_exists: Default::default(),
+                foreign_network: Default::default(),
+                start_fails: Default::default(),
+            }
+        }
+    }
+
+    fn state_volume() -> serde_json::Value {
+        json!({
+            "Name": format!("test-runtime-{}-state", device()), "Driver": "local", "Scope": "local", "Options": null,
+            "Labels": { OWNER_LABEL: "test-runtime", DEVICE_LABEL: device(), ACTOR_LABEL: actor() },
+        })
     }
 
     fn device() -> String {
@@ -961,6 +992,7 @@ mod tests {
                 OWNER_LABEL: namespace, DEVICE_LABEL: device(), ACTOR_LABEL: actor,
             }},
             "State": {"Running": running, "Status": if running { "running" } else { "exited" }},
+            "Mounts": [{"Type": "volume", "Name": format!("{namespace}-{}-state", device()), "Destination": STATE_DIRECTORY, "RW": true}],
             "NetworkSettings": {"Ports": {
                 format!("{}/tcp", agentkeys_protocol::sandbox_env::SANDBOX_BRIDGE_PORT): host.map(|host| vec![json!({"HostIp": host, "HostPort": "18090"})]),
             }},
@@ -1037,6 +1069,16 @@ mod tests {
                 ("network", "rm") => {
                     self.network_exists.store(false, Ordering::SeqCst);
                     "network-removed".into()
+                },
+                ("volume", "ls") => self.volume.lock().unwrap().as_ref().map(|volume| volume["Name"].as_str().unwrap().to_string()).unwrap_or_default(),
+                ("volume", "inspect") => json!([self.volume.lock().unwrap().as_ref().unwrap()]).to_string(),
+                ("volume", "create") => {
+                    *self.volume.lock().unwrap() = Some(state_volume());
+                    format!("test-runtime-{}-state", device())
+                },
+                ("volume", "rm") => {
+                    *self.volume.lock().unwrap() = None;
+                    format!("test-runtime-{}-state", device())
                 },
                 _ => panic!("unexpected Docker operation"),
             };
@@ -1154,6 +1196,7 @@ mod tests {
     #[tokio::test]
     async fn ensure_reuses_owned_runtime_without_reminting_credentials() {
         let engine = Arc::new(FakeEngine::default());
+        *engine.volume.lock().unwrap() = None;
         let runtime = runtime(engine.clone());
         let creates = Arc::new(AtomicUsize::new(0));
         let first = runtime
@@ -1207,6 +1250,121 @@ mod tests {
         assert!(endpoint.0.starts_with("http://127.0.0.1:"));
         assert_eq!(endpoint.1[0].0, FORWARD_TOKEN_HEADER);
         assert_eq!(endpoint.1[0].1.len(), 64);
+    }
+
+    #[tokio::test]
+    async fn state_survives_teardown_and_reset_requires_matching_actor_and_no_container() {
+        let engine = Arc::new(FakeEngine::default());
+        let runtime = runtime(engine.clone());
+        runtime
+            .ensure_for_delegate_with_envs(
+                &device(),
+                &actor(),
+                &test_identity_environment(),
+                crate::no_create_envs(),
+            )
+            .await
+            .unwrap();
+        assert!(runtime
+            .reset_state_for_device(&device(), &actor())
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("remove the runtime"));
+        runtime.kill_for_device(&device()).await.unwrap();
+        assert!(engine.volume.lock().unwrap().is_some());
+        assert!(runtime
+            .reset_state_for_device(&device(), &hex::encode([9; 32]))
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("ownership or driver mismatch"));
+        assert!(engine.volume.lock().unwrap().is_some());
+        assert!(runtime
+            .reset_state_for_device(&device(), &actor())
+            .await
+            .unwrap());
+        assert!(!runtime
+            .reset_state_for_device(&device(), &actor())
+            .await
+            .unwrap());
+        assert!(engine.volume.lock().unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn foreign_or_host_backed_state_is_refused_before_minting_or_mutation() {
+        for (field, value) in [
+            (
+                "Labels",
+                json!({OWNER_LABEL: "foreign", DEVICE_LABEL: device(), ACTOR_LABEL: actor()}),
+            ),
+            (
+                "Labels",
+                json!({OWNER_LABEL: "test-runtime", DEVICE_LABEL: device(), ACTOR_LABEL: hex::encode([9; 32])}),
+            ),
+            (
+                "Labels",
+                json!({OWNER_LABEL: "test-runtime", DEVICE_LABEL: hex::encode([9; 32]), ACTOR_LABEL: actor()}),
+            ),
+            ("Driver", json!("external")),
+            ("Scope", json!("global")),
+            (
+                "Options",
+                json!({"type": "none", "o": "bind", "device": "/host-path"}),
+            ),
+        ] {
+            let engine = Arc::new(FakeEngine::default());
+            engine.volume.lock().unwrap().as_mut().unwrap()[field] = value;
+            let runtime = runtime(engine.clone());
+            let creates = Arc::new(AtomicUsize::new(0));
+            let error = runtime
+                .ensure_for_delegate_with_envs(
+                    &device(),
+                    &actor(),
+                    &[],
+                    create_environment(creates.clone()),
+                )
+                .await
+                .unwrap_err();
+            assert!(error
+                .to_string()
+                .contains("state volume ownership or driver mismatch"));
+            assert_eq!(creates.load(Ordering::SeqCst), 0);
+            assert!(engine
+                .calls
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|(arguments, _)| !["create", "start", "rm"].contains(&arguments[1].as_str())));
+        }
+    }
+
+    #[tokio::test]
+    async fn altered_container_mounts_are_refused_without_removal() {
+        for mounts in [
+            json!([]),
+            json!([{"Type": "bind", "Source": "/host-path", "Destination": STATE_DIRECTORY, "RW": true}]),
+            json!([{"Type": "volume", "Name": "foreign-state", "Destination": STATE_DIRECTORY, "RW": true}]),
+            json!([{"Type": "volume", "Name": format!("test-runtime-{}-state", device()), "Destination": STATE_DIRECTORY, "RW": false}]),
+        ] {
+            let engine = Arc::new(FakeEngine::default());
+            let mut metadata = container("test-runtime", &actor(), None, true);
+            metadata["Mounts"] = mounts;
+            *engine.container.lock().unwrap() = Some(metadata);
+            assert!(runtime(engine.clone())
+                .kill_for_device(&device())
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("state mount mismatch"));
+            assert!(engine.container.lock().unwrap().is_some());
+            assert!(engine
+                .calls
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|(arguments, _)| arguments[1] != "rm"));
+        }
     }
 
     #[tokio::test]
@@ -1267,6 +1425,8 @@ mod tests {
     #[tokio::test]
     async fn foreign_actor_is_denied_without_create_or_delete() {
         let engine = Arc::new(FakeEngine::default());
+        engine.volume.lock().unwrap().as_mut().unwrap()["Labels"][ACTOR_LABEL] =
+            json!(hex::encode([9; 32]));
         *engine.container.lock().unwrap() =
             Some(container("test-runtime", &hex::encode([9; 32]), None, true));
         let runtime = runtime(engine.clone());

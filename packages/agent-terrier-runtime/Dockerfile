@@ -18,7 +18,8 @@ COPY packages/agent-terrier-runtime/package.json packages/agent-terrier-runtime/
 COPY presets/local-models.json ./presets/local-models.json
 COPY LICENSE NOTICE ./
 COPY LICENSES ./LICENSES
-USER 1000:1000
+RUN node --input-type=module -e 'import { mkdirSync, chownSync, chmodSync } from "node:fs"; import { STATE_DIRECTORY, USER_ID, GROUP_ID } from "./packages/agentkeys-dsh/lib/generated/runtime-layout.js"; mkdirSync(STATE_DIRECTORY, { recursive: true, mode: 0o700 }); chownSync(STATE_DIRECTORY, USER_ID, GROUP_ID); chmodSync(STATE_DIRECTORY, 0o700);'
+USER node
 ENTRYPOINT ["node", "packages/agent-terrier-runtime/start.mjs"]
 
 FROM runtime AS qualification
