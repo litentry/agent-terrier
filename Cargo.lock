@@ -75,6 +75,7 @@ dependencies = [
  "agentkeys-core",
  "agentkeys-mock-server",
  "agentkeys-protocol",
+ "agentkeys-runtime",
  "agentkeys-types",
  "agentkeys-web-core",
  "anyhow",
@@ -88,7 +89,6 @@ dependencies = [
  "hex",
  "hmac",
  "http-body-util",
- "httparse",
  "jsonwebtoken",
  "k256",
  "p256",
@@ -425,6 +425,26 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "agentkeys-runtime"
+version = "0.1.0"
+dependencies = [
+ "agentkeys-core",
+ "agentkeys-protocol",
+ "anyhow",
+ "async-trait",
+ "hex",
+ "httparse",
+ "rand_core 0.6.4",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "subtle",
+ "tempfile",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]

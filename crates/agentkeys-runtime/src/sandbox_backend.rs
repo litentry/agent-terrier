@@ -38,7 +38,7 @@ impl DelegateLocks {
     }
 }
 
-pub(crate) async fn run_detached<T: Send + 'static>(
+pub async fn run_detached<T: Send + 'static>(
     work: impl std::future::Future<Output = T> + Send + 'static,
 ) -> Result<T> {
     tokio::spawn(work)

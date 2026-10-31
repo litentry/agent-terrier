@@ -1,0 +1,23 @@
+[package]
+name = "agentkeys-runtime"
+version = "0.1.0"
+edition = "2021"
+license.workspace = true
+
+[dependencies]
+agentkeys-core = { workspace = true }
+agentkeys-protocol = { workspace = true }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+hex = "0.4"
+httparse = "1"
+rand_core = { version = "0.6", features = ["std"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+subtle = "2.6"
+tokio = { workspace = true }
+
+[dev-dependencies]
+reqwest = { version = "0.12", features = ["json"] }
+tempfile = "3"
+uuid = { version = "1", features = ["v4"] }

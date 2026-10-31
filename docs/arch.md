@@ -18,6 +18,7 @@ This document describes the public source tree. The complete local runtime is st
 | UI tokens and components | `design-system` | `apps/parent-control`, `apps/device-display` |
 | Agent runtime plugins | `packages/agentkeys-dsh` | Agent environments |
 | Local agent composition and image | `packages/agent-terrier-runtime` | Local component development and image qualification |
+| Runtime lifecycle and Docker ownership | `crates/agentkeys-runtime` | Broker and local runtime controllers |
 | Protocol examples | `e2e/fixtures` | Shared drift and conformance checks |
 
 The device-core crate contains reusable protocol and cryptographic primitives. It does not require firmware or a hardware toolchain for the public workspace build.
@@ -101,7 +102,7 @@ Broker session and identity-token key persistence shares a small serialization a
 
 ## Local agent runtime
 
-The broker accepts an injected `SandboxRuntime`; its public composition uses `DockerRuntime`. Agent creation reuses the existing authorized broker routes and create-only credential callback. Docker connects through an explicit local Unix socket, requires the development profile guard, inspects an already-loaded image and creates by immutable image digest with pulling disabled.
+`agentkeys-runtime` owns `SandboxRuntime`, delegate serialization and `DockerRuntime`, including management forwarding and the real-engine qualifier. The broker re-exports that interface for compatibility and accepts an injected implementation. Local controllers can consume the same owner without importing the broker server or duplicating Docker operations. Agent creation reuses the existing authorized broker routes and create-only credential callback. Docker connects through an explicit local Unix socket, requires the development profile guard, inspects an already-loaded image and creates by immutable image digest with pulling disabled.
 
 Each actor runtime runs as an unprivileged user with a read-only root filesystem, limited CPU/memory/processes, temporary writable home and no host or Docker-socket mounts. Container management ports are unpublished. The runtime owns authenticated host-loopback forwarding over Docker stdin/stdout, using the existing endpoint-header contract and the image's `nc` executable. Initial forwarding proof is checked before starting a container stream; application management authorization remains independent. Namespaced device/actor labels are checked before reuse or removal; every device gets a separately labeled bridge network. Required actor identity, exactly one credential and both management bearers are checked before replacement. Network cleanup verifies ownership and refuses networks still in use. Container environment values travel over a pipe, not command arguments or logs; Docker host administrators can still inspect them. This is a local development trust boundary.
 
