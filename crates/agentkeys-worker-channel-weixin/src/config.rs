@@ -444,7 +444,8 @@ impl WeixinGatewayConfig {
             return Err(anyhow!("AGENTKEYS_WEIXIN_TOKEN must be non-empty"));
         }
 
-        let chain_profile = var("AGENTKEYS_CHAIN").unwrap_or_else(|_| "heima".into());
+        let chain_profile = var("AGENTKEYS_CHAIN")
+            .unwrap_or_else(|_| agentkeys_core::chain_profile::DEFAULT_PROFILE.into());
         let registry_variable = format!(
             "SIDECAR_REGISTRY_ADDRESS_{}",
             chain_profile.to_uppercase().replace('-', "_")

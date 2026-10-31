@@ -340,7 +340,11 @@ mod tests {
     use super::*;
 
     fn profile() -> ChainProfile {
-        ChainProfile::load_builtin("heima").unwrap()
+        serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../e2e/fixtures/chain-profiles/local-test.json"
+        )))
+        .unwrap()
     }
 
     fn event(kind: &str) -> ApiAuditEvent {

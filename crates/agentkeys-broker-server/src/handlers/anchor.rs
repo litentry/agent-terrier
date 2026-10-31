@@ -532,10 +532,12 @@ mod contract_resolution_tests {
     use super::*;
     #[test]
     fn audit_reads_and_seals_use_the_stack_contract_without_cross_stack_fallback() {
-        let profile =
-            agentkeys_core::chain_profile::ChainProfile::resolve(Some("heima"), None, None)
-                .unwrap()
-                .0;
+        let profile: agentkeys_core::chain_profile::ChainProfile =
+            serde_json::from_str(include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../e2e/fixtures/chain-profiles/local-test.json"
+            )))
+            .unwrap();
         let registry: [u8; 20] = hex::decode(
             profile
                 .contract("SidecarRegistry")

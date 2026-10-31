@@ -1,0 +1,90 @@
+{
+  "name": "test-chain",
+  "display_name": "Synthetic contract fixture; not a deployment",
+  "chain_id": 31338,
+  "chain_kind": "local-dev",
+  "rpc": {
+    "http": "http://localhost:8545",
+    "wss": "ws://localhost:8545"
+  },
+  "explorer": {
+    "url": "https://explorer.example.test",
+    "tx_url_template": "https://explorer.example.test/tx/{tx_hash}",
+    "address_url_template": "https://explorer.example.test/address/{address}"
+  },
+  "token": {
+    "symbol": "ETH",
+    "decimals": 18
+  },
+  "finality": {
+    "default_block_tag": "latest",
+    "confirmation_blocks": 0,
+    "confirmation_seconds": 0,
+    "notes": "Local development only. Generate throwaway signing material during setup; no signing key is embedded in this profile."
+  },
+  "gas": {
+    "model": "legacy",
+    "max_priority_fee_gwei": 0,
+    "max_fee_gwei": 0
+  },
+  "deploy": {
+    "deployer_env_var": "AGENTKEYS_ANVIL_DEPLOYER_KEY",
+    "foundry_chain_arg": "anvil"
+  },
+  "dev_environment": {
+    "is_development_default": false
+  },
+  "contract_set_version": "test-only",
+  "contracts": [
+    {
+      "name": "AgentKeysScope",
+      "address": "0x0000000000000000000000000000000000000001",
+      "purpose": "Synthetic test address"
+    },
+    {
+      "name": "SidecarRegistry",
+      "address": "0x0000000000000000000000000000000000000002",
+      "purpose": "Synthetic test address"
+    },
+    {
+      "name": "K3EpochCounter",
+      "address": "0x0000000000000000000000000000000000000003",
+      "purpose": "Synthetic test address"
+    },
+    {
+      "name": "CredentialAudit",
+      "address": "0x0000000000000000000000000000000000000004",
+      "purpose": "Synthetic test address"
+    },
+    {
+      "name": "P256Verifier",
+      "address": "0x0000000000000000000000000000000000000005",
+      "purpose": "Synthetic test address"
+    },
+    {
+      "name": "K11Verifier",
+      "address": "0x0000000000000000000000000000000000000006",
+      "purpose": "Synthetic test address"
+    },
+    {
+      "name": "EntryPoint",
+      "address": "0x0000000000000000000000000000000000000007",
+      "purpose": "Synthetic test address"
+    },
+    {
+      "name": "P256AccountFactory",
+      "address": "0x0000000000000000000000000000000000000008",
+      "purpose": "Synthetic test address"
+    },
+    {
+      "name": "VerifyingPaymaster",
+      "address": "0x0000000000000000000000000000000000000009",
+      "purpose": "Synthetic test address"
+    },
+    {
+      "name": "P256Router",
+      "address": "0x000000000000000000000000000000000000000a",
+      "purpose": "Synthetic test address"
+    }
+  ]
+}

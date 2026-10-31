@@ -277,7 +277,7 @@ pub struct UiBridgeState {
     pub register_master_script: Option<String>,
     /// Resolved chain profile (deployed contract registry + explorer + RPC) the
     /// chain-info + audit-decode endpoints serve to the web UI (#153). Resolved
-    /// from `$AGENTKEYS_CHAIN` (default `heima`) at `build_state`.
+    /// from `$AGENTKEYS_CHAIN` (default local profile) at `build_state`.
     pub chain_profile: agentkeys_core::chain_profile::ChainProfile,
     /// Issue #220: the on-disk master-session store rooted at `~/.agentkeys/`.
     /// `Some` ⇒ the master session coordinates persist across daemon restarts and
@@ -972,30 +972,13 @@ pub fn build_state(
     let builder = WebauthnBuilder::new(rp_id, &origin)?.rp_name(rp_name);
     let webauthn = builder.build()?;
     let (audit_tx, _audit_rx) = broadcast::channel::<ApiAuditEvent>(256);
-    // Resolve the chain profile (deployed contract registry + explorer) from
-    // $AGENTKEYS_CHAIN, defaulting to heima mainnet. Drives /v1/chain/info +
-    // /v1/audit/:id/decode (#153). Never hard-fails: an unknown chain name
-    // falls back to the embedded heima profile.
-    let mut chain_profile = match agentkeys_core::chain_profile::ChainProfile::resolve(
+    let (mut chain_profile, _) = agentkeys_core::chain_profile::ChainProfile::resolve(
         None,
         std::env::var("AGENTKEYS_CHAIN").ok().as_deref(),
         std::env::var("AGENTKEYS_CHAIN_PROFILE_FILE")
             .ok()
             .as_deref(),
-    ) {
-        Ok((p, _)) => p,
-        Err(e) => {
-            // codex review #153: don't silently serve heima addresses when the
-            // operator set a bad $AGENTKEYS_CHAIN / profile file — warn loudly so
-            // /v1/chain/info isn't trusted as the wrong chain.
-            tracing::warn!(
-                error = %e,
-                "ui-bridge: chain profile resolution failed; falling back to heima — \
-                 /v1/chain/info will show heima addresses regardless of the requested chain"
-            );
-            agentkeys_core::chain_profile::ChainProfile::load_builtin("heima")?
-        }
-    };
+    )?;
     // The daemon was the ONLY component sourcing its RPC from the compiled chain profile;
     // the broker (accept.rs/cap.rs), every worker (state.rs) and the bundler all read
     // AGENTKEYS_CHAIN_RPC_HTTP from their env. Read the same var here (dev.sh sources it
@@ -5189,13 +5172,7 @@ fn profile_is_supported(p: &agentkeys_core::chain_profile::ChainProfile) -> bool
 /// profile name (`-`→`_`), with bare `AGENTKEYS_CHAIN_RPC_HTTP` as the fallback. Unset /
 /// blank ⇒ `None` (caller keeps the profile default). Pure (lookup injected) so it's
 /// testable without mutating process env (#258).
-fn chain_rpc_from_env(chain_name: &str, lookup: impl Fn(&str) -> Option<String>) -> Option<String> {
-    let suffix = chain_name.to_uppercase().replace('-', "_");
-    lookup(&format!("AGENTKEYS_CHAIN_RPC_HTTP_{suffix}"))
-        .or_else(|| lookup("AGENTKEYS_CHAIN_RPC_HTTP"))
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-}
+use agentkeys_core::chain_profile::rpc_http_override as chain_rpc_from_env;
 
 /// Resolve which profile `GET /v1/chain/info` serves: the daemon's
 /// operational profile by default, or any SUPPORTED built-in profile when
@@ -5253,81 +5230,48 @@ mod actor_kind_tests {
 
 #[cfg(test)]
 mod chain_view_tests {
-    use super::resolve_view_profile;
+    use super::{chain_rpc_from_env, resolve_view_profile};
     use agentkeys_core::chain_profile::ChainProfile;
 
     #[test]
-    fn default_serves_the_daemon_profile() {
-        let daemon = ChainProfile::load_builtin("heima").unwrap();
-        let p = resolve_view_profile(&daemon, None).unwrap();
-        assert_eq!(p.name, "heima");
-        let p = resolve_view_profile(&daemon, Some("")).unwrap();
-        assert_eq!(p.name, "heima");
+    fn local_profile_is_viewable_without_a_deployed_registry() {
+        let profile = ChainProfile::load_builtin("anvil").unwrap();
+        for name in [None, Some(""), Some("ANVIL")] {
+            assert_eq!(resolve_view_profile(&profile, name).unwrap().name, "anvil");
+        }
     }
 
     #[test]
-    fn view_chain_serves_any_builtin_without_touching_daemon_profile() {
-        let daemon = ChainProfile::load_builtin("heima").unwrap();
-        let p = resolve_view_profile(&daemon, Some("base")).unwrap();
-        assert_eq!(p.chain_id, 8453);
-        assert_eq!(daemon.name, "heima");
-    }
-
-    #[test]
-    fn same_name_is_case_insensitive_and_keeps_the_daemon_copy() {
-        let daemon = ChainProfile::load_builtin("heima").unwrap();
-        let p = resolve_view_profile(&daemon, Some("HEIMA")).unwrap();
-        assert_eq!(p.chain_id, daemon.chain_id);
-    }
-
-    #[test]
-    fn unknown_chain_is_an_error_naming_the_builtins() {
-        let daemon = ChainProfile::load_builtin("heima").unwrap();
-        let e = resolve_view_profile(&daemon, Some("doesnotexist")).unwrap_err();
-        assert!(e.contains("doesnotexist"));
-        assert!(e.contains("heima"));
-    }
-
-    #[test]
-    fn chain_rpc_from_env_matches_broker_precedence() {
-        use super::chain_rpc_from_env;
-        use std::collections::HashMap;
-        // chain-suffixed wins — the same var the broker/workers/bundler read.
-        let base: HashMap<&str, &str> = [(
-            "AGENTKEYS_CHAIN_RPC_HTTP_BASE",
-            "https://base-rpc.publicnode.com",
-        )]
-        .into();
+    fn explicit_custom_profile_is_retained_and_unknown_views_fail() {
+        let mut profile = ChainProfile::load_builtin("anvil").unwrap();
+        profile.name = "custom-local".into();
+        profile.chain_id = 31338;
         assert_eq!(
-            chain_rpc_from_env("base", |k| base.get(k).map(|v| v.to_string())),
-            Some("https://base-rpc.publicnode.com".into())
+            resolve_view_profile(&profile, Some("CUSTOM-LOCAL"))
+                .unwrap()
+                .chain_id,
+            31338
         );
-        // bare var is the fallback when no chain-suffixed override is set.
-        let bare: HashMap<&str, &str> = [("AGENTKEYS_CHAIN_RPC_HTTP", "https://x")].into();
+        assert!(resolve_view_profile(&profile, Some("unknown")).is_err());
+        assert!(resolve_view_profile(&profile, Some("anvil"))
+            .unwrap_err()
+            .contains("no deployed AgentKeys contract set"));
+    }
+
+    #[test]
+    fn chain_rpc_override_precedence_matches_the_shared_convention() {
+        let values = std::collections::HashMap::from([
+            ("AGENTKEYS_CHAIN_RPC_HTTP_ANVIL", "http://localhost:18545"),
+            ("AGENTKEYS_CHAIN_RPC_HTTP", "http://localhost:28545"),
+        ]);
         assert_eq!(
-            chain_rpc_from_env("heima", |k| bare.get(k).map(|v| v.to_string())),
-            Some("https://x".into())
+            chain_rpc_from_env("anvil", |key| values
+                .get(key)
+                .map(|value| value.to_string())),
+            Some("http://localhost:18545".into())
         );
-        // unset ⇒ None (caller keeps the profile default); blank ⇒ None.
-        assert_eq!(chain_rpc_from_env("base", |_| None), None);
-        assert_eq!(chain_rpc_from_env("base", |_| Some("  ".into())), None);
-    }
-
-    #[test]
-    fn builtin_without_a_deployed_registry_is_not_viewable() {
-        // ethereum/sepolia/anvil ship as profiles but carry no AgentKeys
-        // contract set — the switcher must not offer or serve them.
-        let daemon = ChainProfile::load_builtin("heima").unwrap();
-        let e = resolve_view_profile(&daemon, Some("ethereum")).unwrap_err();
-        assert!(e.contains("no deployed AgentKeys contract set"));
-    }
-
-    #[test]
-    fn the_daemon_own_chain_is_always_viewable_even_without_a_registry() {
-        // A dev daemon on anvil must still see its own chain page.
-        let daemon = ChainProfile::load_builtin("anvil").unwrap();
-        let p = resolve_view_profile(&daemon, Some("anvil")).unwrap();
-        assert_eq!(p.name, "anvil");
+        assert_eq!(chain_rpc_from_env("anvil", |_| None), None);
+        assert_eq!(chain_rpc_from_env("anvil", |_| Some("  ".into())), None);
     }
 }
 
@@ -5554,28 +5498,23 @@ async fn stack_list(State(state): State<SharedUiBridgeState>) -> Json<serde_json
     }))
 }
 
-/// `GET /v1/chain/list` — the SUPPORTED chains (profiles with a deployed
-/// AgentKeys contract set — heima + base mainnet today) plus which one the
-/// daemon operates on; the daemon's own chain is always included. Backs the
-/// web chain switcher; selecting a chain is per-request via
-/// `/v1/chain/info?chain=`, never daemon state.
+/// List supported built-ins and the daemon's resolved operational profile.
 async fn chain_list(State(state): State<SharedUiBridgeState>) -> Json<serde_json::Value> {
-    let chains: Vec<serde_json::Value> =
+    let profiles = std::iter::once(state.chain_profile.clone()).chain(
         agentkeys_core::chain_profile::ChainProfile::list_builtin_names()
             .into_iter()
-            .filter_map(|n| agentkeys_core::chain_profile::ChainProfile::load_builtin(n).ok())
-            .filter(|p| {
-                profile_is_supported(p) || p.name.eq_ignore_ascii_case(&state.chain_profile.name)
+            .filter(|name| !name.eq_ignore_ascii_case(&state.chain_profile.name))
+            .filter_map(|name| agentkeys_core::chain_profile::ChainProfile::load_builtin(name).ok())
+            .filter(profile_is_supported),
+    );
+    let chains: Vec<serde_json::Value> = profiles
+        .map(|profile| {
+            serde_json::json!({
+                "name": profile.name, "display": profile.display_name, "chainId": profile.chain_id,
+                "contracts": profile.contracts.len(),
             })
-            .map(|p| {
-                serde_json::json!({
-                    "name": p.name,
-                    "display": p.display_name,
-                    "chainId": p.chain_id,
-                    "contracts": p.contracts.len(),
-                })
-            })
-            .collect();
+        })
+        .collect();
     Json(serde_json::json!({
         "chains": chains,
         "daemonChain": state.chain_profile.name,
@@ -16513,11 +16452,14 @@ mod tests {
     /// `master_reset_tears_down_the_fleet` connection-refused flake), or worse,
     /// still alive and serving a foreign fleet.
     fn set_chain_rpc(state: &mut SharedUiBridgeState, rpc: &str) {
-        Arc::get_mut(state)
-            .expect("set_chain_rpc must run before the state Arc is cloned")
-            .chain_profile
-            .rpc
-            .http = rpc.to_string();
+        let state =
+            Arc::get_mut(state).expect("set_chain_rpc must run before the state Arc is cloned");
+        state.chain_profile = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../e2e/fixtures/chain-profiles/local-test.json"
+        )))
+        .unwrap();
+        state.chain_profile.rpc.http = rpc.to_string();
     }
 
     #[tokio::test]
@@ -17887,54 +17829,37 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn chain_info_view_chain_and_list_back_the_web_switcher() {
-        // #282 web chain switcher: ?chain= serves any built-in VIEW profile,
-        // daemonChain always names the operational chain, unknown names 400,
-        // and /v1/chain/list enumerates the built-ins.
-        let state = make_state();
-        let daemon_name = state.chain_profile.name.clone();
-        let v = chain_info(
-            State(state.clone()),
-            axum::extract::Query(ChainInfoQuery {
-                chain: Some("base".into()),
-            }),
-        )
-        .await
-        .expect("base is a built-in")
-        .0;
-        assert_eq!(v["chainId"], serde_json::json!(8453));
-        assert_eq!(v["daemonChain"], serde_json::json!(daemon_name.clone()));
-
-        let bad = chain_info(
-            State(state.clone()),
-            axum::extract::Query(ChainInfoQuery {
-                chain: Some("doesnotexist".into()),
-            }),
-        )
-        .await;
-        assert!(bad.is_err(), "unknown view chain must be a 400");
-
-        let list = chain_list(State(state)).await.0;
-        assert_eq!(list["daemonChain"], serde_json::json!(daemon_name));
-        let names: Vec<&str> = list["chains"]
-            .as_array()
-            .expect("chains array")
-            .iter()
-            .map(|c| c["name"].as_str().unwrap())
-            .collect();
-        // Only chains with a deployed AgentKeys contract set are offered —
-        // heima + base mainnet today; never the registry-less built-ins.
-        assert!(names.contains(&"heima"), "heima listed: {names:?}");
-        assert!(names.contains(&"base"), "base listed: {names:?}");
-        assert!(
-            !names.contains(&"ethereum"),
-            "ethereum not supported: {names:?}"
-        );
-        assert!(!names.contains(&"anvil"), "anvil not supported: {names:?}");
-        assert!(
-            !names.contains(&"base-sepolia"),
-            "base-sepolia not supported: {names:?}"
-        );
+    async fn chain_info_and_list_use_the_resolved_local_or_custom_profile() {
+        for use_custom in [false, true] {
+            let mut state = make_state();
+            if use_custom {
+                set_chain_rpc(&mut state, "http://localhost:1");
+            }
+            let name = state.chain_profile.name.clone();
+            let view = chain_info(
+                State(state.clone()),
+                axum::extract::Query(ChainInfoQuery {
+                    chain: Some(name.clone()),
+                }),
+            )
+            .await
+            .unwrap()
+            .0;
+            assert_eq!(view["chainId"], state.chain_profile.chain_id);
+            assert_eq!(view["daemonChain"], name);
+            let bad = chain_info(
+                State(state.clone()),
+                axum::extract::Query(ChainInfoQuery {
+                    chain: Some("unknown".into()),
+                }),
+            )
+            .await;
+            assert!(bad.is_err());
+            let list = chain_list(State(state)).await.0;
+            assert_eq!(list["daemonChain"], name);
+            assert_eq!(list["chains"].as_array().unwrap().len(), 1);
+            assert_eq!(list["chains"][0]["name"], name);
+        }
     }
 
     // Convince clippy the sync helper isn't dead code.

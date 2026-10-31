@@ -1,7 +1,7 @@
 //! Worker process state — environment-driven config + shared S3 client.
 //!
 //! Per arch.md §22a, contract addresses are chain-profile-scoped. The
-//! worker reads `AGENTKEYS_CHAIN` (default `heima`), uppercases it with
+//! worker reads `AGENTKEYS_CHAIN` (default local profile), uppercases it with
 //! `-` → `_`, and looks up env keys `{NAME}_{PROFILE_UC}`. This matches
 //! the layout `scripts/operator-workstation.env` writes via env_set in
 //! `scripts/operator/chain/heima-bring-up.sh` step 6.
@@ -28,8 +28,8 @@ pub struct WorkerConfig {
 
 impl WorkerConfig {
     pub fn from_env() -> anyhow::Result<Self> {
-        let chain_profile =
-            std::env::var("AGENTKEYS_CHAIN").unwrap_or_else(|_| "heima".to_string());
+        let chain_profile = std::env::var("AGENTKEYS_CHAIN")
+            .unwrap_or_else(|_| agentkeys_core::chain_profile::DEFAULT_PROFILE.to_string());
         let profile_uc = chain_profile.to_uppercase().replace('-', "_");
 
         let vault_bucket = std::env::var("VAULT_BUCKET").context("VAULT_BUCKET must be set")?;

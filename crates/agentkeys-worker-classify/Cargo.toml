@@ -13,6 +13,7 @@ name = "agentkeys_worker_classify"
 path = "src/lib.rs"
 
 [dependencies]
+agentkeys-core = { workspace = true }
 agentkeys-protocol = { workspace = true }
 # Reuse the shared cap-verify chain + error helpers from the credentials
 # worker. The classifier is a COMPUTE gate (#178 §15.6): same cap + chain-verify

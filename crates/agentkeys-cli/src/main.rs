@@ -58,7 +58,7 @@ struct Cli {
     #[arg(
         long,
         env = "AGENTKEYS_CHAIN",
-        help = "v2 stage 1 — which EVM chain backbone to talk to. Built-in profiles: heima (default), heima-paseo, base, base-sepolia, ethereum, sepolia, anvil. Operator-custom chains: set $AGENTKEYS_CHAIN_PROFILE_FILE to a JSON file path. Run `agentkeys chain list` to enumerate built-ins; `agentkeys chain show <name>` to inspect one."
+        help = "v2 stage 1 — which EVM chain backbone to talk to. Built-in profile: anvil (local default). Operator-custom chains: set $AGENTKEYS_CHAIN_PROFILE_FILE to a JSON file path. Run `agentkeys chain list` to enumerate built-ins; `agentkeys chain show <name>` to inspect one."
     )]
     chain: Option<String>,
 
@@ -286,7 +286,7 @@ enum Commands {
 
     #[command(
         about = "Inspect available EVM chain profiles (v2 stage 1)",
-        long_about = "AgentKeys's chain layer is pluggable per arch.md §22. Each named profile bundles chain ID, RPC endpoints, explorer URL, finality model, and gas config. Use --chain <name> on the top-level CLI to select one for any chain-aware operation (device register, scope grant, contract deploy). The 'list' subcommand prints all built-ins; 'show' dumps one profile's full JSON.\n\nOperator-custom chains: ship your own JSON and point at it via $AGENTKEYS_CHAIN_PROFILE_FILE.\n\nExamples:\n  agentkeys chain list\n  agentkeys chain show heima\n  agentkeys --chain base chain show"
+        long_about = "Chain configuration uses a local default or an explicit custom profile. Each named profile bundles chain ID, RPC endpoints, explorer URL, finality model, and gas config. Use --chain <name> on the top-level CLI to select one for any chain-aware operation (device register, scope grant, contract deploy). The 'list' subcommand prints all built-ins; 'show' dumps one profile's full JSON.\n\nOperator-custom chains: ship your own JSON and point at it via $AGENTKEYS_CHAIN_PROFILE_FILE.\n\nExamples:\n  agentkeys chain list\n  agentkeys chain show anvil\n  agentkeys --chain anvil chain show"
     )]
     Chain {
         #[command(subcommand)]
@@ -294,8 +294,8 @@ enum Commands {
     },
 
     #[command(
-        about = "K11 (WebAuthn) enrollment + assertion (v2 stage 1 — stub mode)",
-        long_about = "Real WebAuthn ceremony or deterministic stub.\n\nReal mode (--webauthn): opens the operator's default browser, runs the platform-authenticator ceremony (macOS: Touch ID against the Secure Enclave passkey), persists the real attested credential to ~/.agentkeys/k11/<omni>.json. The assert path binds to the application message via challenge = sha256(message), producing a real WebAuthn assertion verifiable off-chain today and on-chain after Heima ships EIP-7212 P-256 precompile.\n\nStub mode (default — for CI / non-attested envs): produces deterministic bytes that just satisfy the on-chain `k11Assertion.length != 0` gate (per arch.md §22b.1 stage-1 simplifications inventory). On mainnet (AGENTKEYS_CHAIN=heima) stub mode prints a WARN.\n\nExamples:\n  agentkeys k11 enroll  --webauthn --operator-omni 0x<64-hex>\n  agentkeys k11 assert  --webauthn --operator-omni 0x<64-hex> --message-hex 0xdeadbeef\n  agentkeys k11 enroll  --operator-omni 0x<64-hex>     # stub (CI)\n  agentkeys k11 assert  --operator-omni 0x<64-hex> --message-hex 0xdeadbeef"
+        about = "K11 WebAuthn enrollment and development passkey tools",
+        long_about = "Hardware WebAuthn or explicitly enabled local development credentials. Software passkeys require AGENT_TERRIER_LOCAL_DEV=1, a local development chain profile and a loopback RPC endpoint. Deterministic parser-test stubs additionally require AGENTKEYS_K11_STUB=1; they do not prove authorization. Use software-keygen/software-sign for real local P-256 signatures, or --webauthn for hardware authentication."
     )]
     K11 {
         #[command(subcommand)]
@@ -1359,40 +1359,13 @@ async fn cmd_chain(ctx: &CommandContext, action: &ChainAction) -> anyhow::Result
     }
 }
 
-/// `agentkeys k11 enroll/assert` — stage-1 stub mode by default.
-///
-/// Stage-1 simplification per arch.md §22b.1 (stage-1 simplifications
-/// inventory — K11 stub bytes; issue #90 for stage-2 hardening): deterministic stub bytes
-/// satisfy the on-chain `k11Assertion.length != 0` gate without a real
-/// WebAuthn authenticator. Stage 2 (#90) swaps in `webauthn-rs` + Touch ID.
-///
-/// Stub-mode toggle: `AGENTKEYS_K11_STUB=1` (default). Setting it to `0`
-/// errors out today — real WebAuthn is a stage-2 deliverable.
-async fn cmd_k11(action: &K11Action) -> anyhow::Result<String> {
-    // Software WebAuthn authenticator (#164 headless/CI) — real P-256 crypto, NOT
-    // the stub and NOT the EOA path, so it bypasses the stub-mode gating below.
+async fn cmd_k11(ctx: &CommandContext, action: &K11Action) -> anyhow::Result<String> {
     if matches!(
         action,
         K11Action::SoftwareKeygen { .. } | K11Action::SoftwareSign { .. }
     ) {
-        // Load-bearing security notice → STDERR (stdout is eval-able by the harness).
-        // The software passkey signs with an ON-DISK P-256 key: no Secure-Enclave
-        // boundary and no biometric gate, so anyone who can read the key file can sign
-        // as this credential. It is a CI / headless / throwaway-TEST stand-in ONLY — it
-        // does NOT forge a hardware K11 (a different keypair lives in the Secure Enclave;
-        // the on-chain registry binds to that pubkey). A real operator master MUST use a
-        // hardware authenticator (`agentkeys k11 enroll --webauthn` → Touch ID). The
-        // cryptographic enforcement that REFUSES a software credential at master
-        // enrollment — WebAuthn attestation verification — is the stage-2 (#90) hardening
-        // (arch.md §22b.1); until it lands, the software path is fenced by policy.
-        eprintln!(
-            "==> ⚠️  WARN: software P-256 passkey — the key is ON DISK (no hardware \
-             boundary, no biometric). Anyone who can read the key file can sign as this \
-             credential, so use it for CI / headless / throwaway-TEST masters ONLY. A real \
-             operator master MUST use a hardware authenticator (`agentkeys k11 enroll \
-             --webauthn`, Touch ID). It does NOT impersonate a hardware K11 — it signs with \
-             its own keypair. See arch.md §9 / §22b.1 (attestation verification = stage-2 #90)."
-        );
+        ctx.require_local_development()?;
+        eprintln!("Development software passkey: local test use only; no hardware protection.");
     }
     match action {
         K11Action::SoftwareKeygen {
@@ -1455,8 +1428,8 @@ async fn cmd_k11(action: &K11Action) -> anyhow::Result<String> {
     }
 
     let stub_env = std::env::var("AGENTKEYS_K11_STUB")
-        .map(|v| v != "0")
-        .unwrap_or(true);
+        .map(|value| value == "1")
+        .unwrap_or(false);
 
     // Resolve mode: --webauthn flag wins over AGENTKEYS_K11_STUB env.
     let use_webauthn = matches!(
@@ -1472,38 +1445,9 @@ async fn cmd_k11(action: &K11Action) -> anyhow::Result<String> {
         );
     }
 
-    // Stage-1 stub-on-mainnet protection (codex audit follow-up):
-    //   chain == heima + stub mode + no explicit opt-in → HARD ERROR.
-    //   chain == heima + stub mode + AGENTKEYS_ALLOW_STAGE1_STUBS=1 → WARN.
-    //   other chains (heima-paseo, anvil, etc.) + stub mode → no message
-    //     (it's the expected dev/CI behaviour).
-    // Per arch.md §22b.1 — stage-1 simplifications inventory.
     if !use_webauthn {
-        let chain = std::env::var("AGENTKEYS_CHAIN").unwrap_or_else(|_| "heima".into());
-        let allow_stubs = std::env::var("AGENTKEYS_ALLOW_STAGE1_STUBS")
-            .map(|v| v != "0")
-            .unwrap_or(false);
-        if chain == "heima" {
-            if !allow_stubs {
-                anyhow::bail!(
-                    "K11 stub mode is NOT permitted on chain=heima (mainnet). The stub \
-                     bytes only satisfy the on-chain k11Assertion.length != 0 gate — they \
-                     are not a real WebAuthn assertion and any operator who reads them \
-                     later cannot distinguish them from a real ceremony. \
-                     \n\nOptions: \
-                     \n  1. Pass --webauthn for a real Touch ID ceremony (recommended). \
-                     \n  2. Set AGENTKEYS_ALLOW_STAGE1_STUBS=1 to opt into stub mode \
-                     (emits a WARN; for staging/test runs only). \
-                     \n  3. Switch to AGENTKEYS_CHAIN=heima-paseo or anvil for dev work. \
-                     \n\nSee arch.md §22b.1 + issue #90 for stage-2 hardening."
-                );
-            }
-            eprintln!(
-                "==> ⚠️  WARN: K11 stub mode active on chain={chain} (AGENTKEYS_ALLOW_STAGE1_STUBS=1). \
-                 The bytes you're about to produce are NOT a real WebAuthn assertion. \
-                 See arch.md §22b.1 + issue #90."
-            );
-        }
+        ctx.require_local_development()?;
+        eprintln!("Development stub assertion: no cryptographic proof; use software-sign for real local authorization.");
     }
 
     match action {
@@ -1827,7 +1771,7 @@ async fn main() {
             } => cmd_signer_preview_7730(&ctx, typed_data_file, seven_thirty_file.as_deref()).await,
         },
         Commands::Chain { action } => cmd_chain(&ctx, action).await,
-        Commands::K11 { action } => cmd_k11(action).await,
+        Commands::K11 { action } => cmd_k11(&ctx, action).await,
         Commands::Memory { action } => match action {
             MemoryAction::CanonicalGet {
                 namespace,

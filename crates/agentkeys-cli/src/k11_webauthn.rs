@@ -1807,6 +1807,70 @@ fn derive_p256_signing_key_from_seed_file(
     ))
 }
 
+fn read_software_passkey(path: &str) -> Result<zeroize::Zeroizing<String>, WebauthnError> {
+    use std::io::Read;
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    let mut file = options
+        .open(path)
+        .map_err(|error| WebauthnError::Io(error.to_string()))?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| WebauthnError::Io(error.to_string()))?;
+    if !metadata.is_file() {
+        return Err(WebauthnError::Io(
+            "development passkey must be a regular file".into(),
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        if metadata.permissions().mode() & 0o077 != 0
+            || metadata.nlink() != 1
+            || metadata.uid() != unsafe { libc::geteuid() }
+        {
+            return Err(WebauthnError::Io(
+                "development passkey must be owner-only, owned by this user and have no hard links"
+                    .into(),
+            ));
+        }
+    }
+    #[cfg(not(unix))]
+    return Err(WebauthnError::Io(
+        "development passkey storage requires Unix file permissions".into(),
+    ));
+    let mut contents = zeroize::Zeroizing::new(String::new());
+    file.read_to_string(&mut contents)
+        .map_err(|error| WebauthnError::Io(error.to_string()))?;
+    Ok(contents)
+}
+
+fn write_new_software_passkey(path: &str, pem: &[u8]) -> Result<(), WebauthnError> {
+    use std::io::Write;
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    #[cfg(not(unix))]
+    return Err(WebauthnError::Io(
+        "development passkey storage requires Unix file permissions".into(),
+    ));
+    let mut file = options
+        .open(path)
+        .map_err(|error| WebauthnError::Io(error.to_string()))?;
+    file.write_all(pem)
+        .and_then(|()| file.sync_all())
+        .map_err(|error| WebauthnError::Io(error.to_string()))
+}
+
 /// Like [`software_webauthn_keygen`], but when the key file does NOT exist and
 /// `derive_from` is given, the new key is derived deterministically from the
 /// seed file instead of `OsRng` — same seed file → same passkey → same
@@ -1821,7 +1885,7 @@ pub fn software_webauthn_keygen_with_derive(
     use p256::ecdsa::SigningKey;
     use p256::pkcs8::{DecodePrivateKey, EncodePrivateKey, LineEnding};
     let signing = if std::path::Path::new(key_file).exists() {
-        let pem = fs::read_to_string(key_file).map_err(|e| WebauthnError::Io(e.to_string()))?;
+        let pem = read_software_passkey(key_file)?;
         SigningKey::from_pkcs8_pem(&pem).map_err(|e| WebauthnError::Io(format!("load key: {e}")))?
     } else {
         let sk = match derive_from {
@@ -1836,7 +1900,7 @@ pub fn software_webauthn_keygen_with_derive(
         let pem = sk
             .to_pkcs8_pem(LineEnding::LF)
             .map_err(|e| WebauthnError::Io(format!("encode key: {e}")))?;
-        fs::write(key_file, pem.as_bytes()).map_err(|e| WebauthnError::Io(e.to_string()))?;
+        write_new_software_passkey(key_file, pem.as_bytes())?;
         sk
     };
     let pt = signing.verifying_key().to_encoded_point(false); // 0x04 || X(32) || Y(32)
@@ -1864,7 +1928,7 @@ pub fn software_webauthn_sign(
 ) -> Result<(String, String, usize, String, String), WebauthnError> {
     use p256::ecdsa::{signature::hazmat::PrehashSigner, SigningKey};
     use p256::pkcs8::DecodePrivateKey;
-    let pem = fs::read_to_string(key_file).map_err(|e| WebauthnError::Io(e.to_string()))?;
+    let pem = read_software_passkey(key_file)?;
     let signing = SigningKey::from_pkcs8_pem(&pem)
         .map_err(|e| WebauthnError::Io(format!("load key: {e}")))?;
     let uoh = hex::decode(userop_hash_hex.trim_start_matches("0x"))
@@ -2016,7 +2080,8 @@ mod tests {
         use p256::ecdsa::{Signature, VerifyingKey};
 
         let rp_id = "localhost";
-        let key_file = std::env::temp_dir().join("ak-software-passkey-roundtrip.key");
+        let directory = tempfile::tempdir().unwrap();
+        let key_file = directory.path().join("software-passkey.key");
         let key = key_file.to_string_lossy().to_string();
         let _ = fs::remove_file(&key); // start fresh → exercises the generate branch
 
@@ -2074,7 +2139,8 @@ mod tests {
     // on every run, or the registered P256Account master becomes unsignable.
     #[test]
     fn software_passkey_derive_from_is_deterministic_and_seed_separated() {
-        let dir = std::env::temp_dir();
+        let directory = tempfile::tempdir().unwrap();
+        let dir = directory.path();
         let seed_a = dir.join("ak-derive-seed-a");
         let seed_b = dir.join("ak-derive-seed-b");
         // Raw-hex deployer-key shape; trailing newline on one write exercises trimming.
