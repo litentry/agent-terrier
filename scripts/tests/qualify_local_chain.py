@@ -20,7 +20,7 @@ def available_port():
         return listener.getsockname()[1]
 
 
-class RealChainTests(unittest.TestCase):
+class LocalChainFixture(unittest.TestCase):
     def invoke(self, state, *arguments, success=True, forge=None):
         environment = contracts.tool_environment()
         environment["AGENT_TERRIER_STATE_DIR"] = str(state)
@@ -36,6 +36,8 @@ class RealChainTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         return result
 
+
+class RealChainTests(LocalChainFixture):
     def test_real_node_restart_preserves_state_and_other_nodes_are_untouched(self):
         with tempfile.TemporaryDirectory(prefix="terrier-chain-", dir="/tmp") as directory:
             state = Path(directory).resolve() / "state"

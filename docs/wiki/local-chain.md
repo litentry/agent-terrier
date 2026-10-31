@@ -19,6 +19,8 @@ Run locally from the repository root:
 
 The result includes the generated `chain-profile.json` path for `AGENTKEYS_CHAIN_PROFILE_FILE`. The deployment command rechecks the running node's chain ID, client identity, instance and lack of unlocked accounts. Repeating deployment with the same contract version checks the existing contracts and writes no chain transactions. A version mismatch stops for an explicit migration or reset decision; it never redeploys automatically.
 
+Software passkey operations require `AGENT_TERRIER_LOCAL_DEV=1` and a local profile. Agent and application signing commands also require a loopback service and verify the returned operation against that profile's deployed EntryPoint and chain ID before reading the passkey. An unconfigured profile, remote service, different chain or modified operation hash is refused. Full application services and onboarding remain under development.
+
 ## State and development trust
 
 State defaults to the `agent-terrier` directory under `XDG_STATE_HOME`, or `~/.local/state` when that variable is unset. Set `AGENT_TERRIER_STATE_DIR` to select a different directory **outside the repository**. Keep the path short enough for a Unix control socket. Source-contained state paths are rejected.
@@ -57,3 +59,12 @@ python3 scripts/tests/qualify_local_chain.py
 ```
 
 The real suite starts temporary owned nodes, deploys contracts with downloads disabled, checks constructor wiring, submits authorized and unauthorized signed transactions, checks the unauthorized receipt and unchanged protected state, verifies persistence and idempotence, and recovers a completed broadcast whose process reported failure. This suite does not yet qualify full identity onboarding, grant/revocation flows or the complete application.
+
+To verify actual CLI-generated P-256 assertions against the deployed verifier, run locally from the repository root:
+
+```sh
+cargo build -p agentkeys-cli
+python3 scripts/tests/qualify_local_signing.py
+```
+
+Set `AGENT_TERRIER_CLI` when using a different executable path. This test requires the downloaded contract dependencies and compiler. It checks a valid assertion, wrong-key rejection, tampered-challenge rejection and private key-file permissions, without using a browser or a deterministic signing stub.

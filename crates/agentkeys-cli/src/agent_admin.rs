@@ -16,6 +16,7 @@ use serde_json::{json, Value};
 
 fn client() -> Result<reqwest::Client> {
     reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
         .timeout(std::time::Duration::from_secs(20))
         .build()
         .context("build http client")
@@ -114,6 +115,7 @@ pub async fn agent_pending_value(broker_url: &str, session_bearer: &str) -> Resu
 /// no runtime).
 #[allow(clippy::too_many_arguments)]
 pub async fn agent_accept(
+    development: &crate::development_signing::DevelopmentSigning,
     broker_url: &str,
     request_id: &str,
     services_csv: &str,
@@ -123,8 +125,9 @@ pub async fn agent_accept(
     operator_omni_flag: &str,
     session_bearer: &str,
 ) -> Result<String> {
+    development.require_local_service(broker_url)?;
     use agentkeys_backend_client::protocol::{
-        channel_grant_count, scope_is_device_only, AcceptAssertion, BuildAcceptUserOpRequest,
+        channel_grant_count, scope_is_device_only, BuildAcceptUserOpRequest,
         BuildAcceptUserOpResponse, SubmitAcceptUserOpRequest,
     };
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -226,28 +229,15 @@ pub async fn agent_accept(
     }
     let built: BuildAcceptUserOpResponse =
         serde_json::from_str(&text).with_context(|| format!("parse build: {text}"))?;
+    development.verify_build(
+        &built.user_op,
+        &built.user_op_hash,
+        &built.entry_point,
+        built.chain_id,
+    )?;
     let user_op_hash = built.user_op_hash.clone();
 
-    // 2. Sign the userOpHash with the SOFTWARE passkey (headless K11 stand-in).
-    let (auth_hex, cdj_hex, _loc, r_hex, s_hex) =
-        crate::k11_webauthn::software_webauthn_sign(k11_key_file, &user_op_hash, rp_id)
-            .map_err(|e| anyhow!("software-sign: {e}"))?;
-    let r = hex::decode(&r_hex).context("r hex")?;
-    let s = hex::decode(&s_hex).context("s hex")?;
-    let sig = p256::ecdsa::Signature::from_scalars(
-        *p256::FieldBytes::from_slice(&r),
-        *p256::FieldBytes::from_slice(&s),
-    )
-    .map_err(|e| anyhow!("(r,s) → signature: {e}"))?;
-    let assertion = AcceptAssertion {
-        authenticator_data: URL_SAFE_NO_PAD.encode(hex::decode(&auth_hex).context("authData hex")?),
-        client_data_json: URL_SAFE_NO_PAD
-            .encode(hex::decode(&cdj_hex).context("clientDataJSON hex")?),
-        signature: URL_SAFE_NO_PAD.encode(sig.to_der().as_bytes()),
-        // Informational only — the broker binds the operator-derived credIdHash,
-        // never keccak(rawId) (see broker accept_assertion.rs).
-        credential_id: URL_SAFE_NO_PAD.encode(b"software-passkey"),
-    };
+    let assertion = software_assertion(development, k11_key_file, &user_op_hash, rp_id)?;
 
     // 3. Submit → EntryPoint.handleOps (blocks through the broker's receipt poll).
     let submit_body = SubmitAcceptUserOpRequest {
@@ -302,6 +292,7 @@ pub async fn agent_accept(
 /// an on-disk P-256 key, never a hardware K11). Shared by the broker-direct
 /// ceremonies here and the daemon-routed `agentkeys app` verbs (#664).
 pub fn software_assertion(
+    development: &crate::development_signing::DevelopmentSigning,
     k11_key_file: &str,
     user_op_hash: &str,
     rp_id: &str,
@@ -310,7 +301,7 @@ pub fn software_assertion(
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use base64::Engine;
     let (auth_hex, cdj_hex, _loc, r_hex, s_hex) =
-        crate::k11_webauthn::software_webauthn_sign(k11_key_file, user_op_hash, rp_id)
+        crate::k11_webauthn::software_webauthn_sign(development, k11_key_file, user_op_hash, rp_id)
             .map_err(|e| anyhow!("software-sign: {e}"))?;
     let r = hex::decode(&r_hex).context("r hex")?;
     let s = hex::decode(&s_hex).context("s hex")?;
@@ -327,7 +318,9 @@ pub fn software_assertion(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn software_sign_and_submit(
+    development: &crate::development_signing::DevelopmentSigning,
     base: &str,
     bearer: &str,
     k11_key_file: &str,
@@ -337,7 +330,7 @@ async fn software_sign_and_submit(
     submit_path: &str,
 ) -> Result<Value> {
     use agentkeys_backend_client::protocol::SubmitAcceptUserOpRequest;
-    let assertion = software_assertion(k11_key_file, user_op_hash, rp_id)?;
+    let assertion = software_assertion(development, k11_key_file, user_op_hash, rp_id)?;
     let submit_body = SubmitAcceptUserOpRequest { user_op, assertion };
     let resp = client()?
         .post(format!("{base}{submit_path}"))
@@ -363,6 +356,7 @@ async fn software_sign_and_submit(
 /// agent" flow (#429), so CI + operators exercise the ceremony with no browser.
 #[allow(clippy::too_many_arguments)]
 pub async fn agent_spawn(
+    development: &crate::development_signing::DevelopmentSigning,
     broker_url: &str,
     label: &str,
     preset_id: &str,
@@ -372,6 +366,7 @@ pub async fn agent_spawn(
     rp_id: &str,
     session_bearer: &str,
 ) -> Result<String> {
+    development.require_local_service(broker_url)?;
     use agentkeys_backend_client::protocol::{BuildSpawnUserOpRequest, BuildSpawnUserOpResponse};
 
     let bearer = resolve_bearer(session_bearer)?;
@@ -409,7 +404,14 @@ pub async fn agent_spawn(
     let built: BuildSpawnUserOpResponse =
         serde_json::from_str(&text).with_context(|| format!("parse build: {text}"))?;
 
+    development.verify_build(
+        &built.user_op,
+        &built.user_op_hash,
+        &built.entry_point,
+        built.chain_id,
+    )?;
     let submitted = software_sign_and_submit(
+        development,
         &base,
         &bearer,
         k11_key_file,
@@ -446,7 +448,9 @@ pub async fn agent_spawn(
 /// `agentkeys agent archive` — the HEADLESS #427 archive: revoke ONE delegate
 /// (slot returns in-contract), record the keep-vs-delete resource choice
 /// (#425 O4), deprovision its gate relay key, and tear down its sandbox.
+#[allow(clippy::too_many_arguments)]
 pub async fn agent_archive(
+    development: &crate::development_signing::DevelopmentSigning,
     broker_url: &str,
     device_key_hash: &str,
     resources_kept: bool,
@@ -455,6 +459,7 @@ pub async fn agent_archive(
     rp_id: &str,
     session_bearer: &str,
 ) -> Result<String> {
+    development.require_local_service(broker_url)?;
     use agentkeys_backend_client::protocol::{
         BuildArchiveUserOpRequest, BuildArchiveUserOpResponse,
     };
@@ -489,7 +494,14 @@ pub async fn agent_archive(
     let built: BuildArchiveUserOpResponse =
         serde_json::from_str(&text).with_context(|| format!("parse build: {text}"))?;
 
+    development.verify_build(
+        &built.user_op,
+        &built.user_op_hash,
+        &built.entry_point,
+        built.chain_id,
+    )?;
     let submitted = software_sign_and_submit(
+        development,
         &base,
         &bearer,
         k11_key_file,

@@ -1749,10 +1749,11 @@ fn html_escape(s: &str) -> String {
 /// Idempotent — NEVER overwrites an existing key (so a reused account keeps its
 /// CREATE2 address). Returns (pubX, pubY, rpIdHash) as bare lowercase hex.
 pub fn software_webauthn_keygen(
+    development: &crate::development_signing::DevelopmentSigning,
     key_file: &str,
     rp_id: &str,
 ) -> Result<(String, String, String), WebauthnError> {
-    software_webauthn_keygen_with_derive(key_file, rp_id, None)
+    software_webauthn_keygen_with_derive(development, key_file, rp_id, None)
 }
 
 /// Deterministically derive a P-256 scalar from the bytes of `seed_file`
@@ -1772,8 +1773,8 @@ fn derive_p256_signing_key_from_seed_file(
     seed_file: &str,
 ) -> Result<p256::ecdsa::SigningKey, WebauthnError> {
     use p256::ecdsa::SigningKey;
-    let raw = fs::read(seed_file)
-        .map_err(|e| WebauthnError::Io(format!("derive-from {seed_file}: {e}")))?;
+    let protected = read_software_passkey(seed_file)?;
+    let raw = protected.as_bytes();
     // Trim ASCII whitespace so `printf '%s\n' $KEY > file` and the no-newline
     // variant derive identically (same wallet → same passkey).
     let start = raw
@@ -1814,7 +1815,7 @@ fn read_software_passkey(path: &str) -> Result<zeroize::Zeroizing<String>, Webau
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(libc::O_NOFOLLOW);
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
     }
     let mut file = options
         .open(path)
@@ -1878,6 +1879,7 @@ fn write_new_software_passkey(path: &str, pem: &[u8]) -> Result<(), WebauthnErro
 /// file always wins (never overwritten, never re-derived), preserving masters
 /// registered under a random pre-#250 key.
 pub fn software_webauthn_keygen_with_derive(
+    _development: &crate::development_signing::DevelopmentSigning,
     key_file: &str,
     rp_id: &str,
     derive_from: Option<&str>,
@@ -1922,6 +1924,7 @@ pub fn software_webauthn_keygen_with_derive(
 /// (authData, clientDataJSON, challengeLocation, r, s) — hex (loc decimal), the
 /// exact fields K11Verifier.verifyAssertion takes.
 pub fn software_webauthn_sign(
+    _development: &crate::development_signing::DevelopmentSigning,
     key_file: &str,
     userop_hash_hex: &str,
     rp_id: &str,
@@ -1976,6 +1979,11 @@ pub fn software_webauthn_sign(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn development_signing() -> crate::development_signing::DevelopmentSigning {
+        let profile = agentkeys_core::chain_profile::ChainProfile::load_builtin("anvil").unwrap();
+        crate::development_signing::DevelopmentSigning::new(&profile, true, None).unwrap()
+    }
 
     #[test]
     fn enrollment_path_uses_strip_0x() {
@@ -2085,7 +2093,8 @@ mod tests {
         let key = key_file.to_string_lossy().to_string();
         let _ = fs::remove_file(&key); // start fresh → exercises the generate branch
 
-        let (pubx, puby, rpid_hash) = software_webauthn_keygen(&key, rp_id).expect("keygen");
+        let (pubx, puby, rpid_hash) =
+            software_webauthn_keygen(&development_signing(), &key, rp_id).expect("keygen");
         assert_eq!(pubx.len(), 64);
         assert_eq!(puby.len(), 64);
         // rpIdHash MUST be sha256(rpId) — what authData embeds + the verifier expects.
@@ -2093,7 +2102,8 @@ mod tests {
 
         // Idempotent: a second keygen loads the SAME key (never overwrites) — so a
         // reused account keeps its CREATE2 address.
-        let (pubx2, puby2, _) = software_webauthn_keygen(&key, rp_id).expect("keygen reload");
+        let (pubx2, puby2, _) =
+            software_webauthn_keygen(&development_signing(), &key, rp_id).expect("keygen reload");
         assert_eq!(
             (&pubx, &puby),
             (&pubx2, &puby2),
@@ -2101,7 +2111,8 @@ mod tests {
         );
 
         let uoh = format!("0x{}", "ab".repeat(32)); // a 32-byte userOpHash
-        let (authdata, cdj, loc, r, s) = software_webauthn_sign(&key, &uoh, rp_id).expect("sign");
+        let (authdata, cdj, loc, r, s) =
+            software_webauthn_sign(&development_signing(), &key, &uoh, rp_id).expect("sign");
         assert_eq!(loc, 36, "K11Verifier requires challengeLocation == 36");
 
         let authdata_bytes = hex::decode(&authdata).unwrap();
@@ -2144,8 +2155,16 @@ mod tests {
         let seed_a = dir.join("ak-derive-seed-a");
         let seed_b = dir.join("ak-derive-seed-b");
         // Raw-hex deployer-key shape; trailing newline on one write exercises trimming.
-        fs::write(&seed_a, format!("0x{}\n", "11".repeat(32))).unwrap();
-        fs::write(&seed_b, format!("0x{}", "22".repeat(32))).unwrap();
+        write_new_software_passkey(
+            seed_a.to_str().unwrap(),
+            format!("0x{}\n", "11".repeat(32)).as_bytes(),
+        )
+        .unwrap();
+        write_new_software_passkey(
+            seed_b.to_str().unwrap(),
+            format!("0x{}", "22".repeat(32)).as_bytes(),
+        )
+        .unwrap();
 
         let kf1 = dir.join("ak-derive-kf1.key");
         let kf2 = dir.join("ak-derive-kf2.key");
@@ -2157,6 +2176,7 @@ mod tests {
         let seed_a_s = seed_a.to_string_lossy().to_string();
         let seed_b_s = seed_b.to_string_lossy().to_string();
         let (x1, y1, _) = software_webauthn_keygen_with_derive(
+            &development_signing(),
             &kf1.to_string_lossy(),
             "localhost",
             Some(&seed_a_s),
@@ -2164,6 +2184,7 @@ mod tests {
         .expect("derive 1");
         // Fresh key file + same seed → identical pubkey (the CI re-run case).
         let (x2, y2, _) = software_webauthn_keygen_with_derive(
+            &development_signing(),
             &kf2.to_string_lossy(),
             "localhost",
             Some(&seed_a_s),
@@ -2177,6 +2198,7 @@ mod tests {
 
         // Different seed → different passkey (domain separation across wallets).
         let (x3, y3, _) = software_webauthn_keygen_with_derive(
+            &development_signing(),
             &kf3.to_string_lossy(),
             "localhost",
             Some(&seed_b_s),
@@ -2191,6 +2213,7 @@ mod tests {
         // Existing key file wins over derive_from (pre-#250 random keys preserved):
         // re-keygen kf3 with seed_a — must STILL return kf3's (seed_b) pubkey.
         let (x4, y4, _) = software_webauthn_keygen_with_derive(
+            &development_signing(),
             &kf3.to_string_lossy(),
             "localhost",
             Some(&seed_a_s),
@@ -2205,10 +2228,15 @@ mod tests {
         // Whitespace-trim invariance: seed content equal modulo trailing newline
         // derives the same key as seed_a (kf1 was derived from "…\n").
         let seed_a_nolf = dir.join("ak-derive-seed-a-nolf");
-        fs::write(&seed_a_nolf, format!("0x{}", "11".repeat(32))).unwrap();
+        write_new_software_passkey(
+            seed_a_nolf.to_str().unwrap(),
+            format!("0x{}", "11".repeat(32)).as_bytes(),
+        )
+        .unwrap();
         let kf5 = dir.join("ak-derive-kf5.key");
         let _ = fs::remove_file(&kf5);
         let (x5, y5, _) = software_webauthn_keygen_with_derive(
+            &development_signing(),
             &kf5.to_string_lossy(),
             "localhost",
             Some(seed_a_nolf.to_string_lossy().as_ref()),
@@ -2223,8 +2251,13 @@ mod tests {
         // The derived key signs a verifiable assertion (same math as the
         // roundtrip test — guards against a derive path that writes a corrupt PEM).
         let uoh = format!("0x{}", "cd".repeat(32));
-        software_webauthn_sign(&kf1.to_string_lossy(), &uoh, "localhost")
-            .expect("derived key must sign");
+        software_webauthn_sign(
+            &development_signing(),
+            &kf1.to_string_lossy(),
+            &uoh,
+            "localhost",
+        )
+        .expect("derived key must sign");
 
         for f in [&kf1, &kf2, &kf3, &kf5, &seed_a, &seed_b, &seed_a_nolf] {
             let _ = fs::remove_file(f);

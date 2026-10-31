@@ -59,6 +59,8 @@ Software passkey commands require `AGENT_TERRIER_LOCAL_DEV=1`, the local develop
 
 Development passkeys are created as new owner-only files (0600) and reused without overwriting them. Loading rejects symlinks, hard links, other owners and group/world-readable files. Passkey contents never appear in CLI output. Unix file permissions are required for this development storage mode.
 
+Every software-key library call requires a `DevelopmentSigning` context constructed through the same local-profile guard. Agent and application signing commands additionally require a loopback service, refuse HTTP redirects, and recompute the operation hash against the generated profile's EntryPoint and chain ID before opening the key. Wire-to-packed operation conversion and hashing have one owner in `agentkeys-core::erc4337`, shared by broker and client. Seed derivation uses the same protected file reader; special files fail without blocking. These development checks do not attest to hardware custody.
+
 ## Contract tooling
 
 `terrier` is the public local-tool entry point. Contract operations are owned by `scripts/terrier_local/contracts.py`; future local management surfaces must call this owner. The dependency revision and archive checksum have one owner in `crates/agentkeys-chain/foundry.lock`. The CLI uses a verified public archive instead of requiring submodule initialization. It builds an isolated generated cache with relative dependency paths, preserving reproducible contract metadata without workstation paths. [Contract development](wiki/contract-development.md) documents the supported commands and remaining local-chain acceptance.

@@ -1,3 +1,6 @@
+mod common;
+use common::development_signing;
+
 use assert_cmd::Command;
 use predicates::str::contains;
 use tempfile::TempDir;
@@ -193,11 +196,13 @@ fn software_keys_reject_public_permissions_and_links_without_changing_the_key() 
     let original = std::fs::read(&key_path).unwrap();
     std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o644)).unwrap();
     assert!(agentkeys_cli::k11_webauthn::software_webauthn_keygen(
+        &development_signing(),
         key_path.to_str().unwrap(),
         "localhost"
     )
     .is_err());
     assert!(agentkeys_cli::k11_webauthn::software_webauthn_sign(
+        &development_signing(),
         key_path.to_str().unwrap(),
         &format!("0x{}", "b".repeat(64)),
         "localhost"
@@ -207,6 +212,7 @@ fn software_keys_reject_public_permissions_and_links_without_changing_the_key() 
     let link_path = directory.path().join("link.pem");
     symlink(&key_path, &link_path).unwrap();
     assert!(agentkeys_cli::k11_webauthn::software_webauthn_keygen(
+        &development_signing(),
         link_path.to_str().unwrap(),
         "localhost"
     )
@@ -214,9 +220,47 @@ fn software_keys_reject_public_permissions_and_links_without_changing_the_key() 
     let hardlink_path = directory.path().join("hardlink.pem");
     std::fs::hard_link(&key_path, &hardlink_path).unwrap();
     assert!(agentkeys_cli::k11_webauthn::software_webauthn_keygen(
+        &development_signing(),
         key_path.to_str().unwrap(),
         "localhost"
     )
     .is_err());
     assert_eq!(std::fs::read(key_path).unwrap(), original);
+}
+
+#[test]
+fn agent_signing_requires_explicit_development_mode_before_network_or_key_access() {
+    let (mut command, directory) = isolated_cmd();
+    let key_path = directory.path().join("must-not-exist.pem");
+    command.env_remove("AGENT_TERRIER_LOCAL_DEV").args([
+        "agent",
+        "spawn",
+        "--label",
+        "test-actor",
+        "--broker-url",
+        "http://localhost:1",
+        "--k11-key-file",
+        key_path.to_str().unwrap(),
+    ]);
+    command
+        .assert()
+        .failure()
+        .stderr(contains("development signing requires"));
+    assert!(!key_path.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn software_key_fifo_is_rejected_without_waiting_for_a_writer() {
+    let (mut command, directory) = isolated_cmd();
+    let key_path = directory.path().join("fifo");
+    let path = std::ffi::CString::new(key_path.to_str().unwrap()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+    command.timeout(std::time::Duration::from_secs(5)).args([
+        "k11",
+        "software-keygen",
+        "--key-file",
+        key_path.to_str().unwrap(),
+    ]);
+    command.assert().failure().stderr(contains("regular file"));
 }

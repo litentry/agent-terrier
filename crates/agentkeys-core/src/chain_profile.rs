@@ -350,6 +350,20 @@ pub struct SudoConfig {
     pub warnings: Vec<String>,
 }
 
+pub fn is_loopback_http_endpoint(endpoint: &str) -> bool {
+    reqwest::Url::parse(endpoint).is_ok_and(|url| {
+        let host = url.host_str().unwrap_or("");
+        let host = host.trim_start_matches('[').trim_end_matches(']');
+        url.scheme() == "http"
+            && url.username().is_empty()
+            && url.password().is_none()
+            && (host == "localhost"
+                || host
+                    .parse::<std::net::IpAddr>()
+                    .is_ok_and(|ip| ip.is_loopback()))
+    })
+}
+
 impl ChainProfile {
     pub fn require_local_development(
         &self,
@@ -358,21 +372,10 @@ impl ChainProfile {
     ) -> Result<(), ChainProfileError> {
         let expected_chain_id = Self::load_builtin(DEFAULT_PROFILE)?.chain_id;
         let endpoint = rpc_override.unwrap_or(&self.rpc.http);
-        let is_loopback = reqwest::Url::parse(endpoint).is_ok_and(|url| {
-            let host = url.host_str().unwrap_or("");
-            let host = host.trim_start_matches('[').trim_end_matches(']');
-            url.scheme() == "http"
-                && url.username().is_empty()
-                && url.password().is_none()
-                && (host == "localhost"
-                    || host
-                        .parse::<std::net::IpAddr>()
-                        .is_ok_and(|ip| ip.is_loopback()))
-        });
         if enabled
             && self.chain_kind == ChainKind::LocalDev
             && self.chain_id == expected_chain_id
-            && is_loopback
+            && is_loopback_http_endpoint(endpoint)
         {
             Ok(())
         } else {
