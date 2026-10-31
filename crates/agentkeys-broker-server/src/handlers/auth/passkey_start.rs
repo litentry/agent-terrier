@@ -19,7 +19,6 @@
 //! passkey/verify or vice versa.
 
 use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
-use serde::Deserialize;
 use serde_json::json;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -37,10 +36,7 @@ pub(crate) const PASSKEY_CHALLENGE_TTL_SECS: i64 = 120;
 /// nonce-reuse guard vs the SIWE rows sharing the table).
 pub(crate) const PASSKEY_NONCE_PREFIX: &str = "passkey:";
 
-#[derive(Debug, Deserialize)]
-pub struct PasskeyStartRequest {
-    pub omni_account: String,
-}
+pub use agentkeys_protocol::hosted_signer::HostedPasskeyStart as PasskeyStartRequest;
 
 /// Normalize + validate a `0x<64 hex>` omni → lowercase `0x`-prefixed form.
 pub(crate) fn parse_omni_0x64(s: &str) -> Result<String, BrokerError> {
@@ -80,7 +76,7 @@ pub async fn passkey_start(
         .map_err(BrokerError::BackendUnreachable)?;
     if account == [0u8; 20] {
         return Err(BrokerError::BadRequest(
-            "no master account on chain for this omni — onboard via email first".into(),
+            "no master account on chain for this omni; register an owner account first".into(),
         ));
     }
     if !eth_address_has_code(&state.http, &rpc_url, &account)
@@ -88,8 +84,7 @@ pub async fn passkey_start(
         .map_err(BrokerError::BackendUnreachable)?
     {
         return Err(BrokerError::BadRequest(
-            "operator master is a legacy EOA, not a passkey P256Account — passkey re-auth \
-             requires the smart-account master; re-onboard via email"
+            "operator master is not a passkey P256Account; passkey authentication requires a registered smart account"
                 .into(),
         ));
     }

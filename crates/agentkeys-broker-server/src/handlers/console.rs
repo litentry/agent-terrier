@@ -7,15 +7,7 @@ use agentkeys_protocol::console_chain::{
 use axum::{extract::State, http::HeaderMap, Json};
 
 pub(crate) fn profile() -> Result<ChainProfile, BrokerError> {
-    ChainProfile::resolve(
-        None,
-        std::env::var("AGENTKEYS_CHAIN").ok().as_deref(),
-        std::env::var("AGENTKEYS_CHAIN_PROFILE_FILE")
-            .ok()
-            .as_deref(),
-    )
-    .map(|(profile, _)| profile)
-    .map_err(|error| BrokerError::BackendUnreachable(error.to_string()))
+    crate::chain_config::profile().map_err(BrokerError::BackendUnreachable)
 }
 
 pub async fn config(State(state): State<SharedState>) -> Result<Json<ConsoleConfig>, BrokerError> {

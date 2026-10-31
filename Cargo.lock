@@ -168,6 +168,7 @@ dependencies = [
  "agentkeys-mock-server",
  "agentkeys-provisioner",
  "agentkeys-types",
+ "agentkeys-web-core",
  "anyhow",
  "assert_cmd",
  "async-trait",

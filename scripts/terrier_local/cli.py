@@ -25,12 +25,13 @@ def main():
     chain_parser.add_argument("--offline", action="store_true", help="Deploy using downloaded dependencies only")
     chain_parser.add_argument("--resume", action="store_true", help="Explicitly resume an interrupted deployment")
     owner_parser = commands.add_parser("owner", help="Real local owner registration and scope operations")
-    owner_parser.add_argument("action", choices=["register", "grant", "revoke", "bind", "unbind"])
+    owner_parser.add_argument("action", choices=["register", "grant", "revoke", "bind", "unbind", "login"])
     owner_parser.add_argument("--name", required=True, help="Local owner name")
     owner_parser.add_argument("--actor-omni")
     owner_parser.add_argument("--service", action="append", default=[])
     owner_parser.add_argument("--read-only", action="store_true")
     owner_parser.add_argument("--enrollment-file", type=Path)
+    owner_parser.add_argument("--broker-url", help="Loopback broker endpoint for owner login")
     device_parser = commands.add_parser("device", help="Create a local actor-owned identity and public proof")
     device_parser.add_argument("action", choices=["identity"])
     device_parser.add_argument("--name", required=True)
@@ -60,7 +61,7 @@ def main():
             with local_state.exclusive_lock(state / "operation.lock"):
                 result = owner.execute(repository, state, arguments.action, arguments.name,
                                        arguments.actor_omni, arguments.service, arguments.read_only,
-                                       arguments.enrollment_file)
+                                       arguments.enrollment_file, arguments.broker_url)
             print(json.dumps(result, indent=2))
             return 0
         if arguments.command == "_serve-chain":
