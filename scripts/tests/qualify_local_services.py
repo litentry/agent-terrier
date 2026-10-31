@@ -13,7 +13,7 @@ import unittest
 from qualify_local_chain import REPOSITORY, available_port
 from qualify_local_login import request
 from qualify_local_owner import LocalOwnerFixture
-from terrier_local import contracts, local_state, services
+from terrier_local import chain, contracts, local_state, services
 
 
 class LocalServicesQualification(LocalOwnerFixture):
@@ -46,6 +46,19 @@ class LocalServicesQualification(LocalOwnerFixture):
                 alice = self.owner(state, "register", "--name", "alice")
                 self.owner(state, "login", "--name", "alice", "--broker-url", broker)
                 session = local_state.read_json(state / "owners/alice/session.json")["session"]["session_jwt"]
+                scope_request = json.loads((REPOSITORY / "e2e/fixtures/backend-protocol/build_scope_userop_request.json").read_text())
+                scope_request.update(operator_omni=alice["operator_omni"], actor_omni="0x" + "91" * 32,
+                    services=["knowledge:local-configuration"], preserve_service_ids=[])
+                block_before = chain.rpc(running_chain["rpc_http"], "eth_blockNumber")
+                self.assertEqual(request(broker + "/v1/scope/build", scope_request)[0], 401)
+                self.assertEqual(request(broker + "/v1/scope/build",
+                    dict(scope_request, operator_omni="0x" + "92" * 32), session)[0], 403)
+                scope_status, scope_response = request(broker + "/v1/scope/build", scope_request, session)
+                self.assertEqual(scope_status, 200)
+                scope_build = json.loads(scope_response)
+                self.assertEqual(scope_build["chain_id"], running_chain["chain_id"])
+                self.assertEqual(scope_build["user_op"]["sender"].lower(), alice["account"].lower())
+                self.assertEqual(chain.rpc(running_chain["rpc_http"], "eth_blockNumber"), block_before)
                 signing_body = {"omni_account":alice["operator_omni"].removeprefix("0x"), "message_hex":b"synthetic-local-signer".hex()}
 
                 def signing_check():
