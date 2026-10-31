@@ -19,5 +19,6 @@
     "tsx": "^4.19.0",
     "@types/node": "^20.0.0",
     "typescript": "^5.5.0"
-  }
+  },
+  "license": "Apache-2.0"
 }

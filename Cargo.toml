@@ -29,6 +29,9 @@ members = [
     "crates/agentkeys-bundler",
 ]
 
+[workspace.package]
+license = "Apache-2.0"
+
 [workspace.dependencies]
 agentkeys-types = { path = "crates/agentkeys-types" }
 agentkeys-device-core = { path = "crates/agentkeys-device-core" }
