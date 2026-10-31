@@ -84,3 +84,9 @@ Each actor runtime runs as an unprivileged user with a read-only root filesystem
 Image-status request and response types have one owner in `agentkeys-protocol::console`. Broker and daemon use those types directly; TypeScript clients are generated. Status uses immutable image IDs and generic image availability.
 
 The adapter has deterministic lifecycle and denial tests plus an explicit [real Docker qualification](wiki/docker-qualification.md). That test exercises actual creation, reuse, restart, image identity, loopback HTTP, cross-runtime network denial and scoped removal using a small public fixture image. A reproducible agent image and complete local service/model wiring remain required by #6/#7; the adapter alone is not a runnable local release.
+
+## Local model capabilities
+
+`agentkeys-core::models::ModelClient` owns the HTTP transport used by the gate's model client and the headless capability probe. It has no provider discovery or fallback, disables proxy inheritance and redirects, and bounds each request. `presets/local-models.json` owns the qualified runtime/model recipe; the CLI reads its compiled copy. `terrier models config/probe` calls these owners without starting or downloading a model implicitly.
+
+The [local model guide](wiki/local-models.md) distinguishes fast deterministic tests from actual chat, streaming, tool execution and embedding-backed recall. Its macOS qualifier runs the model server and client with outbound networking denied and reports exact artifact/hardware identities. This component qualification does not complete persistent memory or the full agent journey. Remaining provider-specific gate configuration and feature adapters are still tracked by #3/#7 and must be removed or replaced before release.

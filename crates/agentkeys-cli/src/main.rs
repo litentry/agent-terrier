@@ -89,6 +89,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    #[command(about = "Qualify a local model server using actual inference")]
+    Models {
+        #[command(subcommand)]
+        action: ModelAction,
+    },
     #[command(
         about = "Initialize a new session via email-link or OAuth2/Google",
         long_about = "Authenticate the operator's identity, derive the managed EVM wallet via the dev_key_service signer, link it to the broker, and save the resulting EVM session JWT in the OS keychain. The legacy --mock-token path was hard-cut in issue #74 step 1; the only production paths are --email and --oauth2-google.\n\nExamples:\n  agentkeys init --email alice@example.com --broker-url https://broker.example --signer-url https://signer.example\n  agentkeys init --oauth2-google         --broker-url https://broker.example --signer-url https://signer.example"
@@ -769,6 +774,19 @@ enum ChainAction {
 }
 
 #[derive(Subcommand)]
+enum ModelAction {
+    Config,
+    Probe {
+        #[arg(long, default_value = agentkeys_core::models::default_base_url())]
+        base_url: String,
+        #[arg(long, default_value = agentkeys_core::models::default_chat_model())]
+        chat_model: String,
+        #[arg(long, default_value = agentkeys_core::models::default_embedding_model())]
+        embedding_model: String,
+    },
+}
+
+#[derive(Subcommand)]
 enum SignerAction {
     #[command(
         about = "Derive the EVM address for an OmniAccount via the signer",
@@ -1415,6 +1433,23 @@ async fn cmd_chain(ctx: &CommandContext, action: &ChainAction) -> anyhow::Result
     }
 }
 
+async fn cmd_models(action: &ModelAction) -> anyhow::Result<String> {
+    let ModelAction::Probe {
+        base_url,
+        chat_model,
+        embedding_model,
+    } = action
+    else {
+        return Ok(serde_json::to_string_pretty(
+            agentkeys_core::models::local_recipe(),
+        )?);
+    };
+    Ok(serde_json::to_string_pretty(
+        &agentkeys_core::models::qualification::probe(base_url, chat_model, embedding_model)
+            .await?,
+    )?)
+}
+
 async fn cmd_k11(ctx: &CommandContext, action: &K11Action) -> anyhow::Result<String> {
     if matches!(
         action,
@@ -1832,6 +1867,7 @@ async fn main() {
             } => cmd_signer_preview_7730(&ctx, typed_data_file, seven_thirty_file.as_deref()).await,
         },
         Commands::Chain { action } => cmd_chain(&ctx, action).await,
+        Commands::Models { action } => cmd_models(action).await,
         Commands::K11 { action } => cmd_k11(&ctx, action).await,
         Commands::Memory { action } => match action {
             MemoryAction::CanonicalGet {

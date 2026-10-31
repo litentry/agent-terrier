@@ -4,12 +4,17 @@ from pathlib import Path
 import subprocess
 import sys
 
-from . import chain, contracts, deployment, local_state, owner
+from . import chain, contracts, deployment, local_state, models, owner
 
 
 def main():
     parser = argparse.ArgumentParser(description="Agent Terrier local development tools")
     commands = parser.add_subparsers(dest="command", required=True)
+    model_parser = commands.add_parser("models", help="Qualify actual local model capabilities")
+    model_parser.add_argument("action", choices=["config", "probe"])
+    model_parser.add_argument("--base-url")
+    model_parser.add_argument("--chat-model")
+    model_parser.add_argument("--embedding-model")
     contract_parser = commands.add_parser("contracts", help="Prepare, build and test public contracts")
     contract_parser.add_argument("action", choices=["setup", "build", "test"])
     contract_parser.add_argument("--offline", action="store_true", help="Use downloaded dependencies only")
@@ -40,6 +45,10 @@ def main():
     try:
         if arguments.command == "contracts":
             return contracts.run(repository, arguments.action, arguments.offline, arguments.match_test)
+        if arguments.command == "models":
+            result = models.run(repository, arguments.action, arguments.base_url, arguments.chat_model, arguments.embedding_model)
+            print(json.dumps(result, indent=2))
+            return 0
         state = local_state.state_directory(repository)
         if arguments.command == "device":
             with local_state.exclusive_lock(state / "operation.lock"):

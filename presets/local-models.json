@@ -1,0 +1,18 @@
+{
+  "base_url": "http://127.0.0.1:11434/v1",
+  "runtime": {
+    "name": "ollama",
+    "version": "0.34.4",
+    "context_length": 4096,
+    "max_loaded_models": 1,
+    "parallel_requests": 1
+  },
+  "chat": {
+    "model": "qwen3:1.7b",
+    "digest": "8f68893c685c3ddff2aa3fffce2aa60a30bb2da65ca488b61fff134a4d1730e7"
+  },
+  "embedding": {
+    "model": "nomic-embed-text:v1.5",
+    "digest": "0a109f422b47e3a30ba2b10eca18548e944e8a23073ee3f3e947efcf3c45e59f"
+  }
+}

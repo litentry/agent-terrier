@@ -10,6 +10,7 @@ pub mod erc4337;
 pub mod init_flow;
 pub mod kek;
 pub mod mock_client;
+pub mod models;
 pub mod otp;
 pub mod payment;
 pub mod protected_file;
