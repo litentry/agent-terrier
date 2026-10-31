@@ -8,6 +8,8 @@ The browser data library and shared native client now call storage workers direc
 
 These commands still need explicit broker and worker URLs plus the actor's session. Storage role and region flags have been removed. CLI parsing and component tests are available now; complete local broker session enrollment remains part of the unfinished application setup.
 
+Daemon UI mode also requires an explicitly configured existing `--device-key-file` for storage and channel capabilities. It loads the protected key at startup; worker calls do not search for a default key file. Channel capability caches are separate for each signing key. The daemon UI's remaining storage credential exchange and local enrollment wiring are still under migration.
+
 ## Ownership and boundaries
 
 `agentkeys-local-store` runs a small authenticated HTTP service with a separate SQLite database for each data class. The database records its application, schema and data-class identity; an unrelated database or a database belonging to another class is rejected. Database directories must be private, and files must be owned by the current user with no symbolic or hard links. Host administrators remain trusted in this local development environment.

@@ -2404,6 +2404,7 @@ mod handler_tests {
             None,
             None,
             None,
+            None,
         )
         .unwrap();
         *state.onboarding_session.write().await = Some(OnboardingSession {
@@ -2520,6 +2521,7 @@ mod handler_tests {
             None,
             None,
             "us-east-1".into(),
+            None,
             None,
             None,
             None,
