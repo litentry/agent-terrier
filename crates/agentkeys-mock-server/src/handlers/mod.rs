@@ -7,4 +7,3 @@ pub mod identity;
 pub mod inbox;
 pub mod rendezvous;
 pub mod session;
-pub mod sign_sts;

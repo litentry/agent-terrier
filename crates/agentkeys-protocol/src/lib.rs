@@ -2336,33 +2336,23 @@ pub struct SpeechStsResult {
     pub region: String,
 }
 
-// ── #512 signer sign-sts — intent-based credential mint (ADR
-//    docs/spec/stacks/ve-sts-signing-split.md) ─────────────────────────────────
-
-/// Request body for the SIGNER's `POST /dev/sign-sts` (NOT a broker endpoint —
-/// the signer-only listener serves it, bearer = the caller's session JWT).
-/// Intent-based: the caller names WHAT it wants (`data_class`, `verbs`,
-/// `ttl_seconds`) and proves WHO it is (the JWT; `omni_account` is the
-/// standard `/dev/*` cross-check field). The signer renders the session
-/// policy ITSELF from this intent — no caller-authored policy string exists,
-/// so the ADR's rule 2 (policy ⊆ actor prefix) holds by construction.
+/// Legacy external credential-exchange request, retained for wire compatibility.
+/// The public development signer does not serve `/dev/sign-sts`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SignStsBody {
     /// Bare/0x 64-hex actor omni — must match the session JWT's claim.
     pub omni_account: String,
-    /// One of `vault` | `memory` | `config` | `channel` (speech is gate-held
-    /// on VE, #386). Selects the per-class role + bucket (#511).
+    /// Requested data class: `vault` | `memory` | `config` | `channel`.
     pub data_class: String,
     /// Subset of `get` | `put` | `delete` | `list` (case-insensitive).
     pub verbs: Vec<String>,
-    /// Requested credential TTL; the signer enforces its ceiling (900s).
+    /// Requested credential TTL; an external implementation must bound it.
     pub ttl_seconds: u64,
-    /// The broker-minted OIDC JWT the signer exchanges (`AssumeRoleWithOIDC`).
+    /// Broker-issued identity token for the external exchange.
     pub oidc_token: String,
 }
 
-/// Response from `/dev/sign-sts`: the scoped short-TTL credentials. Unix-epoch
-/// expiration (the VE RFC-3339 `Expiration` is normalized signer-side).
+/// Legacy external credential response with Unix-epoch expiration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SignStsResult {
     pub access_key_id: String,
@@ -3466,15 +3456,6 @@ pub mod sandbox_env {
     /// through the gateway on the console's behalf (`/v1/agent/bridge`).
     /// Before #715 a leaked instance name alone opened both surfaces.
     pub const BRIDGE_TOKEN: &str = "AGENTKEYS_BRIDGE_TOKEN";
-    /// The stack's data-plane credential provider (`aws` | `ve`), injected at
-    /// CREATE from the broker's own `AGENTKEYS_STS_PROVIDER` — the delegate
-    /// runtime then mints its OWN-namespace storage credential the same way
-    /// the master plane does on that stack: on VE at the signer's
-    /// `/dev/sign-sts` (the #513 chain-gated issuance, with its own J1_agent),
-    /// on AWS through the anonymous relay. OPTIONAL: absent, the daemon sends
-    /// only its session bearer and the memory worker mints server-side
-    /// (`/v1/cap/own-sts`, #716) — the fallback, never a silent one.
-    pub const STS_PROVIDER: &str = "AGENTKEYS_STS_PROVIDER";
     /// #594 — the delegate's OWN `knowledge:<ns>` namespace name (the spawn
     /// template grant), injected at CREATE so the in-sandbox checkpoint loop
     /// addresses the right grant even for an INHERITED namespace (#425 O2,

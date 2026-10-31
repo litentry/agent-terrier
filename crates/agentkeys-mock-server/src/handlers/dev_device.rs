@@ -200,8 +200,6 @@ mod tests {
     fn claims(omni: &str) -> VerifiedSession {
         VerifiedSession {
             omni_account: omni.to_string(),
-            parent_omni: None,
-            device_pubkey: None,
         }
     }
 
