@@ -322,7 +322,7 @@ impl LocalEndpoint {
 }
 
 async fn forward_request(stream: &mut tokio::net::TcpStream, token: &str) -> Result<Vec<u8>> {
-    use p256::elliptic_curve::subtle::ConstantTimeEq;
+    use subtle::ConstantTimeEq;
     let mut received = Vec::new();
     loop {
         let mut buffer = [0u8; 1024];

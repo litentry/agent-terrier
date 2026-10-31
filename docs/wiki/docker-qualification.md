@@ -15,7 +15,7 @@ docker --host "unix://${AGENT_TERRIER_TEST_DOCKER_SOCKET}" pull "${AGENT_TERRIER
 Local, from the same checkout and shell, run the qualification. It does not pull images and its temporary fixture build disables build networking:
 
 ```bash
-cargo test -p agentkeys-broker-server --test docker_local -- --ignored --nocapture
+cargo test -p agentkeys-runtime --test docker_local -- --ignored --nocapture
 ```
 
 The explicit ignored-test invocation keeps ordinary unit tests independent of Docker availability. A missing socket, missing image or denied operation fails the qualification; it is never recorded as a pass or silently skipped. Compilation time and first image download are separate from the warm execution measurement.

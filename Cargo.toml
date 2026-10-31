@@ -4,6 +4,7 @@ members = [
     "crates/agentkeys-types",
     "crates/agentkeys-device-core",
     "crates/agentkeys-core",
+    "crates/agentkeys-runtime",
     "crates/agentkeys-local-store",
     "crates/agentkeys-memory-engine",
     "crates/agentkeys-memory-openviking",
@@ -35,6 +36,7 @@ license = "Apache-2.0"
 agentkeys-types = { path = "crates/agentkeys-types" }
 agentkeys-device-core = { path = "crates/agentkeys-device-core" }
 agentkeys-core = { path = "crates/agentkeys-core" }
+agentkeys-runtime = { path = "crates/agentkeys-runtime" }
 agentkeys-memory-engine = { path = "crates/agentkeys-memory-engine" }
 agentkeys-memory-openviking = { path = "crates/agentkeys-memory-openviking" }
 agentkeys-web-core = { path = "crates/agentkeys-web-core" }
