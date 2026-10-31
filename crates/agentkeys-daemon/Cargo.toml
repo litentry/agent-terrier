@@ -9,6 +9,7 @@ name = "agentkeys-daemon"
 path = "src/main.rs"
 
 [dependencies]
+zeroize = { workspace = true }
 agentkeys-protocol = { workspace = true }
 agentkeys-web-core = { workspace = true }
 agentkeys-types = { workspace = true }

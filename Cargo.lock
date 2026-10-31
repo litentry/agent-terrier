@@ -291,6 +291,7 @@ dependencies = [
  "ts-rs",
  "url",
  "webauthn-rs",
+ "zeroize",
 ]
 
 [[package]]

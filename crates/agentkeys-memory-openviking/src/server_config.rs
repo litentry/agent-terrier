@@ -167,31 +167,6 @@ pub fn plan_server_config(
     }
 }
 
-/// Write the config 0600 (the embed key rides inside), parent dirs created,
-/// atomically (tmp + rename) so a reader never sees a half file.
-pub fn write_server_config(path: &Path, config: &serde_json::Value) -> std::io::Result<()> {
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    let tmp = path.with_extension("tmp");
-    let body = serde_json::to_string_pretty(config).map_err(std::io::Error::other)?;
-    {
-        use std::io::Write;
-        let mut opts = std::fs::OpenOptions::new();
-        opts.write(true).create(true).truncate(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            opts.mode(0o600);
-        }
-        let mut f = opts.open(&tmp)?;
-        f.write_all(body.as_bytes())?;
-        f.write_all(b"\n")?;
-        f.sync_all()?;
-    }
-    std::fs::rename(&tmp, path)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -356,24 +331,5 @@ mod tests {
             config_file_path(lookup(&[("OPENVIKING_CONFIG_FILE", " /tmp/memory.conf ")])),
             "/tmp/memory.conf"
         );
-    }
-
-    #[test]
-    fn the_writer_lands_a_private_file_atomically() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("nested/ov.conf");
-        write_server_config(&path, &serde_json::json!({"storage":{"workspace":"/w"}})).unwrap();
-        assert!(std::fs::read_to_string(&path)
-            .unwrap()
-            .contains("workspace"));
-        assert!(!path.with_extension("tmp").exists());
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            assert_eq!(
-                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
-                0o600
-            );
-        }
     }
 }
