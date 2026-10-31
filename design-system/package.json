@@ -16,7 +16,8 @@
     "./css/tokens.css": "./css/tokens.css",
     "./css/fonts.css": "./css/fonts.css",
     "./css/components.css": "./css/components.css",
-    "./assets/terrier.svg": "./assets/terrier.svg"
+    "./assets/terrier.svg": "./assets/terrier.svg",
+    "./card": "./generated/index.ts"
   },
   "peerDependencies": {
     "react": ">=18"
@@ -36,6 +37,7 @@
     "assets",
     "react",
     "tokens.ts",
-    "tokens.json"
+    "tokens.json",
+    "generated"
   ]
 }

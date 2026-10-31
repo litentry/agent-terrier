@@ -1,57 +1,18 @@
-// Renders the shared card contract and delegates actions to the caller.
-// Protocol compatibility is checked by the console card snapshot tests.
+// The card schema is generated from agentkeys-protocol::card.
 
 import { useRef, useState } from 'react';
 import type { CSSProperties, ReactNode } from 'react';
 
 export type CardLocale = 'en' | 'zh';
 
-export interface CardViewMetric {
-  label: string;
-  label_zh?: string;
-  value: string;
-  unit?: string;
-  /** 0..=1 when the metric is a progress toward a target. */
-  progress?: number;
-}
-export interface CardViewItem {
-  text: string;
-  text_zh?: string;
-  detail?: string;
-  detail_zh?: string;
-  /** A short renderer-neutral tag (`done`, `low`, `new`). */
-  tag?: string;
-}
-export interface CardViewSection {
-  title: string;
-  title_zh?: string;
-  items: CardViewItem[];
-}
-export interface CardViewAlert {
-  level?: 'info' | 'warn' | 'danger';
-  text: string;
-  text_zh?: string;
-}
-export interface CardViewAction {
-  id: string;
-  label: string;
-  label_zh?: string;
-  command: string;
-  args?: unknown;
-}
-export interface CardViewDocument {
-  card: number;
-  title: string;
-  title_zh?: string;
-  subtitle?: string;
-  subtitle_zh?: string;
-  metrics?: CardViewMetric[];
-  sections?: CardViewSection[];
-  alerts?: CardViewAlert[];
-  actions?: CardViewAction[];
-  /** Unix seconds the app composed the card. */
-  updated_at?: number;
-}
+import type { CardAction as CardViewAction } from '../generated/CardAction';
+import type { CardAlert as CardViewAlert } from '../generated/CardAlert';
+import type { CardDocument as CardViewDocument } from '../generated/CardDocument';
+
+export type { CardViewAction, CardViewAlert, CardViewDocument };
+export type { CardItem as CardViewItem } from '../generated/CardItem';
+export type { CardMetric as CardViewMetric } from '../generated/CardMetric';
+export type { CardSection as CardViewSection } from '../generated/CardSection';
 
 /** Pick the localized string; an empty `_zh` falls back to the base text. */
 export function cardText(locale: CardLocale, base: string, zh?: string | null): string {
@@ -72,11 +33,7 @@ export function cardAge(updatedAt: number | undefined, now: number): string {
  *  returns at once. */
 export const CARD_TAP_HOLD_MS = 800;
 
-/** One tap at a time: `begin` refuses while the last tap is still sending or
- *  inside its hold, `end` returns what is left of the hold. Measured
- *  2026-09-28: one double click on the console's fridge button published two
- *  `fridge.request-photo` commands 150 ms apart, and chef asked the family
- *  chat for a photo twice. */
+/** Refuse repeat taps while a send is active or its hold has not elapsed. */
 export function cardTapGate(holdMs = CARD_TAP_HOLD_MS, clock: () => number = Date.now) {
   let sending = false;
   let heldUntil = 0;

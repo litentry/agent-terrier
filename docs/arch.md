@@ -26,6 +26,8 @@ The public source excludes hardware firmware, inherited operator documentation a
 
 Browser compilation remaps Rust source paths. The display build also makes route-manifest source metadata relative to the app root: the framework otherwise embeds workstation paths in its production manifest. Asset URLs and route behavior are unchanged; the artifact privacy check must pass after a framework update.
 
+The card schema has one owner in `agentkeys-protocol::card`. Its TypeScript output lives in `design-system/generated/`; the renderer and both apps consume those generated types. Existing `CardView*` names are aliases, not separate field definitions. Regenerate with `cargo test -p agentkeys-protocol -p agentkeys-daemon export_bindings` after changing a card field.
+
 ## Trust boundaries
 
 1. The chain owns identity and authority.
@@ -46,6 +48,5 @@ The complete CLI and light manager must call these owners rather than duplicate 
 
 | Remaining overlap | Owner | Removal gate |
 |---|---|---|
-| Renderer card view types and generated wire types | `agentkeys-protocol::card` | Consume generated shared types in the renderer during #3; remove the hand-maintained structural twin before #11 |
 | Runtime lifecycle and provider-specific implementations | Broker runtime interface | #3 establishes neutral contracts; #6 supplies the local adapter; no provider implementation in the public release |
 | Repeated worker authorization helpers | Worker verification and protocol types | #3 and #5 consolidate pure policy while retaining independent enforcement at each boundary |
