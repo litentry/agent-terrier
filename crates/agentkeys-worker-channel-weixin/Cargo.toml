@@ -43,9 +43,6 @@ sha1 = "0.10"
 sha3 = "0.10"
 # #667 — iLink media originals are AES-128-ECB encrypted on the CDN.
 aes = "0.8"
-# router-eval reaches each decision model's provider with the key the model
-# gate would use — resolved by the same inference families (never a copy).
-agentkeys-inference-creds = { workspace = true }
 clap = { version = "4", features = ["derive", "env"] }
 # Terminal QR render for the iLink `--login` ceremony (no image features).
 qrcode = { version = "0.14", default-features = false }

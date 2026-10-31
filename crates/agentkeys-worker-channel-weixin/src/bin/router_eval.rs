@@ -14,27 +14,15 @@
 //! the other for each case (so both see the same network minute): wrong
 //! routes, routed right, round trip, tokens, and every case they disagree on.
 //!
-//! Each model goes to its provider's server with that provider's key, resolved
-//! by the inference families the model gate reads (`kev-*`: `KEV_BASE_URL` +
-//! `KEV_API_KEY`; `jev-*`: `TYPESAFE_API_KEY`, `TYPESAFE_BASE_URL` optional) —
-//! unless `--endpoint` names one server for every model (a Kev tunnel, or the
-//! model gate with its `gk_` relay key, which sends each model to its provider).
-//!
-//! ```text
-//! cargo run -p agentkeys-worker-channel-weixin --bin router-eval -- \
-//!     --model kev-9b@2629c06 --model jev-1.13.0
-//! cargo run -p agentkeys-worker-channel-weixin --bin router-eval -- \
-//!     --endpoint http://127.0.0.1:8009 --model kev-9b
-//! ```
+//! An explicit --endpoint receives every selected model. No host credential discovery.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use agentkeys_inference_creds::Resolver;
 use agentkeys_protocol::{
-    ChannelApp, ChannelDoc, Contact, ContactRegistry, ContactTier, DecisionProvider, PresetSummary,
-    SystemOneRequest, SystemOneResponse, JEV_PINNED_MODEL,
+    ChannelApp, ChannelDoc, Contact, ContactRegistry, ContactTier, PresetSummary, SystemOneRequest,
+    SystemOneResponse, JEV_PINNED_MODEL,
 };
 use agentkeys_worker_channel_weixin::jev::{
     self, ChannelOption, JevClient, JevError, JevVerdict, RouterConfig,
@@ -47,15 +35,14 @@ use serde::Deserialize;
 #[command(about = "household channels router eval against one or more System One models")]
 struct Args {
     /// One System One server for every model (`/v1/systemone` is appended):
-    /// a Kev tunnel, or the model gate. Unset = each model's own provider.
+    /// a local decision service or the model gate. Required explicitly.
     #[arg(long)]
     endpoint: Option<String>,
-    /// Bearer for `--endpoint` (a Kev tunnel accepts any; the model gate takes
-    /// a `gk_` relay key). Never sent to a provider resolved from the families.
+    /// Optional explicit bearer for the selected endpoint.
     #[arg(
         long,
         env = "ROUTER_EVAL_ENDPOINT_KEY",
-        default_value = "local",
+        default_value = "",
         hide_env_values = true
     )]
     key: String,
@@ -303,23 +290,6 @@ fn questions_for(file: &CaseFile, args: &Args, splits: &[&str]) -> anyhow::Resul
         }
     }
     Ok(out)
-}
-
-/// Where a model is asked and with which bearer: `--endpoint` for every model,
-/// else the model's provider resolved from its inference family.
-fn target_for(model: &str, args: &Args, families: &Resolver) -> anyhow::Result<(String, String)> {
-    if let Some(endpoint) = &args.endpoint {
-        return Ok((endpoint.clone(), args.key.clone()));
-    }
-    let provider = DecisionProvider::of_model(model).with_context(|| {
-        format!("model `{model}` names no provider (kev-* / jev-*) — pass --endpoint for it")
-    })?;
-    let creds = match provider {
-        DecisionProvider::Jev => families.typesafe(),
-        DecisionProvider::Kev => families.kev(),
-    }
-    .with_context(|| format!("no {} server for `{model}`", provider.label()))?;
-    Ok((creds.base_url, creds.api_key))
 }
 
 /// TypeSafe asks callers to retry a 429 or 529 with exponential backoff
@@ -702,14 +672,18 @@ async fn main() -> anyhow::Result<()> {
     }
     let questions = questions_for(&file, &args, &splits)?;
 
-    let families = Resolver::from_process();
+    let server = args
+        .endpoint
+        .as_ref()
+        .context("--endpoint is required; no provider discovery")?;
+    agentkeys_core::models::base_url(server)?;
     let mut runs: Vec<Run> = Vec::new();
     for model in &models {
-        let (server, key) = target_for(model, &args, &families)?;
+        let key = &args.key;
         runs.push(Run {
             model: model.clone(),
-            client: JevClient::new(&server, &key, 60_000),
-            server,
+            client: JevClient::new(server, key, 60_000),
+            server: server.clone(),
             answered_by: String::new(),
             asked: Vec::new(),
             latencies_ms: Vec::new(),

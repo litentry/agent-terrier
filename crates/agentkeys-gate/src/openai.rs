@@ -75,7 +75,7 @@ pub fn extract_usage(v: &Value) -> Option<UsageCounters> {
 }
 
 /// Incremental SSE scanner: feed forwarded chunks as-is, and it captures the
-/// last non-null `usage` object seen (Ark puts it in the final data chunk when
+/// last non-null `usage` object seen (a compatible server can put it in the final chunk when
 /// `stream_options.include_usage` is set — the relay injects that; #332).
 /// Handles `data:` lines split across chunk boundaries.
 #[derive(Default)]

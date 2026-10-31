@@ -41,7 +41,7 @@ pub enum GateError {
     Audit(String),
 
     /// The requested relay leg is not configured on this gate (e.g. no
-    /// asr/tts inference family) — a legit, LOUD skip, never silent (#519).
+    /// speech adapter) — a legit, LOUD skip, never silent (#519).
     #[error("not configured: {0}")]
     NotConfigured(String),
 

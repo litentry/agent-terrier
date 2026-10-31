@@ -40,12 +40,21 @@ pub async fn probe(
     chat_model: &str,
     embedding_model: &str,
 ) -> Result<CapabilityReport> {
+    probe_authenticated(endpoint, chat_model, embedding_model, None).await
+}
+
+pub async fn probe_authenticated(
+    endpoint: &str,
+    chat_model: &str,
+    embedding_model: &str,
+    api_key: Option<&str>,
+) -> Result<CapabilityReport> {
     require_local_endpoint(endpoint)?;
     ensure!(
         !chat_model.is_empty() && !embedding_model.is_empty(),
         "chat and embedding model names are required"
     );
-    let client = ModelClient::new(endpoint, None);
+    let client = ModelClient::new(endpoint, api_key);
     let models = response_json(client.models().await?).await?;
     let available = models["data"]
         .as_array()

@@ -19,10 +19,8 @@ agentkeys-backend-client = { workspace = true }
 agentkeys-protocol = { workspace = true }
 # Canonical audit op_kind table (AuditOpKind::GateTurn) + GateTurnBody.
 agentkeys-core = { workspace = true }
-# #338 — the upstream key/base resolve through the ONE per-family loader
-# (env > ~/.agentkeys/inference/ark.env > default); the AGENTKEYS_GATE_UPSTREAM_*
-# forms stay as explicit engine-agnostic overrides. Never a gate-private key path.
-agentkeys-inference-creds = { workspace = true }
+async-trait = { workspace = true }
+zeroize = { workspace = true }
 
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -39,7 +37,7 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 futures-util = "0.3"
 tokio-stream = "0.1"
 bytes = "1"
-# #519 speech relay — inline-base64 audio on the wire + Doubao request ids.
+# Audio wire encoding and generated identifiers.
 base64 = "0.22"
 uuid = { version = "1", features = ["v4"] }
 # #427 — admin-minted relay-key secrets (same OsRng agentkeys-core keygen uses).

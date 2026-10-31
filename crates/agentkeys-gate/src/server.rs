@@ -40,13 +40,10 @@ pub fn router(relay: Arc<Relay>) -> Router {
         )
         .route("/v1/models", get(models))
         .route("/v1/usage", get(usage))
-        // #519 — the speech relay legs (same gk_ auth; gate-held Doubao app
-        // tokens per #386). JSON→JSON with base64 audio — channel-ready, not
-        // an OpenAI-compatible surface. See `speech.rs`.
+        // Authenticated JSON audio API; adapter is optional.
         .route("/v1/audio/transcriptions", post(audio_transcriptions))
         .route("/v1/audio/speech", post(audio_speech))
-        // #527 — the TTS voices catalog (gk_-authed; gate-held IAM per the
-        // custody decision in voices.rs). 503 when unconfigured.
+        // Authenticated optional speech catalog.
         .route("/v1/audio/voices", get(audio_voices))
         // #427 — broker-driven per-delegate provisioning (admin bearer): spawn
         // mints a relay key, archive disables it. See `admin.rs`.
@@ -61,7 +58,7 @@ pub fn router(relay: Arc<Relay>) -> Router {
         .with_state(relay)
 }
 
-/// #519 — ASR leg: authenticate the gk_ relay key, then relay to Doubao.
+/// #519 — ASR leg: authenticate the gk_ relay key, then call the injected speech adapter.
 async fn audio_transcriptions(
     State(relay): State<Arc<Relay>>,
     headers: HeaderMap,
@@ -99,14 +96,11 @@ async fn audio_speech(
     }
 }
 
-/// #527 — the TTS voices catalog. gk_-authed (any live relay key); the gate
-/// V4-signs ListBigModelTTSTimbres with its held IAM credential. 503 when the
-/// IAM credential is unconfigured (never a silent empty list).
 async fn audio_voices(State(relay): State<Arc<Relay>>, headers: HeaderMap) -> Response {
     if let Err(e) = authenticate_live(&relay, &headers) {
         return error_response(e);
     }
-    match crate::voices::fetch_voices(relay.voices.as_ref()).await {
+    match relay.speech.voices().await {
         Ok(r) => Json(r).into_response(),
         Err(e) => {
             tracing::warn!(error = %e, "voices catalog failed");
@@ -194,7 +188,7 @@ async fn embeddings(State(relay): State<Arc<Relay>>, headers: HeaderMap, body: B
 }
 
 /// #639 — the multimodal twin: OpenViking 0.4.16 appends `/embeddings/multimodal`
-/// for the doubao-embedding-vision family; same auth, metering and budgets.
+/// for explicit compatible adapters; same auth, metering and budgets.
 async fn embeddings_multimodal(
     State(relay): State<Arc<Relay>>,
     headers: HeaderMap,
