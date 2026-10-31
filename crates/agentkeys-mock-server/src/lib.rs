@@ -42,7 +42,12 @@ pub fn create_signer_router(state: SharedState) -> Router {
             "/dev/sign-device-cap-pop",
             post(handlers::dev_device::sign_device_cap_pop),
         )
-        .route("/healthz", get(|| async { "ok" }))
+        .route(
+            "/healthz",
+            get(|| async {
+                axum::Json(serde_json::json!({"ready": true, "development_only": true}))
+            }),
+        )
         .with_state(state)
 }
 

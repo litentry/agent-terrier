@@ -38,7 +38,7 @@ class LocalServicesQualification(LocalOwnerFixture):
                 self.services(state, "doctor", success=False)
                 running = self.services(state, "start")
                 self.assertTrue(running["ready"])
-                self.assertEqual(len(running["services"]), 9)
+                self.assertEqual(len(running["services"]), 10)
                 self.assertEqual(self.services(state, "start"), running)
                 self.assertTrue(self.services(state, "doctor")["ready"])
                 broker = running["services"]["broker"]["url"]
@@ -46,6 +46,28 @@ class LocalServicesQualification(LocalOwnerFixture):
                 alice = self.owner(state, "register", "--name", "alice")
                 self.owner(state, "login", "--name", "alice", "--broker-url", broker)
                 session = local_state.read_json(state / "owners/alice/session.json")["session"]["session_jwt"]
+                signing_body = {"omni_account":alice["operator_omni"].removeprefix("0x"), "message_hex":b"synthetic-local-signer".hex()}
+
+                def signing_check():
+                    signer = running["services"]["signer"]["url"]
+                    self.assertEqual(request(signer + "/v1/auth/session")[0], 404)
+                    self.assertEqual(request(signer + "/dev/sign-message", signing_body)[0], 401)
+                    self.assertEqual(request(signer + "/dev/sign-message", signing_body, "invalid-test-session")[0], 401)
+                    refused_status, refused_body = request(signer + "/dev/sign-message",
+                        dict(signing_body, omni_account="91" * 32), session)
+                    self.assertEqual(refused_status, 401)
+                    self.assertEqual(json.loads(refused_body)["error"], "unauthorized")
+                    self.assertNotIn("signature", json.loads(refused_body))
+                    result_status, result_body = request(signer + "/dev/sign-message", signing_body, session)
+                    self.assertEqual(result_status, 200, json.loads(result_body).get("message", "signer request refused"))
+                    result = json.loads(result_body)
+                    verified = subprocess.run([contracts.foundry_binary("cast"), "wallet", "verify",
+                        "--address", result["address"], "synthetic-local-signer", result["signature"]],
+                        env=contracts.tool_environment(), capture_output=True, timeout=10)
+                    self.assertEqual(verified.returncode, 0, "local signer signature did not verify")
+                    return result["address"]
+
+                original_signer_address = signing_check()
                 synthetic = "synthetic-service-check-" + secrets.token_hex(16)
                 environment = contracts.tool_environment()
                 environment.update(AGENTKEYS_OPERATOR_OMNI=alice["operator_omni"],
@@ -76,7 +98,7 @@ class LocalServicesQualification(LocalOwnerFixture):
                     local_state.write_json(profile_path, profile)
                 self.assertTrue(self.services(state, "doctor")["ready"])
                 manifest = local_state.read_json(state / "services/manifest.json")
-                keys = [state / "services/broker/oidc.json", state / "services/broker/session.json",
+                keys = [state / "services/broker/oidc.json", state / "services/broker/session.json", state / "services/signer/master.key",
                         *[state / "services" / name / "development.key" for name in services.WORKERS]]
                 preserved = {path:path.read_bytes() for path in keys}
                 self.assertTrue(self.services(state, "stop")["state_preserved"])
@@ -84,6 +106,7 @@ class LocalServicesQualification(LocalOwnerFixture):
                 self.assertEqual(self.invoke(state, "status")["instance_id"], running_chain["instance_id"])
                 running = self.services(state, "start")
                 self.assertEqual(running["services"]["broker"]["url"], broker)
+                self.assertEqual(signing_check(), original_signer_address)
                 credential("fetch")
                 self.assertTrue(all(path.read_bytes() == value for path, value in preserved.items()), "service restart replaced a key")
                 self.services(state, "stop")
@@ -94,6 +117,13 @@ class LocalServicesQualification(LocalOwnerFixture):
                 self.assertIn("encryption key is missing", refused.stderr)
                 self.assertFalse(missing.exists())
                 local_state.write_private(missing, original)
+                signer_key = state / "services/signer/master.key"
+                original = signer_key.read_bytes()
+                signer_key.unlink()
+                refused = self.services(state, "start", success=False)
+                self.assertIn("signer key is missing", refused.stderr)
+                self.assertFalse(signer_key.exists())
+                local_state.write_private(signer_key, original)
                 changed = dict(manifest, profile_identity="another-deployment")
                 local_state.write_json(state / "services/manifest.json", changed)
                 refused = self.services(state, "start", success=False)
@@ -120,7 +150,7 @@ class LocalServicesQualification(LocalOwnerFixture):
                     thread.join(timeout=5)
                 binaries = root / "failing-binaries"
                 binaries.mkdir()
-                for name in [services.BROKER_BINARY, services.STORE_BINARY, *services.WORKERS.values()]:
+                for name in services.BINARIES:
                     destination = binaries / name
                     if name == services.WORKERS["memory"]:
                         destination.write_text(f"#!{sys.executable}\nraise SystemExit(23)\n")
@@ -139,6 +169,7 @@ class LocalServicesQualification(LocalOwnerFixture):
                     self.assertEqual(path.stat().st_mode & 0o777, 0o600)
                 logs = b"".join(path.read_bytes() for path in (state / "services").glob("*.log"))
                 self.assertTrue(session.encode() not in logs and synthetic.encode() not in logs, "service logs exposed credentials")
+                self.assertTrue(signer_key.read_bytes() not in logs, "service logs exposed signing material")
             finally:
                 self.services(state, "stop")
                 self.invoke(state, "stop")

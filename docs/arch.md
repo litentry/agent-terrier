@@ -15,6 +15,7 @@ This document describes the public source tree. The complete local runtime is st
 | Smart contracts and contract tests | `crates/agentkeys-chain` | Local deployment and chain clients |
 | Headless product operations | `crates/agentkeys-cli`, `crates/agentkeys-daemon` | Developers, tests and the future local manager |
 | Local service supervision | `scripts/terrier_local/services.py` | `terrier services`, future local manager and explicit qualification |
+| Development signing | `crates/agentkeys-mock-server` signer implementation and `agentkeys-local-signer` entry point | Local services and authenticated native/browser clients |
 | UI tokens and components | `design-system` | `apps/parent-control`, `apps/device-display` |
 | Agent runtime plugins | `packages/agentkeys-dsh` | Agent environments |
 | Local agent composition and image | `packages/agent-terrier-runtime` | Local component development and image qualification |
@@ -133,6 +134,8 @@ Chain authority decoding rejects malformed lengths, noncanonical integer padding
 Individual capability-ID revocation has no configured implementation: `BackendClient::cap_revoke` returns an explicit `capability_revocation` error and never reports a successful local-only revocation. Owners change real chain authority through the scope-revoke or device-unbind operations in [local owner](wiki/local-owner.md); worker and object-service checks enforce the resulting grant or device denial. Capability expiry remains independently enforced.
 
 ## Local object storage
+
+The [local service owner](wiki/local-services.md) also starts `agentkeys-local-signer`, reusing the existing derivation and authenticated signer routes. Its dedicated entry point requires an explicit local development profile, a broker verification key and a protected master-key file; it ignores ambient signer secrets and serves only loopback HTTP. The supervisor preserves that key with the existing broker/worker state, refuses missing originals and owns the one-time manifest migration. No signer keys enter agent containers. Wallet signing checks the session actor; device derivation and capability proofs retain their existing actor/parent authorization. This is development software signing, without production custody guarantees. Complete browser/delegate/runtime integration remains open.
 
 Optional sign-in email delivery uses the protected [local outbox](wiki/local-email.md); no external mail service is part of the public runtime.
 

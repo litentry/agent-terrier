@@ -371,6 +371,7 @@ dependencies = [
  "agentkeys-core",
  "agentkeys-protocol",
  "agentkeys-types",
+ "anyhow",
  "async-trait",
  "axum",
  "base64 0.22.1",
@@ -392,12 +393,14 @@ dependencies = [
  "serde_json",
  "sha2",
  "sha3",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tower 0.4.13",
  "tower-http 0.5.2",
  "tracing",
  "tracing-subscriber",
+ "zeroize",
 ]
 
 [[package]]
