@@ -58,3 +58,7 @@ The only built-in profile and default is `anvil`. It contains no deployed accoun
 Software passkey commands require `AGENT_TERRIER_LOCAL_DEV=1`, the local development chain kind and ID, and a loopback HTTP RPC endpoint. Deterministic K11 parser-test stubs are disabled by default and additionally require `AGENTKEYS_K11_STUB=1`. They are not acceptance evidence for authorization. The local release must use real P-256 signatures and verify the running chain before any deployment; that runtime handshake remains part of #4.
 
 Development passkeys are created as new owner-only files (0600) and reused without overwriting them. Loading rejects symlinks, hard links, other owners and group/world-readable files. Passkey contents never appear in CLI output. Unix file permissions are required for this development storage mode.
+
+## Contract tooling
+
+`terrier` is the public local-tool entry point. Contract operations are owned by `scripts/terrier_local/contracts.py`; future local management surfaces must call this owner. The dependency revision and archive checksum have one owner in `crates/agentkeys-chain/foundry.lock`. The CLI uses a verified public archive instead of requiring submodule initialization. It builds an isolated generated cache with relative dependency paths, preserving reproducible contract metadata without workstation paths. [Contract development](wiki/contract-development.md) documents the supported commands and remaining local-chain acceptance.

@@ -25,3 +25,8 @@
 /test-results/
 /playwright-report/
 packages/agentkeys-dsh/lib/
+
+/crates/agentkeys-chain/lib/
+/crates/agentkeys-chain/out/
+/crates/agentkeys-chain/cache/
+/crates/agentkeys-chain/broadcast/

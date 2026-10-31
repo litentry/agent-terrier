@@ -4,36 +4,13 @@ out = "out"
 libs = ["lib"]
 script = "script"
 test = "test"
-# Pin = a `forge script` SIMULATOR workaround, NOT an EVM-capability ceiling.
-#
-# Heima's EVM *execution* level is actually Cancun (Frontier stable2412's
-# pallet_evm config() returns CANCUN_CONFIG). Verified on-chain 2026-06-01:
-# PUSH0 (Shanghai) and TSTORE/TLOAD (EIP-1153, Cancun-only) both deploy AND
-# execute on a heima-node dev chain. So the chain does NOT reject post-london
-# opcodes — the old "london avoids PUSH0 which Heima would reject" note was wrong.
-#
-# Why pin london anyway: Heima is a Substrate/Aura parachain via Frontier, so
-# its block header has no `prevrandao` field (a PoS-consensus header field, not
-# an opcode signal). `forge script ... --broadcast` validates the fetched header
-# against the target EVM revision before broadcasting; with evm_version=paris+
-# it errors:
-#   "EVM error; header validation error: `prevrandao` not set"
-# Verified 2026-06-01: DeployAgentKeysV1.s.sol with FOUNDRY_EVM_VERSION=cancun
-# reproduces the error; with london it deploys. (forge CREATE --broadcast does
-# NOT hit this; our deploy path is forge SCRIPT, so the pin stays.)
-# Full diagnosis: AGENTS.md "Heima EVM compatibility level".
+# Keep the shared simulator compatibility target.
 evm_version = "london"
 solc_version = "0.8.20"
 optimizer = true
 optimizer_runs = 200
-# P256Verifier.sol uses Jacobian point ops with >16 local stack variables per
-# function; legacy codegen hits "stack too deep". The IR pipeline reshuffles
-# stack usage and compiles cleanly. No semantic change for the other 4
-# contracts; tested 2026-05-19 against forge test --workspace.
+# The P-256 verifier requires IR compilation for stack depth.
 via_ir = true
-# Match arch.md §6 — events are part of the wire contract; treat them as
-# strictly as we treat function signatures. Don't let solc silently elide
-# unused params from event topics.
 extra_output = ["storageLayout"]
 
 [profile.default.fmt]
@@ -41,7 +18,3 @@ line_length = 100
 tab_width = 4
 bracket_spacing = true
 
-[rpc_endpoints]
-heima = "https://rpc.heima-parachain.heima.network"
-heima_paseo = "https://rpc.paseo-parachain.heima.network"
-anvil = "http://localhost:8545"
