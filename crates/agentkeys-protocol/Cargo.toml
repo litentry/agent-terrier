@@ -8,6 +8,7 @@ description = "Broker/worker wire protocol — the transport-agnostic, wasm-safe
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
+url = "2"
 # B2 (#203 rung 3): the UserOp build/submit response shapes are consumed by the
 # React frontend too (daemon proxies relay them verbatim), so their TS types are
 # generated from these structs. ts-rs is wasm-safe (no native deps — the wasm32

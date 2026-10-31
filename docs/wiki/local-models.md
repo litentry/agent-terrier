@@ -34,6 +34,23 @@ An existing local compatibility server can be selected with `--base-url`, `--cha
 
 Missing models fail before inference. Unsupported tools/streaming, invalid vectors and incomplete streams fail the capability check. A service error names its HTTP status and asks you to inspect model availability and runner memory. Smaller models or contexts can be tested explicitly, but their performance/capabilities are not covered by the pinned recipe until requalified.
 
+## Optional memory configuration
+
+When memory is explicitly configured, its embedding settings default to the same recipe used by the CLI and relay: local endpoint, model and measured vector dimension. There is no host credential discovery or alternate hosted endpoint. With no memory configuration, the daemon leaves the optional engine unconfigured.
+
+| Setting | Behavior |
+|---|---|
+| `OPENVIKING_WORKSPACE` / `OPENVIKING_CONFIG_FILE` | Explicit local storage and generated configuration locations |
+| `OPENVIKING_EMBED_PROVIDER` | `openai` for the compatibility API; `local` for an installed model file; `disabled` to turn embeddings off |
+| `OPENVIKING_EMBED_API_BASE` | Explicit endpoint override, validated without embedded credentials, query or fragment |
+| `OPENVIKING_EMBED_API_KEY` | Optional credential; requires an explicit API base in the same configuration |
+| `OPENVIKING_EMBED_MODEL` / `OPENVIKING_EMBED_DIMENSION` | Recipe defaults; a different model requires an explicit positive dimension |
+| `OPENVIKING_EMBED_MODEL_PATH` | Model file for the file-based embedder; a missing file refuses startup |
+
+The renderer requests text embeddings with float encoding. These fields and keyless local compatibility endpoints are supported by the [upstream 0.4.16 configuration schema](https://github.com/volcengine/OpenViking/blob/v0.4.16/openviking_cli/utils/config/embedding_config.py). Diagnostics report whether a key is set without printing it. Invalid explicit settings never select another provider. Do not change an existing memory index's model or dimension without an explicit rebuild/migration.
+
+This config renderer is covered by deterministic tests. Actual OpenViking server startup, its distribution licensing and storage-backed agent recall remain release qualification work; the model capability evidence below does not establish those results.
+
 ## Offline qualification
 
 The checked-in macOS qualifier launches its own temporary runner with an isolated home directory, cloud features disabled and OS-level outbound network denial. It verifies an external socket gets `PermissionError`, then runs the real CLI under the same restriction; successful loopback inference is the positive control. Existing model files are reused without download or pruning, exact runtime/model identities are checked, and only the qualifier's processes and temporary files are removed afterward.
