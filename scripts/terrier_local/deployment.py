@@ -1,4 +1,5 @@
 import hashlib
+import json
 import os
 from pathlib import Path
 import re
@@ -80,6 +81,23 @@ def verify_contracts(endpoint, registry):
         code = chain.rpc(endpoint, "eth_getCode", [address, "latest"])
         if not isinstance(code, str) or code in ("0x", "0x0", "0x00") or not code.startswith("0x"):
             raise RuntimeError(f"Deployed contract has no code: {name}")
+
+
+def profile_identity(profile):
+    return hashlib.sha256(json.dumps({"chain_id":profile["chain_id"], "contracts":profile["contracts"]}, sort_keys=True).encode()).hexdigest()
+
+
+def active_profile(repository, state):
+    running = chain.status(state)
+    if not running["running"]:
+        raise RuntimeError("Start the owned local chain before local operations")
+    profile = local_state.read_json(state / "chain-profile.json")
+    if profile.get("rpc", {}).get("http") != running["rpc_http"]:
+        raise ValueError("Local profile endpoint changed; run chain deploy to verify and refresh it")
+    if profile.get("contract_set_version") != (repository / "crates/agentkeys-chain/VERSION").read_text().strip():
+        raise ValueError("Local contract version differs from source")
+    verify_contracts(running["rpc_http"], {item["name"]:item["address"] for item in profile["contracts"]})
+    return running, profile, profile_identity(profile)
 
 
 def deploy(repository, state, offline=False, resume=False):

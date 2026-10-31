@@ -13,7 +13,7 @@ import urllib.request
 
 from qualify_local_owner import LocalOwnerFixture
 from qualify_local_chain import REPOSITORY, available_port
-from terrier_local import chain, contracts, local_state
+from terrier_local import chain, contracts, local_state, services
 
 
 def request(endpoint, body=None, bearer=None):
@@ -75,14 +75,8 @@ def broker(state, profile, port):
             if result.returncode:
                 raise RuntimeError("Broker test key generation failed")
     endpoint = f"http://127.0.0.1:{port}"
-    environment = contracts.tool_environment()
-    environment.update(BROKER_OIDC_ISSUER=endpoint, BROKER_DEV_MODE="true",
-                       BROKER_AUDIT_DB_PATH=str(directory / "audit.sqlite"),
-                       BROKER_OIDC_KEYPAIR_PATH=str(directory / "oidc.json"),
-                       BROKER_SESSION_KEYPAIR_PATH=str(directory / "session.json"),
-                       AGENTKEYS_CHAIN_PROFILE_FILE=str(profile))
-    process = subprocess.Popen([str(binary), "--port", str(port),
-                               "--export-session-pubkey-to", str(directory / "session-public.pem")], env=environment,
+    environment = services.broker_environment(directory, profile, port)
+    process = subprocess.Popen([str(binary), *services.broker_arguments(directory, port)], env=environment,
                                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                                stderr=subprocess.DEVNULL, umask=0o077)
     try:

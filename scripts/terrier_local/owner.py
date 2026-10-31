@@ -1,4 +1,3 @@
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -83,17 +82,8 @@ def execute(repository, state, action, name, actor=None, services=None, read_onl
         raise ValueError("Grant requires at least one --service")
     if action == "revoke" and (services or read_only):
         raise ValueError("Revoke does not accept grant arguments")
-    running = chain.status(state)
-    if not running["running"]:
-        raise RuntimeError("Start the owned local chain before owner operations")
+    running, profile, fingerprint = deployment.active_profile(repository, state)
     profile_path = state / "chain-profile.json"
-    profile = local_state.read_json(profile_path)
-    if profile.get("rpc", {}).get("http") != running["rpc_http"]:
-        raise ValueError("Local profile endpoint changed; run chain deploy to verify and refresh it")
-    if profile.get("contract_set_version") != (repository / "crates/agentkeys-chain/VERSION").read_text().strip():
-        raise ValueError("Local contract version differs from source")
-    deployment.verify_contracts(running["rpc_http"], {item["name"]:item["address"] for item in profile["contracts"]})
-    fingerprint = hashlib.sha256(json.dumps({"chain_id":profile["chain_id"], "contracts":profile["contracts"]}, sort_keys=True).encode()).hexdigest()
     directory = state / "owners" / name
     if action != "register" and not directory.exists():
         raise ValueError("Register this local owner first")

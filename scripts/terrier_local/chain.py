@@ -67,8 +67,8 @@ def node_identity(endpoint, chain_id, instance_id=None):
     return metadata["instanceId"]
 
 
-def socket_path(state):
-    path = state / SOCKET_NAME
+def socket_path(state, socket_name=SOCKET_NAME):
+    path = state / socket_name
     if len(os.fsencode(path)) > 100:
         raise ValueError("Local state path is too long for its control socket; choose a shorter state directory")
     return path
@@ -95,8 +95,8 @@ def receive_message(connection):
     return result
 
 
-def control(state, action):
-    path = socket_path(state)
+def control(state, action, socket_name=SOCKET_NAME):
+    path = socket_path(state, socket_name)
     try:
         validate_socket(path)
     except FileNotFoundError:

@@ -17,7 +17,7 @@ The result includes the operator identity, account, device-key hash and verified
 
 ## Log in to the local broker
 
-Start the public broker with the same generated chain profile, its own fresh signing keys and explicit private state paths. Complete service supervision is still under development; the login command connects to an already running broker.
+Start the public broker through [`terrier services start`](./local-services.md). It uses the generated chain profile, fresh signing keys and private state paths. The login command connects to that running broker.
 
 Local, from the public checkout in the same state directory used for registration:
 
