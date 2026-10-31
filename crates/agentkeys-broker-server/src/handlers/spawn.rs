@@ -1212,15 +1212,15 @@ async fn finalize_spawn(
     } else {
         None
     };
-    let (issuer, worker_override) = crate::handlers::sandbox::chat_link_env_sources();
+    let service_environment =
+        crate::handlers::sandbox::delegate_service_environment(|name| std::env::var(name).ok());
     extra_envs.extend(crate::handlers::sandbox::delegate_identity_envs(
         actor_omni,
         &format!("0x{}", hex::encode(session_omni)),
         k10_secret.as_deref(),
         session_jwt.as_deref(),
         &chat_channel_id,
-        issuer.as_deref(),
-        worker_override.as_deref(),
+        &service_environment,
         // #577 — arm the sandbox-management surface from the first boot so a
         // later one-click update can hand the Hermes home off.
         Some(&crate::handlers::sandbox::sandbox_mgmt_token(

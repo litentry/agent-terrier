@@ -27,6 +27,28 @@ const TOKENS: &[&str] = &[
     model_runtime::API_KEY,
 ];
 
+const OPTIONAL_APPLICATION_ENVIRONMENT: &[&str] = &[
+    sandbox_env::MEMORY_NS,
+    sandbox_env::BOUND_CHANNELS,
+    sandbox_env::APP_TEMPLATE,
+    sandbox_env::APP_AVAILABILITY,
+    sandbox_env::MEMORY_NAMESPACES,
+    sandbox_env::WAKE_SINCE_MS,
+    sandbox_env::APP_TZ_OFFSET_MINUTES,
+];
+
+fn require_identifier(value: &str) -> Result<()> {
+    ensure!(
+        !value.is_empty()
+            && value.len() <= 256
+            && !value
+                .bytes()
+                .any(|byte| byte.is_ascii_control() || byte.is_ascii_whitespace()),
+        "invalid bootstrap identifier"
+    );
+    Ok(())
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeBootstrap {
@@ -44,6 +66,7 @@ impl RuntimeBootstrap {
                     model_runtime::BASE_URL,
                     model_runtime::API_KEY,
                     model_runtime::MODEL_ID,
+                    model_runtime::SPEECH_URL,
                     sandbox_env::BRIDGE_TOKEN,
                     sandbox_env::MGMT_TOKEN,
                 ]
@@ -65,11 +88,13 @@ impl RuntimeBootstrap {
                     .iter()
                     .any(|(_, environment_name)| environment_name == name)
                     || TOKENS.contains(&name.as_str())
+                    || OPTIONAL_APPLICATION_ENVIRONMENT.contains(&name.as_str())
                     || [
                         sandbox_env::ACTOR_OMNI,
                         sandbox_env::OPERATOR_OMNI,
                         sandbox_env::CHAT_CHANNEL_ID,
-                        model_runtime::MODEL_ID
+                        model_runtime::MODEL_ID,
+                        model_runtime::SPEECH_URL
                     ]
                     .contains(&name.as_str()),
                 "unsupported bootstrap environment field"
@@ -108,14 +133,48 @@ impl RuntimeBootstrap {
             );
         }
         for name in [sandbox_env::CHAT_CHANNEL_ID, model_runtime::MODEL_ID] {
-            let value = self.value(name)?;
+            require_identifier(self.value(name)?)?;
+        }
+        for name in [sandbox_env::MEMORY_NS, sandbox_env::APP_TEMPLATE] {
+            if let Some(value) = self.environment.get(name) {
+                require_identifier(value)?;
+            }
+        }
+        if let Some(value) = self.environment.get(sandbox_env::MEMORY_NAMESPACES) {
+            for namespace in value.split(',') {
+                require_identifier(namespace)?;
+            }
+        }
+        if let Some(value) = self.environment.get(sandbox_env::BOUND_CHANNELS) {
+            let channels: Vec<agentkeys_protocol::BoundChannel> = serde_json::from_str(value)
+                .map_err(|_| anyhow::anyhow!("invalid bootstrap bound channels"))?;
+            for channel in channels {
+                require_identifier(&channel.slot)?;
+                require_identifier(&channel.channel_id)?;
+                if let Some(actor) = channel.endpoint_actor_omni {
+                    let actor = actor.strip_prefix("0x").unwrap_or(&actor);
+                    ensure!(
+                        actor.len() == 64 && actor.bytes().all(|byte| byte.is_ascii_hexdigit()),
+                        "invalid bootstrap channel actor"
+                    );
+                }
+            }
+        }
+        if let Some(value) = self.environment.get(sandbox_env::APP_AVAILABILITY) {
             ensure!(
-                !value.is_empty()
-                    && value.len() <= 256
-                    && !value
-                        .bytes()
-                        .any(|byte| byte.is_ascii_control() || byte.is_ascii_whitespace()),
-                "invalid bootstrap model or channel identifier"
+                agentkeys_protocol::Availability::parse(value).is_some(),
+                "invalid bootstrap availability"
+            );
+        }
+        if let Some(value) = self.environment.get(sandbox_env::WAKE_SINCE_MS) {
+            ensure!(value.parse::<u64>().is_ok(), "invalid bootstrap wake time");
+        }
+        if let Some(value) = self.environment.get(sandbox_env::APP_TZ_OFFSET_MINUTES) {
+            ensure!(
+                value
+                    .parse::<i64>()
+                    .is_ok_and(|minutes| (-14 * 60..=14 * 60).contains(&minutes)),
+                "invalid bootstrap timezone offset"
             );
         }
         model_runtime::validate_environment(|name| self.environment.get(name).map(String::as_str))
@@ -194,5 +253,49 @@ mod tests {
         invalid = fixture();
         invalid.version += 1;
         assert!(invalid.validate().is_err());
+    }
+
+    #[test]
+    fn broker_metadata_uses_shared_shapes_and_rejects_malformed_values() {
+        let mut valid = fixture();
+        valid
+            .environment
+            .extend(agentkeys_protocol::model_runtime::relay_environment(
+                "http://127.0.0.1:1/v1",
+                "synthetic-proof-only".into(),
+                "fixture-model",
+            ));
+        for (name, value) in [
+            (sandbox_env::MEMORY_NS, "agent-memory"),
+            (sandbox_env::APP_TEMPLATE, "fixture-app"),
+            (sandbox_env::MEMORY_NAMESPACES, "agent-memory,shared"),
+            (sandbox_env::BOUND_CHANNELS, "[]"),
+            (sandbox_env::APP_AVAILABILITY, "always-on"),
+            (sandbox_env::WAKE_SINCE_MS, "123"),
+            (sandbox_env::APP_TZ_OFFSET_MINUTES, "480"),
+        ] {
+            valid.environment.insert(name.into(), value.into());
+        }
+        valid.validate().unwrap();
+        assert_eq!(valid.agent_environment().len(), 6);
+        assert!(!valid
+            .agent_environment()
+            .contains_key(sandbox_env::MEMORY_NS));
+        for (name, value) in [
+            (sandbox_env::MEMORY_NS, "bad\nnamespace"),
+            (sandbox_env::MEMORY_NAMESPACES, "first,,third"),
+            (sandbox_env::BOUND_CHANNELS, "[{\"slot\":\"x\"}]"),
+            (sandbox_env::APP_AVAILABILITY, "invalid"),
+            (sandbox_env::WAKE_SINCE_MS, "-1"),
+            (sandbox_env::APP_TZ_OFFSET_MINUTES, "841"),
+            (model_runtime::SPEECH_URL, "http://127.0.0.1:2"),
+        ] {
+            let previous = valid.environment.insert(name.into(), value.into()).unwrap();
+            assert!(
+                valid.validate().is_err(),
+                "malformed optional metadata accepted"
+            );
+            valid.environment.insert(name.into(), previous);
+        }
     }
 }
