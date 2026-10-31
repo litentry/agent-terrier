@@ -842,6 +842,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .unwrap();
         let resp = console_device_status(State(state.clone())).await;

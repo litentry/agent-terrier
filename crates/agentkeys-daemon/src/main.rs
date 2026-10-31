@@ -417,7 +417,8 @@ struct Args {
     #[arg(long)]
     force: bool,
 
-    /// Path to the agent's K10 device-key file for the pairing flow. Defaults
+    /// Existing registered K10 key for UI worker calls; UI mode never creates a key.
+    /// Also selects the agent's K10 device-key file for pairing. Pairing defaults
     /// to the same path as `agentkeys agent device-session`
     /// (`~/.agentkeys/agent-device.key`) so the CLI + daemon share one key.
     /// Reused on retry (never auto-regenerated) so a re-run after a failed master
@@ -1394,6 +1395,12 @@ async fn run_companion_mode(args: Args) -> anyhow::Result<()> {
 /// the axum router from `proxy::build_router`. The router caches caps
 /// for 5 min and fails closed after 60s of broker silence.
 async fn run_ui_bridge_mode(args: Args) -> anyhow::Result<()> {
+    let device_key = args
+        .device_key_file
+        .as_deref()
+        .map(agentkeys_core::device_crypto::DeviceKey::load)
+        .transpose()?
+        .map(std::sync::Arc::new);
     let state = ui_bridge::build_state(
         &args.ui_bridge_rp_id,
         &args.ui_bridge_origin,
@@ -1416,6 +1423,7 @@ async fn run_ui_bridge_mode(args: Args) -> anyhow::Result<()> {
         // Issue #220: root master-session persistence at ~/.agentkeys (None when no
         // $HOME resolves → persistence disabled, never a surprising relative path).
         master_session::MasterSessionStore::from_home_env(),
+        device_key,
     )
     .with_context(|| {
         format!(

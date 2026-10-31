@@ -46,7 +46,7 @@ use tower_http::cors::{Any, CorsLayer};
 use url::Url;
 use webauthn_rs::prelude::*;
 
-use agentkeys_core::init_flow;
+use agentkeys_core::{device_crypto::DeviceKey, init_flow};
 
 use crate::master_session::{self, MasterSessionStore, PersistedMasterSession};
 
@@ -265,10 +265,11 @@ pub struct UiBridgeState {
     /// runs, `registered_master` holds the freshly-registered hash and takes
     /// precedence, so the operator no longer has to pass `--master-device-key-hash`.
     pub master_device_key_hash: Option<String>,
+    pub device_key: Option<Arc<DeviceKey>>,
     /// Issue #196: the on-chain master-device registration result, populated by
     /// the K11-finish handler's register shell-out. `Some` ⇒ the master device is
-    /// on chain with CAP_MINT; its `device_key_hash` is what real cap-mint sends
-    /// (takes precedence over `master_device_key_hash`).
+    /// on chain with CAP_MINT. Enrollment metadata is separate from the
+    /// explicitly injected request-signing device key.
     pub registered_master: RwLock<Option<RegisteredMaster>>,
     /// Issue #196: path to `e2e/scripts/heima-register-first-master.sh` (the
     /// §4.2 sanctioned shell-out). `None` ⇒ K11-finish does NOT submit the
@@ -322,8 +323,8 @@ pub struct PendingMasterRegister {
 /// Issue #196: outcome of the on-chain master-device registration shell-out.
 #[derive(Clone, Debug)]
 pub struct RegisteredMaster {
-    /// `device_key_hash` the broker resolves on cap-mint — what `real_memory_ctx`
-    /// sends. Derived + returned by `heima-register-first-master.sh`.
+    /// Device hash returned by the legacy enrollment flow. Worker requests
+    /// derive their proof identity from the explicitly configured device key.
     pub device_key_hash: String,
     /// The session (managed-wallet) omni the device was registered under
     /// (operator == actor for master-self). `cap.rs` requires
@@ -967,6 +968,7 @@ pub fn build_state(
     master_device_key_hash: Option<String>,
     register_master_script: Option<String>,
     master_session_store: Option<MasterSessionStore>,
+    device_key: Option<Arc<DeviceKey>>,
 ) -> anyhow::Result<SharedUiBridgeState> {
     let origin = Url::parse(rp_origin)?;
     let builder = WebauthnBuilder::new(rp_id, &origin)?.rp_name(rp_name);
@@ -1062,6 +1064,7 @@ pub fn build_state(
         weixin_admin_token,
         region,
         master_device_key_hash,
+        device_key,
         registered_master: RwLock::new(None),
         register_master_script,
         chain_profile,
@@ -7113,9 +7116,7 @@ pub(crate) fn channel_worker_url(broker: &str) -> Result<String, String> {
     })
 }
 
-/// Master-self channel cap (operator == actor — the session-authenticated
-/// operator path of the channel-kind matrix; no operator K10 involved beyond
-/// the daemon's own device key for the #76 PoP when configured).
+/// Owner channel capabilities require the explicitly configured device key.
 /// The console's channel caps are minted with this TTL (seconds)…
 const CHANNEL_CAP_TTL_SECS: u64 = 120;
 /// …and reused for that long minus this margin. Every chip poll, chat poll
@@ -7142,7 +7143,15 @@ pub(crate) async fn master_channel_cap(
     op: agentkeys_backend_client::protocol::CapMintOp,
 ) -> Result<(serde_json::Value, SessionCoords), String> {
     let coords = resolve_session_coords(state).await?;
-    let cache_key = format!("{}|{}|{:?}", coords.omni, direction_service, op);
+    let key = state
+        .device_key
+        .clone()
+        .ok_or("channel calls require an existing registered device key file")?;
+    let device_key_hash = key.device_key_hash().map_err(|error| error.to_string())?;
+    let cache_key = format!(
+        "{}|{}|{}|{:?}",
+        coords.omni, device_key_hash, direction_service, op
+    );
     if let Ok(cache) = channel_cap_cache().lock() {
         if let Some((cap, cached_coords, at)) = cache.get(&cache_key) {
             if channel_cap_reusable(at.elapsed()) && cached_coords.broker == coords.broker {
@@ -7151,7 +7160,8 @@ pub(crate) async fn master_channel_cap(
         }
     }
     let client =
-        agentkeys_backend_client::BackendClient::new(Some(coords.broker.clone()), None, None, None);
+        agentkeys_backend_client::BackendClient::new(Some(coords.broker.clone()), None, None, None)
+            .with_device_key(key);
     let cap = client
         .cap_mint(
             op,
@@ -7159,7 +7169,7 @@ pub(crate) async fn master_channel_cap(
                 operator_omni: coords.omni.clone(),
                 actor_omni: coords.omni.clone(),
                 service: direction_service,
-                device_key_hash: coords.device_key_hash.clone(),
+                device_key_hash,
                 ttl_seconds: CHANNEL_CAP_TTL_SECS,
             },
             &coords.j1,
@@ -9736,7 +9746,7 @@ struct RealMemoryCtx {
     region: String,
     j1: String,
     omni: String,
-    device_key_hash: String,
+    device_key: Arc<DeviceKey>,
     /// #514/#582 — the memory plane rides the SAME signer decision point as
     /// config/cred: `Some("ve")` mints through the signer (`role_arn` is then
     /// carried but unused — the signer selects the role by data class, #511).
@@ -9764,7 +9774,10 @@ async fn real_memory_ctx(state: &UiBridgeState) -> Result<Option<RealMemoryCtx>,
         region: c.region,
         j1: c.j1,
         omni: c.omni,
-        device_key_hash: c.device_key_hash,
+        device_key: state
+            .device_key
+            .clone()
+            .ok_or("worker calls require an existing registered device key file")?,
         signer_url: state.signer_url.clone(),
         sts_provider: state.sts_provider.clone(),
     }))
@@ -9791,7 +9804,7 @@ pub(crate) struct RealConfigCtx {
     region: String,
     j1: String,
     omni: String,
-    device_key_hash: String,
+    device_key: Arc<DeviceKey>,
     /// Signer base URL (#372 item 2): the taxonomy is CLIENT-encrypted under
     /// the signer-derived per-actor KEK (v3 envelopes) before it reaches the
     /// config worker. `None` fails LOUD at store/fetch time — never a silent
@@ -9822,7 +9835,10 @@ pub(crate) async fn real_config_ctx(
         region: c.region,
         j1: c.j1,
         omni: c.omni,
-        device_key_hash: c.device_key_hash,
+        device_key: state
+            .device_key
+            .clone()
+            .ok_or("worker calls require an existing registered device key file")?,
         signer_url: state.signer_url.clone(),
         sts_provider: state.sts_provider.clone(),
     }))
@@ -10018,7 +10034,7 @@ async fn mint_master_cap(
     broker: &str,
     j1: &str,
     omni: &str,
-    device_key_hash: &str,
+    device_key: &Arc<DeviceKey>,
     route: &str,
     service: &str,
 ) -> Result<agentkeys_backend_client::CapToken, String> {
@@ -10033,11 +10049,8 @@ async fn mint_master_cap(
         "cred-fetch" => CapMintOp::CredFetch,
         other => return Err(format!("mint_master_cap: unknown cap route {other}")),
     };
-    let mut client = BackendClient::new(Some(broker.to_string()), None, None, None);
-    // Workers require a fresh actor proof for every capability.
-    if let Some(dk) = agentkeys_core::device_crypto::load_device_key_from_env() {
-        client = client.with_device_key(std::sync::Arc::new(dk));
-    }
+    let client = BackendClient::new(Some(broker.to_string()), None, None, None)
+        .with_device_key(device_key.clone());
     client
         .cap_mint(
             op,
@@ -10045,7 +10058,9 @@ async fn mint_master_cap(
                 operator_omni: omni.to_string(),
                 actor_omni: omni.to_string(),
                 service: service.to_string(),
-                device_key_hash: device_key_hash.to_string(),
+                device_key_hash: device_key
+                    .device_key_hash()
+                    .map_err(|error| error.to_string())?,
                 ttl_seconds: 300,
             },
             j1,
@@ -10070,7 +10085,7 @@ async fn memory_put_ns_real(
         &ctx.broker,
         &ctx.j1,
         &ctx.omni,
-        &ctx.device_key_hash,
+        &ctx.device_key,
         "memory-put",
         &format!("knowledge:{ns}"),
     )
@@ -10132,7 +10147,7 @@ async fn memory_put_object_real(
         &ctx.broker,
         &ctx.j1,
         &ctx.omni,
-        &ctx.device_key_hash,
+        &ctx.device_key,
         "memory-put",
         &format!("knowledge:{ns}"),
     )
@@ -10174,7 +10189,7 @@ async fn memory_get_object_real(
         &ctx.broker,
         &ctx.j1,
         &ctx.omni,
-        &ctx.device_key_hash,
+        &ctx.device_key,
         "memory-get",
         &format!("knowledge:{ns}"),
     )
@@ -10438,7 +10453,7 @@ async fn memory_get_ns_hashed_real(
         &ctx.broker,
         &ctx.j1,
         &ctx.omni,
-        &ctx.device_key_hash,
+        &ctx.device_key,
         "memory-get",
         &format!("knowledge:{ns}"),
     )
@@ -10514,7 +10529,7 @@ pub(crate) async fn config_store_doc(
         &ctx.broker,
         &ctx.j1,
         &ctx.omni,
-        &ctx.device_key_hash,
+        &ctx.device_key,
         "config-store",
         service,
     )
@@ -10589,7 +10604,7 @@ pub(crate) async fn config_fetch_doc(
         &ctx.broker,
         &ctx.j1,
         &ctx.omni,
-        &ctx.device_key_hash,
+        &ctx.device_key,
         "config-fetch",
         service,
     )
@@ -11217,7 +11232,7 @@ async fn inbox_worker_post(
         &ctx.broker,
         &ctx.j1,
         &ctx.omni,
-        &ctx.device_key_hash,
+        &ctx.device_key,
         if path == "/v1/memory/inbox-delete" {
             "memory-inbox-delete"
         } else {
@@ -13081,7 +13096,7 @@ struct RealCredCtx {
     region: String,
     j1: String,
     omni: String,
-    device_key_hash: String,
+    device_key: Arc<DeviceKey>,
     /// Signer base URL — required on the VE posture for BOTH the #514 STS
     /// mint and the #372 client-side v3 KEK derivation.
     signer_url: Option<String>,
@@ -13113,7 +13128,10 @@ async fn real_cred_ctx(state: &UiBridgeState) -> Result<Option<RealCredCtx>, Str
         region: c.region,
         j1: c.j1,
         omni: c.omni,
-        device_key_hash: c.device_key_hash,
+        device_key: state
+            .device_key
+            .clone()
+            .ok_or("worker calls require an existing registered device key file")?,
         signer_url: state.signer_url.clone(),
         sts_provider: state.sts_provider.clone(),
     }))
@@ -13151,7 +13169,7 @@ async fn list_master_credentials_inner(
         &ctx.broker,
         &ctx.j1,
         &ctx.omni,
-        &ctx.device_key_hash,
+        &ctx.device_key,
         "cred-fetch",
         "credentials",
     )
@@ -13275,7 +13293,7 @@ async fn store_master_credential_inner(
         &ctx.broker,
         &ctx.j1,
         &ctx.omni,
-        &ctx.device_key_hash,
+        &ctx.device_key,
         "cred-store",
         service,
     )
@@ -13385,7 +13403,107 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn channel_caps_require_explicit_keys_and_cache_separately_per_key() {
+        use agentkeys_backend_client::protocol::{BrokerCapRequest, CapMintOp};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let directory = tempfile::tempdir().unwrap();
+        let keys: Vec<_> = ["first", "second"]
+            .into_iter()
+            .map(|name| {
+                Arc::new(
+                    DeviceKey::load_or_generate(
+                        directory.path().join(name).to_str().unwrap(),
+                        false,
+                    )
+                    .unwrap(),
+                )
+            })
+            .collect();
+        let expected_keys = keys.clone();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed_calls = calls.clone();
+        let router = Router::new().route(
+            CapMintOp::ChannelPublish.broker_path(),
+            post(move |Json(body): Json<BrokerCapRequest>| {
+                let keys = expected_keys.clone();
+                let calls = observed_calls.clone();
+                async move {
+                    let key = keys
+                        .iter()
+                        .find(|key| key.device_key_hash().unwrap() == body.device_key_hash)
+                        .unwrap();
+                    assert_eq!(
+                        body.client_sig.as_deref(),
+                        Some(
+                            key.cap_pop_sig(
+                                &body.operator_omni,
+                                &body.actor_omni,
+                                &body.service,
+                                CapMintOp::ChannelPublish.op_str(),
+                                CapMintOp::ChannelPublish.data_class(),
+                                body.client_nonce.as_deref().unwrap(),
+                                body.client_ts.unwrap(),
+                            )
+                            .unwrap()
+                            .as_str()
+                        )
+                    );
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    Json(serde_json::json!({"device":body.device_key_hash}))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let task = tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+        for (index, key) in keys.iter().enumerate() {
+            let mut state = make_state_real(None);
+            let mutable = Arc::get_mut(&mut state).unwrap();
+            mutable.broker_url = Some(endpoint.clone());
+            mutable.device_key = Some(key.clone());
+            mutable.master_device_key_hash = Some("33".repeat(32));
+            *state.onboarding_session.write().await = Some(OnboardingSession {
+                email: "synthetic@example.test".into(),
+                omni: "11".repeat(32),
+                j1: "synthetic-session".into(),
+                wallet: "fixture".into(),
+                identity_only_reason: None,
+            });
+            for _ in 0..2 {
+                let (cap, _) = master_channel_cap(
+                    &state,
+                    "channel-pub:fixture".into(),
+                    CapMintOp::ChannelPublish,
+                )
+                .await
+                .unwrap();
+                assert_eq!(cap["device"], key.device_key_hash().unwrap());
+            }
+            assert_eq!(calls.load(Ordering::SeqCst), index + 1);
+            Arc::get_mut(&mut state).unwrap().device_key = None;
+            assert!(master_channel_cap(
+                &state,
+                "channel-pub:fixture".into(),
+                CapMintOp::ChannelPublish
+            )
+            .await
+            .err()
+            .expect("missing device key must refuse")
+            .contains("existing registered device key"));
+            assert_eq!(calls.load(Ordering::SeqCst), index + 1);
+        }
+        task.abort();
+    }
+
+    #[tokio::test]
     async fn config_store_requires_a_confirmed_worker_receipt() {
+        let directory = tempfile::tempdir().unwrap();
+        let key = Arc::new(
+            DeviceKey::load_or_generate(directory.path().join("device").to_str().unwrap(), false)
+                .unwrap(),
+        );
         let responses = Arc::new(std::sync::Mutex::new(std::collections::VecDeque::from([
             serde_json::json!({"ok":false,"s3_key":"fixture","envelope_size":0}),
             serde_json::json!({}),
@@ -13415,7 +13533,7 @@ mod tests {
             region: String::new(),
             j1: "fixture".into(),
             omni: "0xab".into(),
-            device_key_hash: "fixture".into(),
+            device_key: key,
             signer_url: Some(endpoint),
             sts_provider: Some("ve".into()),
         };
@@ -13652,6 +13770,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .unwrap();
         *state.onboarding_session.write().await = Some(OnboardingSession {
@@ -13703,6 +13822,7 @@ mod tests {
             None,
             None,
             "us-east-1".into(),
+            None,
             None,
             None,
             None,
@@ -14447,6 +14567,7 @@ mod tests {
             None,
             None,
             None, // #220 master_session_store — tests never persist to $HOME
+            None,
         )
         .unwrap()
     }
@@ -14477,6 +14598,7 @@ mod tests {
             None,
             Some(register_master_script),
             None,
+            None,
         )
         .unwrap()
     }
@@ -14504,6 +14626,7 @@ mod tests {
             None, // master_device_key_hash — deliberately UNSET (derivation path)
             None,
             store,
+            None,
         )
         .unwrap()
     }
@@ -14868,6 +14991,7 @@ mod tests {
             None,
             None,
             Some(store),
+            None,
         )
         .unwrap();
         // Logged-out coords (expired record) — what the login screen sees.
@@ -15279,6 +15403,7 @@ mod tests {
             Some("0xdkh".into()),
             None,
             None, // #220 master_session_store
+            None,
         )
         .unwrap();
         let err = match real_memory_ctx(&state).await {
@@ -15312,6 +15437,7 @@ mod tests {
             Some("0xdkh".into()),
             None,
             None, // #220 master_session_store
+            None,
         )
         .unwrap();
         let err = match real_memory_ctx(&state).await {
@@ -16105,6 +16231,7 @@ mod tests {
             None,
             Some(tmp.path().join("master.sh").to_string_lossy().into_owned()),
             None,
+            None,
         )
         .unwrap();
         set_chain_rpc(&mut state, &format!("http://{chain}"));
@@ -16216,6 +16343,7 @@ mod tests {
             None, // sandbox_bridge_token
             None, // audit_worker_url
             "us-east-1".into(),
+            None,
             None,
             None,
             None,
@@ -16556,6 +16684,7 @@ mod tests {
             None,
             Some(tmp.path().join("master.sh").to_string_lossy().into_owned()),
             None,
+            None,
         )
         .unwrap();
         set_chain_rpc(&mut state, &format!("http://{addr}"));
@@ -16624,6 +16753,7 @@ mod tests {
             "us-east-1".into(),
             None,
             Some(tmp.path().join("master.sh").to_string_lossy().into_owned()),
+            None,
             None,
         )
         .unwrap();
@@ -16701,6 +16831,7 @@ mod tests {
             "us-east-1".into(),
             None,
             Some(tmp.path().join("master.sh").to_string_lossy().into_owned()),
+            None,
             None,
         )
         .unwrap();
@@ -16801,6 +16932,7 @@ mod tests {
             None, // sandbox_bridge_token
             None, // audit_worker_url — tests never fetch real envelopes by default
             "us-east-1".into(),
+            None,
             None,
             None,
             None,
@@ -16962,6 +17094,7 @@ mod tests {
             None,
             None,
             "us-east-1".into(),
+            None,
             None,
             None,
             None,
@@ -17481,6 +17614,7 @@ mod tests {
             None,
             None,
             None, // #220 master_session_store
+            None,
         )
         .unwrap();
         let resp = list_master_memory(State(state)).await;
@@ -17710,6 +17844,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .unwrap();
         let evt = ApiAuditEvent {
@@ -17927,6 +18062,7 @@ mod tests {
             None,
             Some(script),
             None, // #220 master_session_store
+            None,
         )
         .unwrap();
         let build = finish_chain_register(&state, "credid", Some("ignored")).await;
