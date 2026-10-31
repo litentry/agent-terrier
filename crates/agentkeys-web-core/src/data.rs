@@ -3,8 +3,7 @@ use agentkeys_protocol::{
     auth::{SignMessageRequest, SignedMessage},
     normalize_omni_0x, AuditAppendV2, AuditAppendV2Resp, BrokerCapRequest, CapMintOp, CapToken,
     ConfigGetBody, ConfigGetResp, ConfigPutBody, CredFetchBody, CredFetchResp, CredStoreBody,
-    CredStoreResp, MemoryGetBody, MemoryGetResp, MemoryPutBody, MemoryPutResp, SignStsBody,
-    SignStsResult,
+    CredStoreResp, MemoryGetBody, MemoryGetResp, MemoryPutBody, MemoryPutResp,
 };
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde::{de::DeserializeOwned, Serialize};
@@ -186,52 +185,12 @@ impl DataClient {
         Ok((response.classification, true))
     }
 
-    async fn sts(
-        &self,
-        session: &DataSession<'_>,
-        data_class: &str,
-        verbs: &[&str],
-    ) -> Result<SignStsResult, DataError> {
-        let token: agentkeys_protocol::auth::OidcJwtResponse = self
-            .send(
-                self.http
-                    .post(endpoint(&self.endpoints.broker_url, "/v1/mint-oidc-jwt"))
-                    .bearer_auth(session.bearer),
-            )
-            .await?;
-        self.send(
-            self.http
-                .post(endpoint(&self.endpoints.signer_url, "/dev/sign-sts"))
-                .bearer_auth(session.bearer)
-                .json(&SignStsBody {
-                    omni_account: normalize_omni_0x(session.actor_omni),
-                    data_class: data_class.into(),
-                    verbs: verbs.iter().map(|verb| (*verb).into()).collect(),
-                    ttl_seconds: 900,
-                    oidc_token: token.jwt,
-                }),
-        )
-        .await
-    }
-
     pub(crate) async fn worker<T: DeserializeOwned>(
         &self,
-        session: &DataSession<'_>,
         url: String,
-        data_class: &str,
-        verbs: &[&str],
         body: &impl Serialize,
     ) -> Result<T, DataError> {
-        let credentials = self.sts(session, data_class, verbs).await?;
-        self.send(
-            self.http
-                .post(url)
-                .header("x-aws-access-key-id", credentials.access_key_id)
-                .header("x-aws-secret-access-key", credentials.secret_access_key)
-                .header("x-aws-session-token", credentials.session_token)
-                .json(body),
-        )
-        .await
+        self.send(self.http.post(url).json(body)).await
     }
 
     async fn kek(&self, session: &DataSession<'_>, service: &str) -> Result<[u8; 32], DataError> {
@@ -302,10 +261,7 @@ impl DataClient {
             .await?;
         let response: ConfigGetResp = match self
             .worker(
-                session,
                 endpoint(&self.endpoints.config_url, "/v1/config/get"),
-                "config",
-                &["get"],
                 &ConfigGetBody { cap },
             )
             .await
@@ -345,10 +301,7 @@ impl DataClient {
         let envelope = self.encrypt(session, service, plaintext).await?;
         let response: MemoryPutResp = self
             .worker(
-                session,
                 endpoint(&self.endpoints.config_url, "/v1/config/put"),
-                "config",
-                &["get", "put"],
                 &ConfigPutBody {
                     cap,
                     plaintext_b64: None,
@@ -377,10 +330,7 @@ impl DataClient {
             .await?;
         let response: MemoryGetResp = match self
             .worker(
-                session,
                 endpoint(&self.endpoints.memory_url, "/v1/memory/get"),
-                "memory",
-                &["get"],
                 &MemoryGetBody {
                     cap,
                     namespace: namespace.into(),
@@ -412,10 +362,7 @@ impl DataClient {
             .cap_mint(session, CapMintOp::MemoryPut, &service)
             .await?;
         self.worker(
-            session,
             endpoint(&self.endpoints.memory_url, "/v1/memory/put"),
-            "memory",
-            &["get", "put"],
             &MemoryPutBody {
                 cap,
                 namespace: namespace.into(),
@@ -436,10 +383,7 @@ impl DataClient {
             .await?;
         let response: agentkeys_protocol::CredListResp = self
             .worker(
-                session,
                 endpoint(&self.endpoints.credential_url, "/v1/cred/list"),
-                "vault",
-                &["get", "list"],
                 &CredFetchBody { cap },
             )
             .await?;
@@ -456,10 +400,7 @@ impl DataClient {
             .await?;
         let response: CredFetchResp = match self
             .worker(
-                session,
                 endpoint(&self.endpoints.credential_url, "/v1/cred/fetch"),
-                "vault",
-                &["get"],
                 &CredFetchBody { cap },
             )
             .await
@@ -489,10 +430,7 @@ impl DataClient {
             .await?;
         let envelope = self.encrypt(session, service, plaintext).await?;
         self.worker(
-            session,
             endpoint(&self.endpoints.credential_url, "/v1/cred/store"),
-            "vault",
-            &["put"],
             &CredStoreBody {
                 cap,
                 plaintext_b64: None,
@@ -511,10 +449,7 @@ impl DataClient {
             .await?;
         let response: agentkeys_protocol::InboxListResp = self
             .worker(
-                session,
                 endpoint(&self.endpoints.memory_url, "/v1/memory/inbox-list"),
-                "memory",
-                &["get", "list"],
                 &agentkeys_protocol::InboxListBody { cap },
             )
             .await?;
@@ -533,10 +468,7 @@ impl DataClient {
             .await?;
         let response: agentkeys_protocol::InboxGetResp = self
             .worker(
-                session,
                 endpoint(&self.endpoints.memory_url, "/v1/memory/inbox-get"),
-                "memory",
-                &["get"],
                 &agentkeys_protocol::InboxGetBody {
                     cap,
                     s3_key: s3_key.into(),
@@ -558,10 +490,7 @@ impl DataClient {
             .await?;
         let response: agentkeys_protocol::InboxDeleteResp = self
             .worker(
-                session,
                 endpoint(&self.endpoints.memory_url, "/v1/memory/inbox-delete"),
-                "memory",
-                &["delete"],
                 &agentkeys_protocol::InboxDeleteBody {
                     cap,
                     s3_key: s3_key.into(),
@@ -665,6 +594,7 @@ mod tests {
 
     #[derive(Default)]
     struct Fixture {
+        cloud_requests: usize,
         requests: Vec<BrokerCapRequest>,
         documents: std::collections::HashMap<String, (String, String)>,
         inbox: Option<agentkeys_protocol::InboxItem>,
@@ -681,10 +611,11 @@ mod tests {
     fn bearer(headers: &HeaderMap) {
         assert_eq!(headers.get("authorization").unwrap(), "Bearer test-session");
     }
-    fn credentials(headers: &HeaderMap) {
-        assert_eq!(headers["x-aws-access-key-id"], "fixture-access");
-        assert_eq!(headers["x-aws-secret-access-key"], "fixture-secret");
-        assert_eq!(headers["x-aws-session-token"], "fixture-token");
+    fn capability_only_headers(headers: &HeaderMap) {
+        assert!(!headers.contains_key("authorization"));
+        assert!(!headers
+            .keys()
+            .any(|name| name.as_str().starts_with("x-aws-")));
     }
     async fn cap(
         State(state): State<SharedFixture>,
@@ -695,44 +626,36 @@ mod tests {
         state.lock().unwrap().requests.push(body.clone());
         Json(json!({"payload": body, "broker_sig": "fixture"}))
     }
-    async fn oidc(headers: HeaderMap) -> Json<Value> {
-        bearer(&headers);
-        Json(json!({"jwt":"fixture-oidc", "wallet":"fixture", "expiration":9999}))
+    async fn unavailable_cloud(State(state): State<SharedFixture>) -> StatusCode {
+        state.lock().unwrap().cloud_requests += 1;
+        StatusCode::SERVICE_UNAVAILABLE
     }
-    async fn sts(
+    async fn sign(
         State(state): State<SharedFixture>,
         headers: HeaderMap,
-        Json(body): Json<SignStsBody>,
+        Json(body): Json<SignMessageRequest>,
     ) -> (StatusCode, Json<Value>) {
         bearer(&headers);
-        assert_eq!(body.oidc_token, "fixture-oidc");
-        assert!(["config", "memory", "vault"].contains(&body.data_class.as_str()));
         if state.lock().unwrap().signer_denied {
             return (
                 StatusCode::FORBIDDEN,
                 Json(json!({"error":"actor_mismatch"})),
             );
         }
-        (
-            StatusCode::OK,
-            Json(
-                json!({"access_key_id":"fixture-access", "secret_access_key":"fixture-secret", "session_token":"fixture-token", "expiration_unix":9999}),
-            ),
-        )
-    }
-    async fn sign(headers: HeaderMap, Json(body): Json<SignMessageRequest>) -> Json<Value> {
-        bearer(&headers);
         assert!(hex::decode(body.message_hex)
             .unwrap()
             .starts_with(b"agentkeys.kek.v1:0xab:"));
-        Json(json!({"address":"fixture", "signature":hex::encode([7u8;65]), "key_version":1}))
+        (
+            StatusCode::OK,
+            Json(json!({"address":"fixture", "signature":hex::encode([7u8;65]), "key_version":1})),
+        )
     }
     async fn get_doc(
         State(state): State<SharedFixture>,
         headers: HeaderMap,
         Json(body): Json<ConfigGetBody>,
     ) -> (StatusCode, Json<Value>) {
-        credentials(&headers);
+        capability_only_headers(&headers);
         let service = body.cap["payload"]["service"].as_str().unwrap();
         match state.lock().unwrap().documents.get(service) {
             Some((envelope, revision)) => (
@@ -750,7 +673,7 @@ mod tests {
         headers: HeaderMap,
         Json(body): Json<ConfigPutBody>,
     ) -> (StatusCode, Json<Value>) {
-        credentials(&headers);
+        capability_only_headers(&headers);
         let mut fixture = state.lock().unwrap();
         let service = body.cap["payload"]["service"].as_str().unwrap().to_owned();
         if fixture.config_conflicts > 0 {
@@ -780,7 +703,7 @@ mod tests {
         headers: HeaderMap,
         Json(body): Json<MemoryGetBody>,
     ) -> (StatusCode, Json<Value>) {
-        credentials(&headers);
+        capability_only_headers(&headers);
         if body.namespace == "forbidden" {
             return (
                 StatusCode::FORBIDDEN,
@@ -808,7 +731,7 @@ mod tests {
         headers: HeaderMap,
         Json(body): Json<MemoryPutBody>,
     ) -> (StatusCode, Json<Value>) {
-        credentials(&headers);
+        capability_only_headers(&headers);
         let mut fixture = state.lock().unwrap();
         if body.object_key.is_some() {
             if let Some(bytes) = fixture.concurrent_namespace.take() {
@@ -837,7 +760,7 @@ mod tests {
         State(state): State<SharedFixture>,
         headers: HeaderMap,
     ) -> (StatusCode, Json<Value>) {
-        credentials(&headers);
+        capability_only_headers(&headers);
         match &state.lock().unwrap().inbox {
             Some(item) => (StatusCode::OK, Json(json!({"ok":true,"item":item}))),
             None => (
@@ -850,7 +773,7 @@ mod tests {
         State(state): State<SharedFixture>,
         headers: HeaderMap,
     ) -> (StatusCode, Json<Value>) {
-        credentials(&headers);
+        capability_only_headers(&headers);
         let mut fixture = state.lock().unwrap();
         if fixture.fail_gc {
             return (
@@ -871,8 +794,8 @@ mod tests {
         let router = Router::new()
             .route("/v1/cap/config-fetch", post(cap))
             .route("/v1/cap/config-store", post(cap))
-            .route("/v1/mint-oidc-jwt", post(oidc))
-            .route("/dev/sign-sts", post(sts))
+            .route("/v1/mint-oidc-jwt", post(unavailable_cloud))
+            .route("/dev/sign-sts", post(unavailable_cloud))
             .route("/dev/sign-message", post(sign))
             .route("/v1/cap/memory-get", post(cap))
             .route("/v1/cap/memory-put", post(cap))
@@ -951,6 +874,7 @@ mod tests {
         );
         let fixture = state.lock().unwrap();
         assert_eq!(fixture.writes, 2);
+        assert_eq!(fixture.cloud_requests, 0);
         for request in &fixture.requests {
             assert_eq!(request.device_key_hash, device.device_key_hash().unwrap());
             let operation = if request.client_sig.as_deref()
@@ -997,7 +921,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn signer_denial_never_falls_back_to_ambient_worker_credentials() {
+    async fn signer_denial_prevents_encrypting_or_writing() {
         let (client, state, task) = setup().await;
         state.lock().unwrap().signer_denied = true;
         let device = DeviceIdentity::from_random_bytes(&[1; 32]).unwrap();
@@ -1009,11 +933,12 @@ mod tests {
             now_unix_seconds: 1234,
         };
         let error = client
-            .config_get(&session, "memory-taxonomy")
+            .config_put(&session, "memory-taxonomy", b"must-not-write", "")
             .await
             .unwrap_err();
         assert!(matches!(error, DataError::Http { status: 403, .. }));
         assert_eq!(state.lock().unwrap().writes, 0);
+        assert_eq!(state.lock().unwrap().cloud_requests, 0);
         task.abort();
     }
 
