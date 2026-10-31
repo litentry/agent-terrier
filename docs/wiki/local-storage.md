@@ -8,7 +8,9 @@ The browser data library and shared native client now call storage workers direc
 
 These commands still need explicit broker and worker URLs plus the actor's session. Storage role and region flags have been removed. CLI parsing and component tests are available now; complete local broker session enrollment remains part of the unfinished application setup.
 
-Daemon UI mode also requires an explicitly configured existing `--device-key-file` for storage and channel capabilities. It loads the protected key at startup; worker calls do not search for a default key file. Channel capability caches are separate for each signing key. The daemon UI's remaining storage credential exchange and local enrollment wiring are still under migration.
+Daemon UI mode requires an explicitly configured existing `--device-key-file` for storage and channel capabilities. It loads the protected key at startup; worker calls do not search for a default key file. Channel capability caches are separate for each signing key. Supply worker endpoints through `--memory-url`, `--config-url` and `--cred-url`; storage roles, region settings and cloud credential exchanges are no longer used.
+
+Daemon configuration and credential writes require an explicit key-derivation signer and send client-encrypted v3 envelopes. A signer refusal prevents the write, and a missing or negative worker receipt is an error. These UI credentials currently support owner-side encryption only; delegated v3 decryption and complete local signer/session setup remain unfinished. The CLI's development credential commands use the separately qualified worker-encrypted path; changing between envelope modes is not an implicit fallback.
 
 ## Ownership and boundaries
 

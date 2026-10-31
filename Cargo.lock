@@ -254,7 +254,6 @@ dependencies = [
  "agentkeys-memory-openviking",
  "agentkeys-mock-server",
  "agentkeys-protocol",
- "agentkeys-provisioner",
  "agentkeys-types",
  "agentkeys-web-core",
  "anyhow",
