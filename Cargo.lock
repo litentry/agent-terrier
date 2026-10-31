@@ -438,8 +438,10 @@ dependencies = [
  "agentkeys-protocol",
  "anyhow",
  "async-trait",
+ "clap",
  "hex",
  "httparse",
+ "libc",
  "rand_core 0.6.4",
  "reqwest",
  "serde",
@@ -448,6 +450,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]

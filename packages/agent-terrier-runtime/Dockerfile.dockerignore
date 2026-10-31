@@ -18,6 +18,7 @@
 !packages/agent-terrier-runtime/service-transport.test.mjs
 !packages/agent-terrier-runtime/runtime.test.mjs
 !packages/agent-terrier-runtime/daemon.test.mjs
+!packages/agent-terrier-runtime/managed.test.mjs
 !packages/agent-terrier-runtime/test-support.mjs
 !packages/agent-terrier-runtime/qualify-model.mjs
 !packages/agent-terrier-runtime/Dockerfile

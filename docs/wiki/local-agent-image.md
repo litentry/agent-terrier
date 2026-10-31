@@ -1,4 +1,4 @@
-The public runtime composition and image are available for component development. They reuse the shared agent loop, authenticated bridge, grant guards and session persistence. They are not yet the complete localhost deployment: broker-driven startup, saved-session wiring, signer/service composition and the lightweight manager remain open in [epic #1](https://github.com/litentry/agent-terrier/issues/1).
+The public runtime composition and image are available for component development. They reuse the shared agent loop, authenticated bridge, grant guards and session persistence. The image starts and supervises the daemon and agent from explicit configuration. It is not yet the complete localhost deployment: the Docker controller's service/configuration wiring, proper delegate-session journey and lightweight manager remain open in [epic #1](https://github.com/litentry/agent-terrier/issues/1).
 
 ## Build and test
 
@@ -7,9 +7,10 @@ Local, from the public checkout, install the single packages workspace lockfile 
 ```sh
 npm ci --prefix packages --ignore-scripts
 python3 terrier test focused --component dsh
+python3 terrier test focused --component managed
 ```
 
-The lane builds shared plugins, checks types, runs their deterministic tests and starts real runtime processes for authentication, tool-denial and restart checks. It uses local fixture servers and loads no models.
+The DSH lane builds shared plugins, checks types, runs their deterministic tests and starts real runtime processes for authentication, tool-denial and restart checks. The managed lane builds the native controller and daemon and checks their composition, controller loss, state locking, restart recovery and failure cleanup. Both use local fixture servers and load no models. Neither rebuilds the Docker image.
 
 Local, from the public checkout with Docker running:
 
@@ -28,7 +29,15 @@ The Dockerfile pins its public Node and Rust base images by digest. Its adjacent
 
 The first Rust image build downloads and compiles dependencies. BuildKit caches the package registry and architecture-specific compiler output for subsequent builds; changing JavaScript alone can reuse the daemon layer. `CARGO_BUILD_JOBS` is a build argument controlling compiler concurrency, defaulting to two. Ordinary CLI/component tests do not rebuild images.
 
-## Explicit configuration
+## Managed startup
+
+The final image entry point is `agent-terrier-runtime`, built from `crates/agentkeys-runtime`. `managed_agent::RuntimeBootstrap` owns the controller contract: version, the existing typed `ChainProfile`, and an allowlisted environment map. It accepts one newline-delimited JSON frame of at most 64 KiB on stdin within 30 seconds. Keep stdin open after that frame; EOF stops both children. Extra input is an error. The controller must provide translated loopback service endpoints, actor/operator identities, channel ID, model ID, session JWT, model proof, bridge proof and management proof. Private device keys, arbitrary environment names and nonlocal profiles/endpoints are refused.
+
+The process owner creates private `home`, `runtime` and `work` directories under the persistent state volume. An exclusive state lock refuses a second writer. Configuration and credentials are not written to disk; the public chain profile is passed to the daemon through a private temporary file removed on shutdown. Child environments are explicitly constructed: the JavaScript loop receives only model configuration and its bridge/management proofs, not the daemon's session JWT, signer endpoint or chain profile. Child output is suppressed to avoid accidentally exposing credentials; failures report supervision failure and exit nonzero. Startup reserves the requested local ports and checks both health and authenticated component routes before emitting a JSON readiness record. Its `local-agent-processes` surface describes listener readiness, not chain authorization or channel synchronization.
+
+Controller EOF, termination signals and either child's exit stop both children, allowing five seconds for each graceful shutdown before forced termination. Session directories survive restart. `--state-dir`, `--runtime-script`, `--daemon-binary`, `--daemon-port` and `--agent-port` support explicit native development; their image defaults use the canonical state directory, installed programs and shared protocol ports. The Docker owner still needs to attach the control stream and compose translated service endpoints automatically.
+
+## Agent-loop configuration
 
 `packages/agent-terrier-runtime/start.mjs` requires `--state-dir`, `--work-dir`, `--port` and `--daemon-url`. It listens only on loopback. State and work paths must be canonical, private, owned directories without linked ancestors. Startup refuses incomplete configuration before opening the listener.
 
@@ -43,9 +52,9 @@ Endpoints accept local HTTP origins only, without embedded credentials, query st
 
 Session logs live under the private state directory; agent-process restart resumes them. The shared Docker lifecycle now mounts a persistent volume owned by the namespace, device and actor. Its image directory and numeric user/group come from `agentkeys-protocol::runtime_layout`, also consumed by the image build through generated TypeScript. The directory is initialized with mode 0700. Container replacement and ordinary teardown preserve the volume; explicit reset requires the matching actor and no remaining container. Host-backed volumes, foreign labels and unexpected mounts are refused.
 
-The runtime's `--state-dir` still needs to be wired to this mount by automatic startup. File persistence through the real lifecycle is qualified, while complete agent-session recovery through that lifecycle remains pending. Docker engine administrators can inspect container state; this development image does not claim production wallet custody.
+Managed startup now wires the agent's session directory to this mount. Its real-process qualifier verifies saved conversation recovery after restart and verifies that bootstrap credentials are absent from saved files. File persistence through the real Docker lifecycle is separately qualified; the combined controller/transport/container-replacement journey remains pending. Docker engine administrators can inspect container state; this development image does not claim production wallet custody.
 
-The image also supplies `agentkeys-daemon` on PATH. The image qualifier starts that actual executable in an isolated temporary home, checks its health, rejects missing/wrong management proof and accepts the matching proof. Automatic composition of the daemon, agent process and translated local-service endpoints remains pending; the current image entry point still starts the JavaScript runtime with explicit arguments.
+The image also supplies `agentkeys-daemon` on PATH. The image qualifier starts that actual executable in an isolated temporary home, checks its health, rejects missing/wrong management proof and accepts the matching proof. Managed tests start both real children, reject wrong chat proofs before model calls, recover conversation history, reject duplicate writers and unsafe configuration/state, and prove cleanup after controller loss and partial startup failure. Their synthetic service endpoint denies signer/channel/chain requests; this explicitly does not qualify a real delegate session.
 
 ## Real-model qualification
 
@@ -72,4 +81,4 @@ This probe runs the container with `--network=none`. The shared `service-transpo
 
 The earlier direct host-gateway route failed on the internal network. The qualifier now uses this explicit transport and passes while a direct external socket returns `ENETUNREACH`. The same transport implementation is intended for the runtime lifecycle owner; its automatic composition with broker, signer and storage services remains pending. Parent shutdown closes the stream and its listeners, and qualification removes only its labeled container.
 
-Recorded component evidence on macOS arm64: 123 shared plugin tests; runtime process cases cover wrong proofs, denied tool effects with a granted positive control, restart recovery, missing configuration and unsafe directories. Transport cases cover concurrent streams, unknown services, path escape, redirect and oversized-request refusal, plus cleanup. All five image cases, including the packaged daemon's startup and authentication check, pass inside Linux arm64 under Node 24.22.2 with a read-only filesystem and no network. This image test command took 1.81 seconds; its test runner reported 1.44 seconds. The first optimized daemon compilation took 5 minutes 43 seconds; subsequent builds reuse the compiler cache. The extracted final daemon and first-party runtime payload passed the public scan. The earlier real-model container chat/restart probe passed in 5.05 seconds through the same transport. These are component measurements, not independent clean-install or full application acceptance; amd64 execution and automatic process composition remain unqualified.
+Recorded component evidence on macOS arm64: 123 shared plugin tests and six runtime, managed-process and transport cases passed through the combined CLI selection in 16.45 seconds, including 11.85 seconds of builds and 4.59 seconds of execution. All seven image cases, including the packaged daemon probe, passed inside Linux arm64 under Node 24.22.2 with a read-only filesystem and no network. The image test command took 2.01 seconds; its runner reported 1.83 seconds. Both packaged executables and the first-party runtime payload passed the public scan. The first optimized daemon compilation took 5 minutes 43 seconds; subsequent builds reuse the compiler cache. The earlier real-model container chat/restart probe passed in 5.05 seconds through the same transport. These are component measurements, not independent clean-install or full application acceptance; amd64 execution and complete controller/service composition remain unqualified.

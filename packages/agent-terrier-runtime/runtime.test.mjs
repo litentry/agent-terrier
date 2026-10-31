@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import { listener, freePort, stop, environment, launch, ready, chat } from './test-support.mjs';
+import { listener, freePort, stop, environment, launch, ready, chat, streamCompletion } from './test-support.mjs';
 
 test('runtime persists turns, rejects wrong proofs and denies ungranted tool effects', { timeout: 30_000 }, async () => {
   const state = await realpath(await mkdtemp(path.join(os.tmpdir(), 'terrier-runtime-test-')));
@@ -42,12 +42,7 @@ test('runtime persists turns, rejects wrong proofs and denies ungranted tool eff
     const invoke = message.role === 'user' && message.content === 'invoke action';
     const delta = invoke ? { tool_calls: [{ index: 0, id: `call_${modelRequests.length}`, type: 'function',
       function: { name: 'record_value', arguments: '{}' } }] } : { content: 'Local fixture reply.' };
-    response.writeHead(200, { 'content-type': 'text/event-stream' });
-    for (const [payload, finish] of [[{ role: 'assistant' }, null], [delta, null], [{}, invoke ? 'tool_calls' : 'stop']]) {
-      response.write(`data: ${JSON.stringify({ id: 'local-completion', object: 'chat.completion.chunk', model: body.model,
-        choices: [{ index: 0, delta: payload, finish_reason: finish }] })}\n\n`);
-    }
-    response.end('data: [DONE]\n\n');
+    streamCompletion(response, body.model, delta, invoke ? 'tool_calls' : 'stop');
   });
   const values = environment(state, model.origin, modelToken, bridgeToken);
   const port = await freePort();
