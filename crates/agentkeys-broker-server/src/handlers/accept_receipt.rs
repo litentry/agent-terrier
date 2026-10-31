@@ -2,6 +2,7 @@ use crate::{
     handlers::accept::{self, aerr, AcceptConfig},
     state::SharedState,
 };
+use agentkeys_core::user_operation_receipt::{hex_quantity, matches_operation, operation_topics};
 use agentkeys_protocol::console_apps::AcceptReceiptRequest;
 use axum::{
     extract::State,
@@ -131,57 +132,6 @@ pub async fn receipt(
     )
     .await
     .map(Json)
-}
-
-fn operation_topics(
-    operation: &crate::sponsor::PackedUserOp,
-    hash: &str,
-) -> Result<[String; 4], String> {
-    let paymaster = match operation.paymaster_and_data.len() {
-        0 => [0; 20],
-        52.. => operation.paymaster_and_data[..20]
-            .try_into()
-            .map_err(|_| "invalid paymaster")?,
-        _ => return Err("invalid operation paymaster data".into()),
-    };
-    Ok([
-        format!(
-            "0x{}",
-            hex::encode(agentkeys_core::device_crypto::keccak256(
-                b"UserOperationEvent(bytes32,address,address,uint256,bool,uint256,uint256)"
-            ))
-        ),
-        hash.to_owned(),
-        format!("0x{}{}", "00".repeat(12), hex::encode(operation.sender)),
-        format!("0x{}{}", "00".repeat(12), hex::encode(paymaster)),
-    ])
-}
-
-fn matches_operation(log: &Value, entry_point: &[u8; 20], topics: &[String; 4]) -> bool {
-    log.get("address")
-        .and_then(Value::as_str)
-        .is_some_and(|address| {
-            address.eq_ignore_ascii_case(&format!("0x{}", hex::encode(entry_point)))
-        })
-        && log
-            .get("topics")
-            .and_then(Value::as_array)
-            .is_some_and(|actual| {
-                actual.len() == topics.len()
-                    && actual.iter().zip(topics).all(|(actual, expected)| {
-                        actual
-                            .as_str()
-                            .is_some_and(|actual| actual.eq_ignore_ascii_case(expected))
-                    })
-            })
-}
-
-fn hex_quantity(value: &Value) -> Result<u64, String> {
-    value
-        .as_str()
-        .and_then(|value| value.strip_prefix("0x"))
-        .and_then(|value| u64::from_str_radix(value, 16).ok())
-        .ok_or_else(|| "invalid chain quantity".into())
 }
 
 async fn find_recent_transaction(
@@ -444,55 +394,16 @@ fn verify_operation_event(
     operation: &crate::sponsor::PackedUserOp,
     hash: &str,
 ) -> Result<(), String> {
-    if receipt.get("status").and_then(Value::as_str) != Some("0x1") {
-        return Err("operation transaction failed or remains unconfirmed".into());
+    if agentkeys_core::user_operation_receipt::execution_succeeded(
+        receipt,
+        entry_point,
+        operation,
+        hash,
+    )? {
+        Ok(())
+    } else {
+        Err("user operation reverted inside handleOps".into())
     }
-    let topics = operation_topics(operation, hash)?;
-    let logs = receipt
-        .get("logs")
-        .and_then(Value::as_array)
-        .ok_or("transaction receipt has no event logs")?;
-    let matching: Vec<_> = logs
-        .iter()
-        .filter(|log| matches_operation(log, entry_point, &topics))
-        .collect();
-    if matching.len() != 1 {
-        return Err(
-            "receipt must have exactly one event for this operation, sender and paymaster".into(),
-        );
-    }
-    let log = matching[0];
-    if log
-        .get("removed")
-        .is_some_and(|removed| removed != &json!(false))
-    {
-        return Err("operation event was removed".into());
-    }
-    for field in ["transactionHash", "blockHash", "blockNumber"] {
-        if !receipt
-            .get(field)
-            .and_then(Value::as_str)
-            .zip(log.get(field).and_then(Value::as_str))
-            .is_some_and(|(receipt, log)| receipt.eq_ignore_ascii_case(log))
-        {
-            return Err(format!("operation event {field} differs from its receipt"));
-        }
-    }
-    hex_quantity(&receipt["blockNumber"])?;
-    let data = hex::decode(
-        log.get("data")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .trim_start_matches("0x"),
-    )
-    .map_err(|_| "invalid operation event")?;
-    if data.len() != 128 || data[..32] != operation.nonce {
-        return Err("operation event nonce differs from requested operation".into());
-    }
-    if data[32..63].iter().any(|byte| *byte != 0) || data[63] != 1 {
-        return Err("user operation reverted inside handleOps".into());
-    }
-    Ok(())
 }
 
 async fn current_lifecycle_calldata(
