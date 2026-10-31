@@ -81,7 +81,8 @@ def broker(state, profile, port):
                        BROKER_OIDC_KEYPAIR_PATH=str(directory / "oidc.json"),
                        BROKER_SESSION_KEYPAIR_PATH=str(directory / "session.json"),
                        AGENTKEYS_CHAIN_PROFILE_FILE=str(profile))
-    process = subprocess.Popen([str(binary), "--port", str(port)], env=environment,
+    process = subprocess.Popen([str(binary), "--port", str(port),
+                               "--export-session-pubkey-to", str(directory / "session-public.pem")], env=environment,
                                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                                stderr=subprocess.DEVNULL, umask=0o077)
     try:

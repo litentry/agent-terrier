@@ -83,6 +83,8 @@ Local owner registration binds an actual actor-owned K10 request-signing key alo
 
 `terrier owner login` reuses the browser's `BrokerClient` and protocol-owned passkey request types. The CLI's software assertion encoder reuses its existing WebAuthn signer. Login verifies the local owner account and request-key binding, then obtains a real broker session through on-chain passkey verification. Only the explicit development host writes the session, using the protected atomic file owner; output is a receipt without the bearer. Replay and wrong-passkey denials retain the previous session. Automatic service startup and browser enrollment remain separate work.
 
+Broker capability minting resolves authority coordinates through that same chain-profile owner. The explicit CLI credential qualification runs actual login, broker signing, worker verification and persistent SQLite storage against fresh local contracts. Owner and delegated access, negative authorization cases, grant/device revocation and worker/storage restart are exercised without a fixture issuer. This credential check does not complete delegate-session provisioning, browser signer setup or the container journey.
+
 ## Local agent runtime
 
 The broker accepts an injected `SandboxRuntime`; its public composition uses `DockerRuntime`. Agent creation reuses the existing authorized broker routes and create-only credential callback. Docker connects through an explicit local Unix socket, requires the development profile guard, inspects an already-loaded image and creates by immutable image digest with pulling disabled.

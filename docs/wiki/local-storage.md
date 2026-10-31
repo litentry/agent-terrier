@@ -1,4 +1,4 @@
-The local object service is a qualified storage component. The credential, configuration, memory and channel workers use it for encrypted data operations. Integration with product clients, broker sessions and the complete local application remains open in [#5](https://github.com/litentry/agent-terrier/issues/5).
+The local object service is a qualified storage component. The credential, configuration, memory and channel workers use it for encrypted data operations. The CLI credential journey now includes actual owner login and broker capability minting. Complete local application integration remains open in [#5](https://github.com/litentry/agent-terrier/issues/5).
 
 The browser data library and shared native client now call storage workers directly with signed capabilities. No cloud credential exchange or cloud headers are required. Browser configuration and credential encryption still uses the explicitly configured key-derivation signer; the complete local signer and broker-session setup remains in progress.
 
@@ -8,7 +8,7 @@ The broker executable now defaults to loopback and starts without cloud roles or
 
 `cred fetch`, `cred store` and `memory inbox-push` use `--device-key-file` (or `AGENTKEYS_DEVICE_KEY_FILE`) for the actor's existing registered key. They derive its hash instead of accepting a manually supplied hash. Missing key files fail without creating replacement identities. `memory canonical-get` accepts either that key file or an explicit `--delegation-file`, never both. It signs the canonical `knowledge:<namespace>` service using the shared service-name builder.
 
-These commands still need explicit broker and worker URLs plus the actor's session. Storage role and region flags have been removed. CLI parsing and component tests are available now; complete local broker session enrollment remains part of the unfinished application setup.
+These commands need explicit broker and worker URLs plus an authorized session. Storage role and region flags have been removed. Headless owner login is available; automatic service startup and delegate-session orchestration remain unfinished.
 
 Daemon UI mode requires an explicitly configured existing `--device-key-file` for storage and channel capabilities. It loads the protected key at startup; worker calls do not search for a default key file. Channel capability caches are separate for each signing key. Supply worker endpoints through `--memory-url`, `--config-url` and `--cred-url`; storage roles, region settings and cloud credential exchanges are no longer used.
 
@@ -52,6 +52,19 @@ The worker integration test runs the actual worker router, cryptography, HTTP ad
 After building the public CLI and preparing contract dependencies, run `python3 scripts/tests/qualify_local_credentials.py` locally from the public checkout for the explicit real-contract credential qualification. It uses the actual credential-worker executable and newly enrolled owner/delegate request keys, verifies encrypted storage and readback, restarts the worker, and applies real scope and device revocations. Owner access remains available after the delegate is revoked. The issuer remains a deliberately untrusted fixture; this does not claim real broker login or mint acceptance.
 
 ## Explicit real-chain qualification
+
+### Broker login and credential journey
+
+Run locally from the public checkout after preparing the contract dependencies described in [contract development](./contract-development.md):
+
+```bash
+cargo build -p agentkeys-cli -p agentkeys-broker-server -p agentkeys-local-store -p agentkeys-worker-creds
+python3 scripts/tests/qualify_local_broker_storage.py
+```
+
+This explicit check creates fresh owner identities and contracts, obtains an actual passkey session, and drives the native credential CLI through the real broker, worker and SQLite service. Broker login and capability minting resolve the same generated chain profile; separate contract-address environment variables are unnecessary for this journey. Owner store/read, delegated read, ciphertext-only records and worker/storage restart persistence are positive controls. Wrong-owner request keys, invalid sessions, missing keys, delegated writes and revoked grants/devices are refused, with unchanged stored objects. The owner retains access after delegate revocation.
+
+The delegate read in this qualification uses the owner's session with the delegate's enrolled request key. Automatic delegate-session provisioning and the complete container journey remain separate acceptance work. The test creates development keys outside the source checkout and removes its owned services/state afterward; it never requires company credentials. Keep this real-contract check outside the fast default unit-test loop.
 
 ### Configuration worker
 
