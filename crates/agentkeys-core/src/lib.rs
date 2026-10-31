@@ -17,6 +17,7 @@ pub mod otp;
 pub mod payment;
 pub mod protected_file;
 pub mod registry;
+pub mod secp256k1_key;
 pub mod session_store;
 pub mod signer_client;
 pub mod user_operation_receipt;

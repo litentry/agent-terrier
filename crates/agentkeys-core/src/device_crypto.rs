@@ -122,12 +122,7 @@ pub struct DeviceKey {
 
 impl DeviceKey {
     pub fn load(key_file: &str) -> Result<Self> {
-        let raw = crate::protected_file::read_text(&expand_home(key_file))?;
-        let bytes = zeroize::Zeroizing::new(
-            hex::decode(raw.trim().trim_start_matches("0x"))
-                .context("device key file is not hex")?,
-        );
-        let sk = SigningKey::from_slice(&bytes).context("invalid secp256k1 device key")?;
+        let sk = crate::secp256k1_key::read(&expand_home(key_file))?;
         let address = evm_address(sk.verifying_key());
         Ok(Self { sk, address })
     }
@@ -150,15 +145,12 @@ impl DeviceKey {
             return Self::load(&key_path);
         }
         let sk = {
-            let sk = SigningKey::random(&mut rand_core::OsRng);
             if let Some(dir) = Path::new(&key_path).parent() {
                 if !dir.as_os_str().is_empty() {
                     std::fs::create_dir_all(dir)?;
                 }
             }
-            let encoded = zeroize::Zeroizing::new(format!("0x{}", hex::encode(sk.to_bytes())));
-            crate::protected_file::write(&key_path, encoded.as_bytes(), true)?;
-            sk
+            crate::secp256k1_key::create(&key_path)?
         };
         let address = evm_address(sk.verifying_key());
         Ok(Self { sk, address })

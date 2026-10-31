@@ -68,7 +68,7 @@ class LocalServicesTests(unittest.TestCase):
                 local_state.write_private(worker / "development.key", b"synthetic-original")
             local_state.write_json(directory / "manifest.json", {"version":1, "development_only":True,
                 "profile_identity":"test-deployment", "broker_port":12345, "initialized":True})
-            with mock.patch.object(deployment, "active_profile", return_value=({}, {}, "test-deployment")):
+            with mock.patch.object(deployment, "active_profile", return_value=({}, {}, "test-deployment")), mock.patch.object(services, "prepare_submitter"):
                 manifest = services.prepare(root, root, root, None)
                 self.assertEqual(manifest["version"], services.MANIFEST_VERSION)
                 secret = directory / "signer/master.key"

@@ -30,8 +30,9 @@ BROKER_BINARY = "agentkeys-broker-server"
 STORE_BINARY = "agentkeys-local-store"
 SIGNER_BINARY = "agentkeys-local-signer"
 RELAY_BINARY = "agentkeys-gate"
-BINARIES = (BROKER_BINARY, STORE_BINARY, SIGNER_BINARY, RELAY_BINARY, *WORKERS.values())
-MANIFEST_VERSION = 3
+BUNDLER_BINARY = "agentkeys-bundler"
+BINARIES = (BROKER_BINARY, STORE_BINARY, SIGNER_BINARY, RELAY_BINARY, BUNDLER_BINARY, *WORKERS.values())
+MANIFEST_VERSION = 4
 
 
 def binary_directory(repository, configured=None):
@@ -57,12 +58,12 @@ def available_port():
 
 
 def prepare(repository, state, binaries, port):
-    _, _, fingerprint = deployment.active_profile(repository, state)
+    running_chain, profile, fingerprint = deployment.active_profile(repository, state)
     directory = local_state.private_directory(state / "services")
     manifest_path = directory / "manifest.json"
     if manifest_path.exists() or manifest_path.is_symlink():
         manifest = local_state.read_json(manifest_path)
-        if (not isinstance(manifest, dict) or manifest.get("version") not in (1, 2, MANIFEST_VERSION) or manifest.get("development_only") is not True
+        if (not isinstance(manifest, dict) or manifest.get("version") not in (1, 2, 3, MANIFEST_VERSION) or manifest.get("development_only") is not True
                 or manifest.get("profile_identity") != fingerprint
                 or type(manifest.get("initialized")) is not bool
                 or type(manifest.get("broker_port")) is not int
@@ -124,10 +125,36 @@ def prepare(repository, state, binaries, port):
             local_state.write_private(path, secrets.token_hex(32).encode())
         else:
             local_state.write_json(path, {})
+    prepare_submitter(state, binaries, manifest, running_chain, profile)
     manifest["version"] = MANIFEST_VERSION
     manifest["initialized"] = True
     local_state.write_json(manifest_path, manifest)
     return manifest
+
+
+def prepare_submitter(state, binaries, manifest, running_chain, profile):
+    bundler_directory = local_state.private_directory(state / "services/bundler")
+    bundler_key = bundler_directory / "submitter.key"
+    arguments = [str(binaries / BUNDLER_BINARY), "--development", "--profile", str(state / "chain-profile.json")]
+    if bundler_key.exists() or bundler_key.is_symlink():
+        os.close(local_state.open_private(bundler_key))
+        arguments.extend(["--signer-key-file", str(bundler_key), "address"])
+    elif manifest["initialized"] and manifest["version"] >= 4:
+        raise ValueError("An existing transaction submitter key is missing; restore the original key")
+    else:
+        arguments.extend(["keygen", "--out", str(bundler_key)])
+    result = subprocess.run(arguments, env=contracts.tool_environment(), capture_output=True, timeout=15, umask=0o077)
+    if result.returncode:
+        raise RuntimeError("Local transaction submitter key could not be created or verified")
+    identity = json.loads(result.stdout)
+    address = identity.get("address")
+    if identity.get("development_only") is not True or not deployment.valid_address(address):
+        raise ValueError("Local transaction submitter returned an invalid identity")
+    chain.node_identity(running_chain["rpc_http"], profile["chain_id"], running_chain["instance_id"])
+    funding = int(profile["funding"]["account_deposit_wei"])
+    balance = int(chain.rpc(running_chain["rpc_http"], "eth_getBalance", [address, "latest"]), 16)
+    if balance < funding:
+        chain.rpc(running_chain["rpc_http"], "anvil_setBalance", [address, hex(funding)])
 
 
 def start(repository, state, configured=None, port=None):
@@ -232,7 +259,7 @@ def healthy(endpoint, broker=False):
                 return False
             result = json.loads(data)
             return response.status == 200 and (result.get("status") == "ready" if broker
-                                               else result.get("ready") is True or result.get("ok") is True)
+                                               else result.get("ready", result.get("ok")) is True)
     except (OSError, ValueError, urllib.error.URLError):
         return False
 
@@ -262,10 +289,14 @@ def serve(repository, state, configured):
                 ["--listen", "127.0.0.1:0", "--require-local-upstream",
                  "--admin-token-file", relay_directory / "admin.key", "--keys-file", relay_directory / "keys.json"],
                 contracts.tool_environment(), directory / "model-relay.log", children)
+            components["bundler"] = launch(binaries / BUNDLER_BINARY,
+                ["--development", "--profile", profile_path, "--bind", "127.0.0.1:0",
+                 "--signer-key-file", directory / "bundler/submitter.key"],
+                contracts.tool_environment(), directory / "bundler.log", children)
             environment = broker_environment(broker_directory, profile_path, manifest["broker_port"])
             environment.update(AGENTKEYS_GATE_ADMIN_URL=components["model_relay"][1],
                 AGENTKEYS_GATE_ADMIN_TOKEN_FILE=str(relay_directory / "admin.key"),
-                AGENTKEYS_GATE_TURN_URL=components["model_relay"][1] + "/v1")
+                AGENTKEYS_GATE_TURN_URL=components["model_relay"][1] + "/v1", AGENTKEYS_BUNDLER_URL=components["bundler"][1])
             components["broker"] = launch(binaries / BROKER_BINARY,
                 broker_arguments(broker_directory, manifest["broker_port"]),
                 environment, directory / "broker.log", children)
@@ -347,7 +378,7 @@ def serve(repository, state, configured):
 def logs(state):
     paths = [state / "services-supervisor.log"]
     directory = state / "services"
-    paths.extend([directory / "broker.log", directory / "signer.log", directory / "model-relay.log",
+    paths.extend([directory / "broker.log", directory / "signer.log", directory / "model-relay.log", directory / "bundler.log",
                   *[directory / f"{name}{suffix}.log" for name in WORKERS for suffix in ("", "-store")]])
     for path in paths:
         if path.exists() or path.is_symlink():

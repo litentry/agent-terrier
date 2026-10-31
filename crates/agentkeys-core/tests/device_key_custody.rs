@@ -1,5 +1,48 @@
 use agentkeys_core::device_crypto::DeviceKey;
 
+#[cfg(unix)]
+#[test]
+fn software_signing_sources_preserve_keys_and_reject_conflicts_or_unsafe_files() {
+    use agentkeys_core::secp256k1_key;
+    use std::os::unix::fs::{symlink, PermissionsExt};
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("submitter.key");
+    let path_text = path.to_str().unwrap();
+    let original = secp256k1_key::create(path_text).unwrap();
+    let contents = std::fs::read(&path).unwrap();
+    assert_eq!(
+        secp256k1_key::read(path_text).unwrap().verifying_key(),
+        original.verifying_key()
+    );
+    assert!(secp256k1_key::create(path_text).is_err());
+    assert!(
+        secp256k1_key::from_sources(Some("synthetic-conflict".into()), Some(path_text.into()))
+            .is_err()
+    );
+    assert!(secp256k1_key::from_sources(None, None).unwrap().is_none());
+    assert_eq!(
+        secp256k1_key::from_sources(None, Some(path_text.into()))
+            .unwrap()
+            .unwrap()
+            .verifying_key(),
+        original.verifying_key()
+    );
+    let alias = directory.path().join("linked.key");
+    symlink(&path, &alias).unwrap();
+    assert!(secp256k1_key::read(alias.to_str().unwrap()).is_err());
+    std::fs::remove_file(&alias).unwrap();
+    std::fs::hard_link(&path, &alias).unwrap();
+    assert!(secp256k1_key::read(path_text).is_err());
+    std::fs::remove_file(&alias).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(secp256k1_key::read(path_text).is_err());
+    assert!(
+        std::fs::read(path).unwrap() == contents,
+        "rejected operation changed the signing key"
+    );
+    assert!(secp256k1_key::parse("00").is_err());
+}
+
 #[test]
 fn hard_linked_device_key_is_rejected_without_changing_the_original() {
     let directory = tempfile::tempdir().unwrap();
