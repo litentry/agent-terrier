@@ -218,13 +218,7 @@ pub struct BrokerCapRequest {
         deserialize_with = "capability::deserialize_optional_ttl"
     )]
     pub ttl_seconds: Option<u64>,
-    // The K10 cap-PoP is OPTIONAL on the wire (issue #76 staged rollout): a caller
-    // that holds the actor's K10 signs (the broker validates + the worker
-    // re-verifies); a caller without one (e.g. a master before its K10 is
-    // registered) omits these. Enforcement (reject-if-absent) is opt-in via the
-    // worker's AGENTKEYS_WORKER_REQUIRE_CAP_POP — until then the PoP is
-    // verified-when-present. `skip_serializing_if` keeps the no-PoP body
-    // byte-identical to the pre-#76 shape.
+    // Workers require a fresh actor proof for every capability.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub client_sig: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

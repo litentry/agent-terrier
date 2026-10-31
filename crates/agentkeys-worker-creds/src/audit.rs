@@ -7,8 +7,7 @@
 //! The envelope carries the service/key + a cap or ciphertext hash, NEVER
 //! plaintext. Failures after cap-verify are audited too (`result: Failure`).
 //!
-//! Emit-vs-availability posture (staged rollout, mirrors
-//! `AGENTKEYS_WORKER_REQUIRE_CAP_POP`):
+//! Audit availability policy:
 //!
 //! - default: best-effort — an emit failure logs a loud `tracing::warn!`
 //!   (the op still succeeds) so a down audit worker doesn't take the whole

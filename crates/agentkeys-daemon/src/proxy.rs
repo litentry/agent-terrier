@@ -193,13 +193,7 @@ async fn handle_cap(
         upstream_path
     );
 
-    // K10 cap-mint proof-of-possession (issue #76 — broker-SPOF defense). When
-    // the agent's K10 is loaded, sign the request: the broker validates it and
-    // the worker re-verifies it independently, so a compromised broker can't mint
-    // a usable cap, and `device_key_hash` is derived from the SAME key we sign
-    // with. Graceful during rollout: with no K10 loaded, forward the caller's
-    // `device_key_hash` and no PoP — the worker accepts it unless
-    // AGENTKEYS_WORKER_REQUIRE_CAP_POP=1. The proxy serves only the creds class.
+    // Workers require a fresh actor proof for every capability.
     let outbound = match state.device_key.as_ref() {
         Some(device_key) => {
             let pop = match device_key.cap_pop_now(
