@@ -4,7 +4,7 @@ from pathlib import Path
 import subprocess
 import sys
 
-from . import chain, contracts, deployment, local_state, models, owner
+from . import chain, contracts, deployment, local_state, models, owner, services
 
 
 def main():
@@ -24,6 +24,10 @@ def main():
     chain_parser.add_argument("--port", type=int, help="Loopback RPC port for chain start")
     chain_parser.add_argument("--offline", action="store_true", help="Deploy using downloaded dependencies only")
     chain_parser.add_argument("--resume", action="store_true", help="Explicitly resume an interrupted deployment")
+    service_parser = commands.add_parser("services", help="Manage the local broker and storage services")
+    service_parser.add_argument("action", choices=["start", "status", "doctor", "logs", "stop"])
+    service_parser.add_argument("--bin-dir", type=Path, help="Directory containing built public service binaries")
+    service_parser.add_argument("--broker-port", type=int, help="Broker port for the first service startup")
     owner_parser = commands.add_parser("owner", help="Real local owner registration and scope operations")
     owner_parser.add_argument("action", choices=["register", "grant", "revoke", "bind", "unbind", "login"])
     owner_parser.add_argument("--name", required=True, help="Local owner name")
@@ -41,6 +45,8 @@ def main():
     supervisor = commands.add_parser("_serve-chain", help=argparse.SUPPRESS)
     supervisor.add_argument("--port", type=int, required=True)
     supervisor.add_argument("--anvil", required=True)
+    service_supervisor = commands.add_parser("_serve-services", help=argparse.SUPPRESS)
+    service_supervisor.add_argument("--bin-dir", type=Path, required=True)
     arguments = parser.parse_args()
     repository = Path(__file__).resolve().parents[2]
     try:
@@ -51,6 +57,21 @@ def main():
             print(json.dumps(result, indent=2))
             return 0
         state = local_state.state_directory(repository)
+        if arguments.command == "_serve-services":
+            return services.serve(repository, state, arguments.bin_dir)
+        if arguments.command == "services":
+            if arguments.action != "start" and (arguments.bin_dir is not None or arguments.broker_port is not None):
+                raise ValueError("--bin-dir and --broker-port are only valid for services start")
+            if arguments.action == "logs":
+                return services.logs(state)
+            if arguments.action in ("status", "doctor"):
+                result = services.status(state)
+            else:
+                with local_state.exclusive_lock(state / "operation.lock"):
+                    result = (services.start(repository, state, arguments.bin_dir, arguments.broker_port)
+                              if arguments.action == "start" else services.stop(state))
+            print(json.dumps(result, indent=2))
+            return 1 if arguments.action == "doctor" and not result.get("ready") else 0
         if arguments.command == "device":
             with local_state.exclusive_lock(state / "operation.lock"):
                 result = owner.device_identity(repository, state, arguments.name, arguments.operator_omni,

@@ -14,6 +14,7 @@ This document describes the public source tree. The complete local runtime is st
 | Independent worker verification | `crates/agentkeys-core::capability_verify` | Storage and compute workers |
 | Smart contracts and contract tests | `crates/agentkeys-chain` | Local deployment and chain clients |
 | Headless product operations | `crates/agentkeys-cli`, `crates/agentkeys-daemon` | Developers, tests and the future local manager |
+| Local service supervision | `scripts/terrier_local/services.py` | `terrier services`, future local manager and explicit qualification |
 | UI tokens and components | `design-system` | `apps/parent-control`, `apps/device-display` |
 | Agent runtime plugins | `packages/agentkeys-dsh` | Agent environments |
 | Protocol examples | `e2e/fixtures` | Shared drift and conformance checks |
@@ -86,6 +87,8 @@ Local owner registration binds an actual actor-owned K10 request-signing key alo
 Broker capability minting resolves authority coordinates through that same chain-profile owner. The explicit CLI credential qualification runs actual login, broker signing, worker verification and persistent SQLite storage against fresh local contracts. Owner and delegated access, negative authorization cases, grant/device revocation and worker/storage restart are exercised without a fixture issuer. This credential check does not complete delegate-session provisioning, browser signer setup or the container journey.
 
 Broker session and identity-token key persistence shares a small serialization adapter over `agentkeys-core::protected_file`. Creation is exclusive and private from the first write; loading rejects unsafe permissions, links, ownership and excessive size. Concurrent creation cannot replace the winning identity. This replaces duplicated read/write-then-chmod paths; it preserves key-purpose validation and uses the shared file-security implementation.
+
+`terrier services` owns startup, health, logs and shutdown of the local broker, four workers and four data-class object services. It reuses the chain controller's private control-message/socket contract and the deployment module's active-profile validation, which also serves owner operations. A private manifest binds the broker issuer and original service keys to one deployment. Child process handles belong only to the supervisor; persistent PIDs never grant signal authority. Failed startup cleans up its own children while preserving chain state and unrelated listeners. [Local services](wiki/local-services.md) documents the qualified credential journey and the remaining agent/model/UI work.
 
 ## Local agent runtime
 

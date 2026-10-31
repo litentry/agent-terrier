@@ -189,6 +189,7 @@ async fn main() -> anyhow::Result<()> {
     let app = create_router(state);
     let addr = format!("{}:{}", args.bind, args.port);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
+    println!("{}", serde_json::json!({"listen": listener.local_addr()?}));
     tracing::info!("broker listening on {}", addr);
 
     let serve_result = tokio::time::timeout(
