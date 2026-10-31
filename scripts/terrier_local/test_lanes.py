@@ -12,7 +12,7 @@ import time
 
 from . import contracts
 
-COMPONENTS = ("protocol", "runtime", "broker", "signer", "daemon", "storage", "cli", "ui", "dsh")
+COMPONENTS = ("protocol", "runtime", "broker", "signer", "daemon", "storage", "cli", "ui", "dsh", "managed")
 RUNTIME_SUITE = ("runtime", "agentkeys-runtime", "--lib", None, "")
 CORE = (
     ("protocol", "agentkeys-protocol", "--lib", None, ""),
@@ -41,12 +41,14 @@ SOURCE_COMMANDS = (
 RUST_RESULT = re.compile(r"test result: (?:ok|FAILED)\. (\d+) passed; (\d+) failed; (\d+) ignored;")
 
 
-def execute(command, directory, log_path, timeout_seconds=600):
+def execute(command, directory, log_path, timeout_seconds=600, extra_environment=None):
     started = time.monotonic()
     status = "passed"
     with log_path.open("xb") as output:
         try:
-            process = subprocess.Popen(command, cwd=directory, env=contracts.tool_environment(),
+            environment = contracts.tool_environment()
+            environment.update(extra_environment or {})
+            process = subprocess.Popen(command, cwd=directory, env=environment,
                 stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.STDOUT, start_new_session=True)
         except OSError:
             return {"status": "unavailable", "exit_code": None, "seconds": round(time.monotonic() - started, 3)}
@@ -95,7 +97,7 @@ def selection(lane, components):
 def run(repository, lane, components, online=False, report_path=None, plan=False):
     components = list(dict.fromkeys(components))
     rust = selection(lane, components)
-    selected = [name for name, *_ in rust] + [value for value in components if value in ("ui", "dsh")]
+    selected = [name for name, *_ in rust] + [value for value in components if value in ("ui", "dsh", "managed")]
     if lane != "focused":
         selected = [name for name, _ in SOURCE_COMMANDS] + selected
     if plan:
@@ -113,9 +115,9 @@ def run(repository, lane, components, online=False, report_path=None, plan=False
     diagnostics = Path(tempfile.mkdtemp(prefix="terrier-tests-"))
     checks = []
 
-    def check(name, phase, command, directory=repository, rust_test=False):
+    def check(name, phase, command, directory=repository, rust_test=False, extra_environment=None):
         log_path = diagnostics / f"{len(checks):02d}-{name}.log"
-        result = execute(command, directory, log_path)
+        result = execute(command, directory, log_path, extra_environment=extra_environment)
         if rust_test:
             rust_counts(result, log_path.read_text(errors="replace"))
         result.update(name=name, phase=phase, log=log_path.name)
@@ -123,7 +125,7 @@ def run(repository, lane, components, online=False, report_path=None, plan=False
         print(f"{name}: {result['status']} ({result['seconds']:.3f}s)", file=sys.stderr)
         return result, log_path
 
-    if online and rust:
+    if online and (rust or "managed" in components):
         setup, _ = check("dependencies", "setup", ["cargo", "fetch", "--locked"])
         if setup["status"] != "passed":
             rust = []
@@ -154,6 +156,29 @@ def run(repository, lane, components, online=False, report_path=None, plan=False
         executable, directory = executables[0]
         check(name, "execution", [executable, test_filter], directory, rust_test=True)
     for component in dict.fromkeys(components):
+        if component == "managed":
+            build, log_path = check("managed-binaries", "build", ["cargo", "build", "--offline", "--locked",
+                "-p", "agentkeys-runtime", "-p", "agentkeys-daemon", "--bins", "--message-format=json"])
+            if build["status"] != "passed":
+                continue
+            executables = {}
+            for line in log_path.read_text(errors="replace").splitlines():
+                try:
+                    message = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(message, dict) and message.get("reason") == "compiler-artifact" and message.get("executable"):
+                    manifest = Path(message.get("manifest_path", "")).parent
+                    if manifest.is_absolute() and repository in manifest.parents:
+                        executables[message["target"]["name"]] = message["executable"]
+            if not all(name in executables for name in ("agent-terrier-runtime", "agentkeys-daemon")):
+                build["status"] = "missing-runtime-executable"
+                continue
+            plugins, _ = check("managed-plugins", "build", ["npm", "run", "build"], repository / "packages")
+            if plugins["status"] == "passed":
+                check("managed", "execution", ["node", "--test", "packages/agent-terrier-runtime/managed.test.mjs"],
+                    extra_environment={"AGENT_TERRIER_TEST_RUNTIME_BINARY": executables["agent-terrier-runtime"],
+                        "AGENT_TERRIER_TEST_DAEMON_BINARY": executables["agentkeys-daemon"]})
         if component in ("ui", "dsh"):
             directory = repository / ("apps/parent-control" if component == "ui" else "packages")
             check(component + "-types", "build", ["npm", "run", "typecheck"], directory)

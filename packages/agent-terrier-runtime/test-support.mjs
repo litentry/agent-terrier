@@ -60,3 +60,12 @@ export async function chat(port, token, text, requestTimeout = 10_000) {
   return { status: response.status, body: await response.json() };
 }
 
+export function streamCompletion(response, model, delta, finish = 'stop') {
+  response.writeHead(200, { 'content-type': 'text/event-stream' });
+  for (const [payload, reason] of [[{ role: 'assistant' }, null], [delta, null], [{}, finish]]) {
+    response.write(`data: ${JSON.stringify({ id: 'local-completion', object: 'chat.completion.chunk', model,
+      choices: [{ index: 0, delta: payload, finish_reason: reason }] })}\n\n`);
+  }
+  response.end('data: [DONE]\n\n');
+}
+

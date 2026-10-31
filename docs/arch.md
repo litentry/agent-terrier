@@ -18,7 +18,7 @@ This document describes the public source tree. The complete local runtime is st
 | Development signing | `crates/agentkeys-mock-server` signer implementation and `agentkeys-local-signer` entry point | Local services and authenticated native/browser clients |
 | UI tokens and components | `design-system` | `apps/parent-control`, `apps/device-display` |
 | Agent runtime plugins | `packages/agentkeys-dsh` | Agent environments |
-| Local agent composition and image | `packages/agent-terrier-runtime`, existing `agentkeys-daemon` binary | Local component development and image qualification |
+| Local agent composition and image | `agentkeys-runtime::managed_agent` configuration and `agent-terrier-runtime` process owner; `packages/agent-terrier-runtime` agent loop and image | Local component development and image qualification |
 | Runtime lifecycle and Docker ownership | `crates/agentkeys-runtime` | Broker and local runtime controllers |
 | Protocol examples | `e2e/fixtures` | Shared drift and conformance checks |
 
@@ -45,6 +45,8 @@ The card schema has one owner in `agentkeys-protocol::card`. Its TypeScript outp
 7. Each cross-component contract has one definition.
 
 Independent checks at broker, worker and storage boundaries remain necessary even when they share types and pure helpers.
+
+The managed agent accepts one bounded configuration frame over its controller's stdin and keeps that stream as its lifetime owner. Its configuration uses the existing `ChainProfile` and shared environment names, requires explicit local services and session credentials, rejects arbitrary environment injection, and is never saved. The native daemon and JavaScript loop share a private state-volume layout and shut down together on controller loss, signals or child failure. An exclusive state lock prevents concurrent writers. Readiness proves authenticated component listeners; it does not assert a valid chain session or successful channel synchronization. Docker lifecycle and local-service orchestration still need to supply the translated configuration automatically; see [the image contract](wiki/local-agent-image.md).
 
 Signed capability operations, data classes, payloads and token envelopes have one owner in `agentkeys-protocol::capability`; broker and worker modules re-export those types. Native/browser cap requests and the broker receiver share `BrokerCapRequest`. A missing TTL uses the shared default; an explicit null remains invalid. Forwarding clients retain an opaque JSON transport alias, with no second token schema. Frozen payload-byte tests protect signature/audit compatibility; optional proof fields serialize using the issuer's omitted-field form while readers also accept legacy nulls. Moving the types does not move or bypass independent proof, signature, freshness, chain-binding and scope checks.
 
