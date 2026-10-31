@@ -12,6 +12,7 @@ pub mod kek;
 pub mod mock_client;
 pub mod otp;
 pub mod payment;
+pub mod protected_file;
 pub mod s3_backend;
 pub mod s3_endpoint;
 pub mod session_policy;

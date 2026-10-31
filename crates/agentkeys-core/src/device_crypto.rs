@@ -1,30 +1,11 @@
-//! Std layer over the device-key crypto for the §10.2 agent bootstrap (#144).
-//!
-//! The pure secp256k1 / EIP-191 / keccak primitives now live in the `no_std`
-//! [`agentkeys_device_core`] crate so the daemon / CLI / broker (native) and the
-//! ESP32 firmware (xtensa staticlib) run the SAME bytes (issue #367 anti-drift).
-//! This module RE-EXPORTS them — wrapping the fallible ones back into
-//! `anyhow::Result` — and adds the host-only pieces device-core deliberately
-//! omits: `OsRng` keygen + `0600` file custody ([`DeviceKey`], `write_key_0600`,
-//! `enforce_owner_only`, `load_device_key_from_env`). Callers keep importing
-//! `agentkeys_core::device_crypto::*` unchanged.
-//!
-//! The proof-of-possession preimage is the **deployed** one —
-//! `keccak256("agentkeys-agent-pop:" || device_key_hash_hex)` — matching
-//! `scripts/operator/chain/heima-agent-create.sh` and the on-chain `registerAgentDevice` inputs.
-//! (arch.md §10.2 still shows the stale `link_code || D_pub`; the doc is being
-//! reconciled to this preimage, not the other way around.)
+//! Native device-key generation and custody over the shared device-core crypto.
+//! The CLI, daemon and broker consume the same address and proof encodings.
 
 use std::path::Path;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result};
 use k256::ecdsa::SigningKey;
 
-// The pure secp256k1 / EIP-191 / keccak primitives live in the no_std
-// `agentkeys-device-core` crate so the daemon and the ESP32 firmware share ONE
-// implementation (issue #367 anti-drift). Re-export the infallible ones verbatim;
-// the four fallible ones are thin-wrapped below back into `anyhow::Result`, so
-// every `device_crypto::*` caller — and `DeviceKey` — stays byte-identical.
 pub use agentkeys_device_core::{
     agent_pop_payload, cap_in_scope, cap_pop_payload, delegation_payload, evm_address, keccak256,
     DeviceCryptoError,
@@ -125,75 +106,12 @@ fn expand_home(p: &str) -> String {
     p.to_string()
 }
 
-#[cfg(unix)]
 pub fn write_key_0600(path: &str, content: &str) -> Result<()> {
-    use std::io::Write;
-    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-    // Custody hardening: `mode(0o600)` is honoured ONLY when the file is freshly
-    // created — a pre-existing group/world-readable file would be truncated +
-    // rewritten while KEEPING its loose perms, and a planted symlink at `path`
-    // would redirect the write outside the owner-only file. So reject an existing
-    // symlink / non-regular target, and force 0600 AFTER opening (covers the
-    // pre-existing-loose-file case). Residual TOCTOU between the check and open is
-    // not closed here — O_NOFOLLOW would, but needs a libc dep (follow-up).
-    if let Ok(meta) = std::fs::symlink_metadata(path) {
-        if meta.file_type().is_symlink() || !meta.file_type().is_file() {
-            return Err(anyhow!(
-                "refusing to write {path}: existing target is a symlink/special file (key-custody)"
-            ));
-        }
-    }
-    let mut f = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(path)
-        .with_context(|| format!("open {path} (0600)"))?;
-    // Force owner-only even if the file pre-existed with looser permissions.
-    f.set_permissions(std::fs::Permissions::from_mode(0o600))
-        .with_context(|| format!("chmod 0600 {path}"))?;
-    f.write_all(content.as_bytes())?;
-    Ok(())
+    crate::protected_file::write(path, content.as_bytes(), false)
 }
 
-#[cfg(not(unix))]
-pub fn write_key_0600(path: &str, content: &str) -> Result<()> {
-    std::fs::write(path, content).with_context(|| format!("write {path}"))
-}
-
-/// Before loading an EXISTING device key, verify it's a regular, owner-only
-/// file. A copied/restored key with group/other read bits — or a symlink to
-/// another file — would otherwise still produce a valid signer, silently
-/// breaking the "key never leaves / only the owner can use it" guarantee. We
-/// reject (not auto-repair): loose perms mean the key may already be exposed.
-#[cfg(unix)]
 pub fn enforce_owner_only(path: &str) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    let meta = std::fs::symlink_metadata(path).with_context(|| format!("stat {path}"))?;
-    if meta.file_type().is_symlink() {
-        return Err(anyhow!(
-            "device key {path} is a symlink — refusing (key-custody); use a real owner-only file or regenerate"
-        ));
-    }
-    if !meta.file_type().is_file() {
-        return Err(anyhow!(
-            "device key {path} is not a regular file — refusing"
-        ));
-    }
-    let mode = meta.permissions().mode() & 0o777;
-    if mode & 0o077 != 0 {
-        return Err(anyhow!(
-            "device key {path} has loose permissions {mode:o} (group/other bits set) — \
-             it may already be exposed. Run `chmod 600 {path}` (or regenerate) and retry."
-        ));
-    }
-    Ok(())
-}
-
-#[cfg(not(unix))]
-pub fn enforce_owner_only(_path: &str) -> Result<()> {
-    Ok(())
+    crate::protected_file::open_read(path).map(|_| ())
 }
 
 /// An agent's secp256k1 device key (K10). Generated IN THE SANDBOX and never
@@ -215,21 +133,26 @@ impl DeviceKey {
     /// hits the `already-registered` short-circuit instead of binding a 2nd key.
     pub fn load_or_generate(key_file: &str, regen: bool) -> Result<Self> {
         let key_path = expand_home(key_file);
-        if regen {
-            let _ = std::fs::remove_file(&key_path);
+        if regen && std::fs::symlink_metadata(&key_path).is_ok() {
+            enforce_owner_only(&key_path)?;
+            std::fs::remove_file(&key_path)
+                .context("remove the explicitly regenerated device key")?;
         }
         let sk = if Path::new(&key_path).exists() {
-            enforce_owner_only(&key_path)?;
-            let raw = std::fs::read_to_string(&key_path).context("read device key file")?;
+            let raw = crate::protected_file::read_text(&key_path)?;
             let raw = raw.trim().trim_start_matches("0x");
-            let bytes = hex::decode(raw).context("device key file is not hex")?;
+            let bytes =
+                zeroize::Zeroizing::new(hex::decode(raw).context("device key file is not hex")?);
             SigningKey::from_slice(&bytes).context("invalid secp256k1 device key")?
         } else {
             let sk = SigningKey::random(&mut rand_core::OsRng);
             if let Some(dir) = Path::new(&key_path).parent() {
-                std::fs::create_dir_all(dir).ok();
+                if !dir.as_os_str().is_empty() {
+                    std::fs::create_dir_all(dir)?;
+                }
             }
-            write_key_0600(&key_path, &format!("0x{}", hex::encode(sk.to_bytes())))?;
+            let encoded = zeroize::Zeroizing::new(format!("0x{}", hex::encode(sk.to_bytes())));
+            crate::protected_file::write(&key_path, encoded.as_bytes(), true)?;
             sk
         };
         let address = evm_address(sk.verifying_key());

@@ -229,6 +229,7 @@ dependencies = [
  "hmac 0.12.1",
  "k256",
  "keyring",
+ "libc",
  "rand 0.8.5",
  "rand_core 0.6.4",
  "reqwest",
@@ -240,6 +241,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "zeroize",
 ]
 
 [[package]]
