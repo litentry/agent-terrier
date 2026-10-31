@@ -86,39 +86,10 @@ pub fn parse_revoke(req: &BuildRevokeRequest) -> Result<([u8; 32], Vec<[u8; 32]>
     Ok((operator_omni, hashes))
 }
 
-/// The `getDevice` words the fleet filter reads (of the 11-word `DeviceEntry`):
-/// operatorOmni (w0), actorOmni (w1), tier (w6), registeredAt (w8, 0 ⇒ never
-/// registered), revoked (w10).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct DeviceProbe {
-    pub operator_omni: [u8; 32],
-    /// The binding's HDKD actor omni (#577 — the update path re-labels the
-    /// re-created sandbox with the CHAIN-read actor, per D1).
-    pub actor_omni: [u8; 32],
-    pub tier: u8,
-    pub registered: bool,
-    pub revoked: bool,
-}
+pub use agentkeys_core::registry::DeviceProbe;
 
-/// Parse a raw `getDevice(bytes32) -> DeviceEntry` eth_call return. The
-/// registry's `devices` mapping returns an all-zero entry for unknown hashes
-/// (no revert), so `registered == false` is a clean signal, not an error.
 pub fn parse_device_probe(raw: &str) -> Result<DeviceProbe, String> {
-    let hexs = raw.trim_start_matches("0x");
-    let word = |i: usize| -> Result<[u8; 32], String> {
-        let s = hexs
-            .get(i * 64..(i + 1) * 64)
-            .ok_or_else(|| format!("getDevice short return (word {i})"))?;
-        let b = hex::decode(s).map_err(|e| format!("getDevice word {i} hex: {e}"))?;
-        Ok(b.try_into().expect("64 hex chars decode to 32 bytes"))
-    };
-    Ok(DeviceProbe {
-        operator_omni: word(0)?,
-        actor_omni: word(1)?,
-        tier: word(6)?[31],
-        registered: word(8)? != [0u8; 32],
-        revoked: word(10)?[31] != 0,
-    })
+    agentkeys_core::registry::parse_device_probe(raw).map_err(|error| error.to_string())
 }
 
 /// `SidecarRegistry.TIER_AGENT` (delegates) — revocable; frees an agent slot.

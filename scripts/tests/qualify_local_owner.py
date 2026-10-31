@@ -10,7 +10,7 @@ from qualify_local_chain import LocalChainFixture, REPOSITORY, available_port
 from terrier_local import chain, contracts, deployment, local_state, owner
 
 
-class LocalOwnerTests(LocalChainFixture):
+class LocalOwnerFixture(LocalChainFixture):
     def owner(self, state, *arguments, success=True):
         environment = contracts.tool_environment()
         environment["AGENT_TERRIER_STATE_DIR"] = str(state)
@@ -23,6 +23,7 @@ class LocalOwnerTests(LocalChainFixture):
         self.assertNotEqual(result.returncode, 0)
         return result
 
+class LocalOwnerTests(LocalOwnerFixture):
     def test_owner_register_grant_revoke_and_denials_on_real_contracts(self):
         with tempfile.TemporaryDirectory(prefix="terrier-owner-", dir="/tmp") as temporary:
             state = Path(temporary).resolve() / "state"

@@ -1,8 +1,12 @@
 use std::time::Duration;
 
-use agentkeys_backend_client::protocol::BuildAcceptUserOpResponse;
+use agentkeys_backend_client::protocol::{BuildAcceptUserOpResponse, EndpointEnrollment};
 use agentkeys_core::chain_profile::{rpc_http_override, ChainProfile};
 use agentkeys_core::erc4337::*;
+use agentkeys_core::registry::{
+    device_probe_calldata, parse_device_probe, verify_agent_pop, DeviceProbe, TIER_AGENT,
+    TIER_DEVICE,
+};
 use anyhow::{anyhow, ensure, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -16,6 +20,8 @@ pub enum OwnerAction {
     Register,
     Grant,
     Revoke,
+    Bind,
+    Unbind,
 }
 
 #[derive(clap::Args)]
@@ -32,6 +38,8 @@ pub struct OwnerOptions {
     pub beneficiary: String,
     #[arg(long)]
     pub actor_omni: Option<String>,
+    #[arg(long)]
+    pub enrollment_file: Option<String>,
     #[arg(long)]
     pub service: Vec<String>,
     #[arg(long)]
@@ -159,6 +167,63 @@ impl LocalChain {
             .context("invalid contract code response")?;
         Ok(!hex::decode(code)?.is_empty())
     }
+
+    async fn device(&self, registry: &[u8; 20], hash: &[u8; 32]) -> Result<DeviceProbe> {
+        let result = self.rpc("eth_call", json!([{"to":hex_value(registry), "data":hex_value(&device_probe_calldata(hash))}, "latest"])).await?;
+        parse_device_probe(result.as_str().context("invalid registry response")?)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum ActorKind {
+    Device,
+    Delegate,
+}
+
+pub fn device_identity(
+    context: &CommandContext,
+    key_file: &str,
+    operator: &str,
+    label: &str,
+    kind: ActorKind,
+) -> Result<EndpointEnrollment> {
+    context.development_signing()?;
+    let operator = fixed::<32>(operator)?;
+    ensure!(operator != [0; 32], "operator identity cannot be zero");
+    agentkeys_core::actor_omni::validate_label(label)?;
+    let device = agentkeys_core::device_crypto::DeviceKey::load_or_generate(key_file, false)?;
+    Ok(EndpointEnrollment {
+        actor_omni: hex_value(&agentkeys_core::actor_omni::child_omni(&operator, label)),
+        device_key_hash: device.device_key_hash()?,
+        pop_sig: device.pop_sig()?,
+        label: label.to_owned(),
+        kind: match kind {
+            ActorKind::Device => "device",
+            ActorKind::Delegate => "delegate",
+        }
+        .into(),
+        transport: String::new(),
+    })
+}
+
+fn enrollment(options: &OwnerOptions, operator: &[u8; 32]) -> Result<Option<EndpointEnrollment>> {
+    let Some(path) = &options.enrollment_file else {
+        return Ok(None);
+    };
+    let record: EndpointEnrollment =
+        serde_json::from_str(&agentkeys_core::protected_file::read_text(path)?)?;
+    agentkeys_core::actor_omni::validate_label(&record.label)?;
+    ensure!(
+        fixed::<32>(&record.actor_omni)?
+            == agentkeys_core::actor_omni::child_omni(operator, &record.label),
+        "enrollment actor is not this owner's child"
+    );
+    ensure!(
+        matches!(record.kind.as_str(), "device" | "delegate") && record.transport.is_empty(),
+        "unsupported local actor kind"
+    );
+    verify_agent_pop(&record.device_key_hash, &record.pop_sig)?;
+    Ok(Some(record))
 }
 
 pub async fn prepare(context: &CommandContext, options: &OwnerOptions) -> Result<OwnerPlan> {
@@ -171,6 +236,12 @@ pub async fn prepare(context: &CommandContext, options: &OwnerOptions) -> Result
         "local owner passkeys use the localhost relying party"
     );
     let actor = options.actor_omni.as_deref().map(fixed::<32>).transpose()?;
+    ensure!(
+        matches!(options.action, OwnerAction::Bind | OwnerAction::Unbind)
+            == options.enrollment_file.is_some(),
+        "only bind/unbind require an enrollment file"
+    );
+    let enrollment = enrollment(options, &operator)?;
     match options.action {
         OwnerAction::Register => ensure!(
             actor.is_none() && options.service.is_empty() && !options.read_only,
@@ -184,6 +255,14 @@ pub async fn prepare(context: &CommandContext, options: &OwnerOptions) -> Result
             actor.is_some() && options.service.is_empty() && !options.read_only,
             "revoke requires only an actor"
         ),
+        OwnerAction::Bind => ensure!(
+            actor.is_none() && !options.service.is_empty(),
+            "bind uses the enrollment actor and requires services"
+        ),
+        OwnerAction::Unbind => ensure!(
+            actor.is_none() && options.service.is_empty() && !options.read_only,
+            "unbind uses only the enrollment"
+        ),
     }
     ensure!(
         options.service.len() <= 64
@@ -192,6 +271,18 @@ pub async fn prepare(context: &CommandContext, options: &OwnerOptions) -> Result
                 && !service.contains(char::is_whitespace)),
         "invalid or excessive service identifiers"
     );
+    if enrollment
+        .as_ref()
+        .is_some_and(|record| record.kind == "device")
+    {
+        ensure!(
+            options.service.iter().all(|service| service
+                .strip_prefix("channel-pub:")
+                .or_else(|| service.strip_prefix("channel-sub:"))
+                .is_some_and(|channel| !channel.is_empty())),
+            "device actors accept only channel grants"
+        );
+    }
     if options.action != OwnerAction::Register {
         ensure!(
             std::path::Path::new(&options.key_file).exists(),
@@ -254,6 +345,18 @@ pub async fn prepare(context: &CommandContext, options: &OwnerOptions) -> Result
         options.action == OwnerAction::Register || plan.already_registered,
         "register the local owner first"
     );
+    let grant = ScopeGrant {
+        services: options
+            .service
+            .iter()
+            .map(|service| agentkeys_core::device_crypto::keccak256(service.as_bytes()))
+            .collect(),
+        read_only: options.read_only,
+        max_per_call: 0,
+        max_per_period: 0,
+        max_total: 0,
+        period_seconds: 0,
+    };
     let call_data = match options.action {
         OwnerAction::Register => register_batch_calldata(
             &registry,
@@ -268,23 +371,9 @@ pub async fn prepare(context: &CommandContext, options: &OwnerOptions) -> Result
                 roles: LOCAL_MASTER_ROLES,
             },
         ),
-        OwnerAction::Grant => scope_batch_calldata(
-            &scope,
-            &operator,
-            &actor.context("missing actor")?,
-            &ScopeGrant {
-                services: options
-                    .service
-                    .iter()
-                    .map(|service| agentkeys_core::device_crypto::keccak256(service.as_bytes()))
-                    .collect(),
-                read_only: options.read_only,
-                max_per_call: 0,
-                max_per_period: 0,
-                max_total: 0,
-                period_seconds: 0,
-            },
-        ),
+        OwnerAction::Grant => {
+            scope_batch_calldata(&scope, &operator, &actor.context("missing actor")?, &grant)
+        }
         OwnerAction::Revoke => execute_batch_calldata(
             &[scope],
             &[0],
@@ -293,6 +382,51 @@ pub async fn prepare(context: &CommandContext, options: &OwnerOptions) -> Result
                 &actor.context("missing actor")?,
             )],
         ),
+        OwnerAction::Bind | OwnerAction::Unbind => {
+            let record = enrollment.as_ref().context("missing enrollment")?;
+            let actor = fixed::<32>(&record.actor_omni)?;
+            let hash = fixed::<32>(&record.device_key_hash)?;
+            let current = chain.device(&registry, &hash).await?;
+            let tier = if record.kind == "delegate" {
+                TIER_AGENT
+            } else {
+                TIER_DEVICE
+            };
+            if options.action == OwnerAction::Bind {
+                ensure!(!current.registered, "device key was already bound; use grant for active scope changes or a fresh actor key after revocation");
+                let registration = AgentRegister {
+                    device_key_hash: hash,
+                    operator_omni: operator,
+                    actor_omni: actor,
+                    link_code_redemption: Vec::new(),
+                    agent_pop_sig: hex::decode(record.pop_sig.trim_start_matches("0x"))?,
+                };
+                if tier == TIER_AGENT {
+                    spawn_batch_calldata(&registry, &scope, &registration, &grant)
+                } else {
+                    accept_batch_calldata(&registry, &scope, &registration, &grant)
+                }
+            } else {
+                ensure!(
+                    current.registered
+                        && current.operator_omni == operator
+                        && current.actor_omni == actor
+                        && current.tier == tier,
+                    "on-chain binding does not match this owner and enrollment"
+                );
+                ensure!(!current.revoked, "device is already revoked");
+                revoke_batch_calldata_with_scopes(
+                    &registry,
+                    &scope,
+                    &operator,
+                    &[hash],
+                    &[ExtraScope {
+                        actor_omni: actor,
+                        grant,
+                    }],
+                )
+            }
+        }
     };
     let init_code = if chain.code_exists(&account).await? {
         Vec::new()

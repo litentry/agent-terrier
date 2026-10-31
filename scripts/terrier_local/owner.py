@@ -29,16 +29,52 @@ def run_cli(repository, profile_path, arguments, payload=None):
     return json.loads(result.stdout)
 
 
-def execute(repository, state, action, name, actor=None, services=None, read_only=False):
+def validate_name(name):
     if not re.fullmatch(r"[a-z][a-z0-9-]{0,31}", name):
-        raise ValueError("Owner name must be lowercase letters, digits or hyphens, starting with a letter")
+        raise ValueError("Name must be lowercase letters, digits or hyphens, starting with a letter")
+
+
+def device_identity(repository, state, name, operator, label, kind):
+    validate_name(name)
+    validate_name(label)
+    if not re.fullmatch(r"0x[0-9a-fA-F]{64}", operator) or kind not in ("device", "delegate"):
+        raise ValueError("Invalid operator identity or actor kind")
+    directory = state / "devices" / name
+    local_state.private_directory(state / "devices")
+    local_state.private_directory(directory)
+    enrollment_path = directory / "enrollment.json"
+    identity_path = directory / "identity.json"
+    identity = {"operator_omni":operator.lower(), "label":label, "kind":kind, "development_only":True}
+    if identity_path.exists() or identity_path.is_symlink():
+        if local_state.read_json(identity_path) != identity:
+            raise ValueError("Existing actor identity differs; refusing key reuse")
+        if not (directory / "device.key").exists():
+            raise ValueError("Existing actor key is missing; restore the original key")
+    enrollment = run_cli(repository, state / "chain-profile.json", ["device-identity",
+        "--key-file", str(directory / "device.key"), "--operator-omni", operator,
+        "--label", label, "--kind", kind])
+    local_state.write_json(identity_path, identity)
+    local_state.write_json(enrollment_path, enrollment)
+    return {"development_only":True, "enrollment_file":str(enrollment_path), "enrollment":enrollment}
+
+
+def execute(repository, state, action, name, actor=None, services=None, read_only=False, enrollment_file=None):
+    validate_name(name)
     services = services or []
-    if action not in ("register", "grant", "revoke"):
+    if action not in ("register", "grant", "revoke", "bind", "unbind"):
         raise ValueError("Unsupported owner operation")
     if action == "register" and (actor or services or read_only):
         raise ValueError("Owner registration does not accept scope arguments")
-    if action != "register" and not actor:
+    if action in ("grant", "revoke") and not actor:
         raise ValueError("Scope operations require --actor-omni")
+    if (action in ("bind", "unbind")) != bool(enrollment_file):
+        raise ValueError("Only bind/unbind require --enrollment-file")
+    if action in ("bind", "unbind") and actor:
+        raise ValueError("Binding uses the actor in the enrollment file")
+    if action == "bind" and not services:
+        raise ValueError("Bind requires at least one --service")
+    if action == "unbind" and (services or read_only):
+        raise ValueError("Unbind does not accept grant arguments")
     if action == "grant" and not services:
         raise ValueError("Grant requires at least one --service")
     if action == "revoke" and (services or read_only):
@@ -72,6 +108,8 @@ def execute(repository, state, action, name, actor=None, services=None, read_onl
                  "--key-file", str(directory / "passkey.pem"), "--beneficiary", beneficiary]
     if actor:
         arguments.extend(["--actor-omni", actor])
+    if enrollment_file:
+        arguments.extend(["--enrollment-file", str(enrollment_file)])
     for service in services:
         arguments.extend(["--service", service])
     if read_only:

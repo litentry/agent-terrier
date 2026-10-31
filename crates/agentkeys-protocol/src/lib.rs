@@ -2996,7 +2996,7 @@ pub struct EndpointEnrollment {
     pub pop_sig: String,
     /// The HDKD label (`gateway-<transport>` / `console-<host>`).
     pub label: String,
-    /// `gateway` · `console` — for the sheet.
+    /// Presentation kind: gateway, console, or local device/delegate.
     #[serde(default)]
     pub kind: String,
     /// The gateway's transport namespace (`weixin` / `telegram`), when a gateway.

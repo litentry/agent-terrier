@@ -736,6 +736,19 @@ enum K11Action {
 #[derive(Subcommand)]
 enum ChainAction {
     #[command(
+        about = "Create an actor-owned development key and emit only its public enrollment proof"
+    )]
+    DeviceIdentity {
+        #[arg(long)]
+        key_file: String,
+        #[arg(long)]
+        operator_omni: String,
+        #[arg(long)]
+        label: String,
+        #[arg(long, value_enum)]
+        kind: agentkeys_cli::local_owner::ActorKind,
+    },
+    #[command(
         about = "Prepare a real owner-signed operation on the explicit local development chain"
     )]
     PrepareOwner(agentkeys_cli::local_owner::OwnerOptions),
@@ -1356,6 +1369,20 @@ enum AgentAction {
 async fn cmd_chain(ctx: &CommandContext, action: &ChainAction) -> anyhow::Result<String> {
     use agentkeys_core::chain_profile::ChainProfile;
     match action {
+        ChainAction::DeviceIdentity {
+            key_file,
+            operator_omni,
+            label,
+            kind,
+        } => Ok(serde_json::to_string(
+            &agentkeys_cli::local_owner::device_identity(
+                ctx,
+                key_file,
+                operator_omni,
+                label,
+                *kind,
+            )?,
+        )?),
         ChainAction::PrepareOwner(options) => {
             let plan = agentkeys_cli::local_owner::prepare(ctx, options).await?;
             Ok(serde_json::to_string(&plan)?)
