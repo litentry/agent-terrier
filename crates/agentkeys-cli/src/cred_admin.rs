@@ -1,13 +1,4 @@
-//! Agent-side credential fetch (#216) — the agent pulls its AUTHORIZED
-//! credential (e.g. its LLM key) from the vault to *use* it. Unlike the master's
-//! store/list (which never reveal a secret), this returns the decrypted
-//! plaintext: the agent needs the actual secret to make calls. It is gated by the
-//! agent's `cred:<service>` scope — the broker won't mint a cred-fetch cap the
-//! actor isn't scoped for, and the worker re-checks the cap.
-//!
-//! Routes through the shared `agentkeys-backend-client` (issue #204): cap-mint
-//! (`CredFetch`) → per-actor STS under the VAULT role → cred worker
-//! `/v1/cred/fetch` → decrypt → plaintext. No re-typed wire shapes.
+//! Credential and memory commands using shared capability-authorized worker transport.
 
 use anyhow::{Context, Result};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
@@ -20,6 +11,27 @@ use agentkeys_backend_client::{
 };
 use agentkeys_types::CredManifest;
 
+fn configure_actor_client(
+    client: BackendClient,
+    device_key_file: Option<&str>,
+    delegation_file: Option<&str>,
+) -> Result<(BackendClient, String)> {
+    match (device_key_file, delegation_file) {
+        (Some(path), None) => {
+            let key = agentkeys_core::device_crypto::DeviceKey::load(path)
+                .context("load existing registered device key")?;
+            let hash = key.device_key_hash()?;
+            Ok((client.with_device_key(std::sync::Arc::new(key)), hash))
+        }
+        (None, Some(path)) => {
+            let (key, delegation) = crate::delegation_admin::StoredDelegation::load(path)?;
+            let hash = delegation.device_key_hash.clone();
+            Ok((client.with_delegation(key, delegation), hash))
+        }
+        _ => anyhow::bail!("provide exactly one existing device key file or delegation file"),
+    }
+}
+
 /// Fetch + decrypt the credential `service` the actor is authorized for, returning
 /// the plaintext secret. `operator_omni` == `actor_omni` for a master-self fetch;
 /// for an agent they are (master, agent). The omnis are normalized to the broker's
@@ -29,23 +41,18 @@ pub async fn cred_fetch(
     service: &str,
     operator_omni: &str,
     actor_omni: &str,
-    device_key_hash: &str,
+    device_key_file: &str,
     session_bearer: &str,
     broker_url: &str,
     cred_url: &str,
-    vault_role_arn: &str,
-    region: &str,
 ) -> Result<String> {
     let client = BackendClient::new(
         Some(broker_url.to_string()),
         None, // memory_url
         None, // audit_url
         Some(cred_url.to_string()),
-        Some(session_bearer.to_string()), // agent_session_bearer → per-actor STS
-        None,                             // memory_role_arn
-        Some(vault_role_arn.to_string()),
-        region.to_string(),
     );
+    let (client, device_key_hash) = configure_actor_client(client, Some(device_key_file), None)?;
     let cap = client
         .cap_mint(
             CapMintOp::CredFetch,
@@ -87,63 +94,34 @@ pub async fn cred_fetch(
     String::from_utf8(bytes).context("cred plaintext is not valid UTF-8")
 }
 
-/// #295 P1 §7a — delegate-side canonical-memory READ. Pulls a `namespace` of the
-/// MASTER's CANONICAL memory (`bots/<operator>/memory/`) this actor is
-/// authorized for, returning the decrypted plaintext. Gated by the actor's
-/// on-chain `knowledge:<ns>` scope grant and run under the DELEGATE's OWN session:
-/// the shared client presents the CanonicalFetch cap + this session to the
-/// broker's `/v1/cap/canonical-sts`, which (after verifying the cap) returns
-/// read-only, exact-object STS creds. The delegate NEVER holds the operator
-/// session bearer (the Codex critical fix). The cap's `service` carries the
-/// namespace (the worker keys S3 on operator + service). Routes through the
-/// shared `agentkeys-backend-client`.
+/// Read owner canonical memory under the actor's own grant and device proof.
 #[allow(clippy::too_many_arguments)]
 pub async fn memory_canonical_get(
     namespace: &str,
     operator_omni: &str,
     actor_omni: &str,
-    device_key_hash: &str,
+    device_key_file: Option<&str>,
     session_bearer: &str,
     broker_url: &str,
     memory_url: &str,
-    region: &str,
     delegation_file: Option<&str>,
 ) -> Result<String> {
-    // The DELEGATE's own session bearer authenticates to the broker, which (after
-    // verifying the cap) issues scoped read-only creds — no MEMORY_ROLE_ARN is
-    // needed on this side (the broker holds it). cred_fetch keeps the role-relay.
-    let mut client = BackendClient::new(
+    let client = BackendClient::new(
         Some(broker_url.to_string()),
         Some(memory_url.to_string()),
         None, // audit_url
-        None, // cred_url
-        Some(session_bearer.to_string()),
-        None, // memory_role_arn — unused on the broker-brokered canonical path
-        None, // vault_role_arn
-        region.to_string(),
+        None,
     );
-    // #369 DELEGATED mode: when the sandbox holds a device-signed delegation (it
-    // does NOT hold a registered K10), it signs the cap-PoP with its EPHEMERAL key
-    // and attaches the delegation_path; cap_mint stamps the cap with the DEVICE's
-    // bound device_key_hash (from the delegation), and the worker accepts it via
-    // verify_delegation. Without a delegation file this is the legacy direct path.
-    let effective_dkh = match delegation_file {
-        Some(f) => {
-            let (ephemeral, delegation) = crate::delegation_admin::StoredDelegation::load(f)?;
-            let dkh = delegation.device_key_hash.clone();
-            client = client.with_delegation(ephemeral, delegation);
-            dkh
-        }
-        None => device_key_hash.to_string(),
-    };
+    let (client, device_key_hash) =
+        configure_actor_client(client, device_key_file, delegation_file)?;
     let cap = client
         .cap_mint(
             CapMintOp::MemoryCanonicalGet,
             CapMintRequest {
                 operator_omni: normalize_omni_0x(operator_omni),
                 actor_omni: normalize_omni_0x(actor_omni),
-                service: namespace.to_string(),
-                device_key_hash: effective_dkh,
+                service: agentkeys_backend_client::service_knowledge(namespace),
+                device_key_hash,
                 ttl_seconds: 300,
             },
             session_bearer,
@@ -164,16 +142,7 @@ pub async fn memory_canonical_get(
     String::from_utf8(bytes).context("memory plaintext is not valid UTF-8")
 }
 
-/// #339 P2 — delegate-side absorption-inbox PUSH (the master-hub "push" channel).
-/// Proposes a learning (`key` + `body`) into the MASTER's staging inbox
-/// (`bots/<operator>/inbox/<delegate>/…`) for the master to curate into canonical
-/// later — a pull-request, never a blind write into `knowledge:<ns>`. Gated by the
-/// actor's on-chain `proposal:<ns>` scope grant (DISTINCT from the `knowledge:<ns>` read
-/// grant — granting read never grants push) and run under the DELEGATE's OWN
-/// session (A', §8): the shared client presents the `Append` cap + this session;
-/// the WORKER writes server-side under a broker-minted, sub-prefix-scoped STS, so
-/// the delegate NEVER holds S3 creds, and provenance is worker-stamped from the
-/// cap (the delegate can't forge its own attribution). Returns the inbox receipt.
+/// Append a proposal with actor proof; workers independently verify scope and stamp provenance.
 #[allow(clippy::too_many_arguments)]
 pub async fn memory_inbox_push(
     namespace: &str,
@@ -182,26 +151,18 @@ pub async fn memory_inbox_push(
     kind: agentkeys_backend_client::protocol::ContextKind,
     operator_omni: &str,
     actor_omni: &str,
-    device_key_hash: &str,
+    device_key_file: &str,
     session_bearer: &str,
     broker_url: &str,
     memory_url: &str,
-    region: &str,
 ) -> Result<String> {
-    // The DELEGATE's own session authenticates to the broker; no MEMORY_ROLE_ARN
-    // on this side — the broker's `/v1/cap/inbox-sts` holds it and issues the
-    // worker a write-scoped STS (the delegate never sees creds), same A' shape as
-    // the canonical read.
     let client = BackendClient::new(
         Some(broker_url.to_string()),
         Some(memory_url.to_string()),
         None, // audit_url
-        None, // cred_url
-        Some(session_bearer.to_string()),
-        None, // memory_role_arn — broker-brokered inbox-sts holds it
-        None, // vault_role_arn
-        region.to_string(),
+        None,
     );
+    let (client, device_key_hash) = configure_actor_client(client, Some(device_key_file), None)?;
     let resp = memory_inbox_push_with(
         &client,
         namespace,
@@ -210,7 +171,7 @@ pub async fn memory_inbox_push(
         kind,
         operator_omni,
         actor_omni,
-        device_key_hash,
+        &device_key_hash,
         session_bearer,
     )
     .await?;
@@ -265,35 +226,25 @@ pub async fn memory_inbox_push_with(
         })
 }
 
-/// Vault the credential `service` = `secret` (the symmetric store half of
-/// [`cred_fetch`]). `operator_omni` == `actor_omni` for a master-self store (the
-/// master vaulting into its OWN vault — the common case, e.g. seeding the agent's
-/// LLM key). Returns the worker's S3 key. Routes through the shared
-/// `agentkeys-backend-client` (#204): cap-mint (`CredStore`) → per-actor STS under
-/// the VAULT role → cred worker `/v1/cred/store` → encrypt + S3 PUT.
+/// Store a credential under an owner capability. The local worker encrypts plaintext.
 #[allow(clippy::too_many_arguments)]
 pub async fn cred_store(
     service: &str,
     secret: &str,
     operator_omni: &str,
     actor_omni: &str,
-    device_key_hash: &str,
+    device_key_file: &str,
     session_bearer: &str,
     broker_url: &str,
     cred_url: &str,
-    vault_role_arn: &str,
-    region: &str,
 ) -> Result<String> {
     let client = BackendClient::new(
         Some(broker_url.to_string()),
         None, // memory_url
         None, // audit_url
         Some(cred_url.to_string()),
-        Some(session_bearer.to_string()), // session bearer → per-actor STS
-        None,                             // memory_role_arn
-        Some(vault_role_arn.to_string()),
-        region.to_string(),
     );
+    let (client, device_key_hash) = configure_actor_client(client, Some(device_key_file), None)?;
     let cap = client
         .cap_mint(
             CapMintOp::CredStore,
@@ -404,4 +355,116 @@ pub fn cred_manifest_write(
         man.services.len(),
         man.default_name().unwrap_or("(none)")
     ))
+}
+
+#[cfg(test)]
+mod device_configuration_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn canonical_read_signs_the_knowledge_service_with_existing_key() {
+        use agentkeys_backend_client::protocol::{BrokerCapRequest, MemoryGetBody};
+        use axum::{
+            http::{HeaderMap, StatusCode},
+            routing::post,
+            Json, Router,
+        };
+        use serde_json::json;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("device");
+        let key = std::sync::Arc::new(
+            agentkeys_core::device_crypto::DeviceKey::load_or_generate(
+                path.to_str().unwrap(),
+                false,
+            )
+            .unwrap(),
+        );
+        let expected_key = key.clone();
+        let router = Router::new()
+            .route(
+                "/v1/cap/memory-canonical-get",
+                post(
+                    move |headers: HeaderMap, Json(body): Json<BrokerCapRequest>| {
+                        let key = expected_key.clone();
+                        async move {
+                            assert_eq!(headers["authorization"], "Bearer synthetic-session");
+                            if body.service != "knowledge:notes" {
+                                return (
+                                    StatusCode::FORBIDDEN,
+                                    Json(json!({"reason":"service_not_in_scope"})),
+                                );
+                            }
+                            assert_eq!(body.device_key_hash, key.device_key_hash().unwrap());
+                            assert_eq!(
+                                body.client_sig.as_deref(),
+                                Some(
+                                    key.cap_pop_sig(
+                                        &body.operator_omni,
+                                        &body.actor_omni,
+                                        &body.service,
+                                        "canonical_fetch",
+                                        "memory",
+                                        body.client_nonce.as_deref().unwrap(),
+                                        body.client_ts.unwrap(),
+                                    )
+                                    .unwrap()
+                                    .as_str()
+                                )
+                            );
+                            (StatusCode::OK, Json(json!({"synthetic":"capability"})))
+                        }
+                    },
+                ),
+            )
+            .route(
+                "/v1/memory/canonical-get",
+                post(
+                    |headers: HeaderMap, Json(body): Json<MemoryGetBody>| async move {
+                        assert!(!headers.contains_key("authorization"));
+                        assert_eq!(body.namespace, "notes");
+                        assert_eq!(body.cap, json!({"synthetic":"capability"}));
+                        Json(json!({"ok":true,"plaintext_b64":STANDARD.encode("canonical notes")}))
+                    },
+                ),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let task = tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+        let result = memory_canonical_get(
+            "notes",
+            &"11".repeat(32),
+            &"22".repeat(32),
+            Some(path.to_str().unwrap()),
+            "synthetic-session",
+            &url,
+            &url,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(result, "canonical notes");
+        task.abort();
+    }
+
+    #[test]
+    fn commands_require_existing_device_key_and_do_not_create_one() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("device");
+        let client = || BackendClient::new(None, None, None, None);
+        assert!(configure_actor_client(client(), Some(path.to_str().unwrap()), None).is_err());
+        assert!(!path.exists());
+        assert!(configure_actor_client(client(), None, None).is_err());
+        assert!(configure_actor_client(client(), Some("unused"), Some("unused")).is_err());
+        let key = agentkeys_core::device_crypto::DeviceKey::load_or_generate(
+            path.to_str().unwrap(),
+            false,
+        )
+        .unwrap();
+        let (client, hash) =
+            configure_actor_client(client(), Some(path.to_str().unwrap()), None).unwrap();
+        assert_eq!(hash, key.device_key_hash().unwrap());
+        assert_eq!(client.device_key.unwrap().device_key_hash().unwrap(), hash);
+    }
 }

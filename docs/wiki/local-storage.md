@@ -1,6 +1,12 @@
 The local object service is a qualified storage component. The credential, configuration, memory and channel workers use it for encrypted data operations. Integration with product clients, broker sessions and the complete local application remains open in [#5](https://github.com/litentry/agent-terrier/issues/5).
 
-The browser data library now calls these workers directly with signed capabilities. No cloud credential exchange or cloud headers are required. Configuration and credential encryption still uses the explicitly configured key-derivation signer; the complete local signer and broker-session setup remains in progress.
+The browser data library and shared native client now call storage workers directly with signed capabilities. No cloud credential exchange or cloud headers are required. Browser configuration and credential encryption still uses the explicitly configured key-derivation signer; the complete local signer and broker-session setup remains in progress.
+
+## Client commands
+
+`cred fetch`, `cred store` and `memory inbox-push` use `--device-key-file` (or `AGENTKEYS_DEVICE_KEY_FILE`) for the actor's existing registered key. They derive its hash instead of accepting a manually supplied hash. Missing key files fail without creating replacement identities. `memory canonical-get` accepts either that key file or an explicit `--delegation-file`, never both. It signs the canonical `knowledge:<namespace>` service using the shared service-name builder.
+
+These commands still need explicit broker and worker URLs plus the actor's session. Storage role and region flags have been removed. CLI parsing and component tests are available now; complete local broker session enrollment remains part of the unfinished application setup.
 
 ## Ownership and boundaries
 

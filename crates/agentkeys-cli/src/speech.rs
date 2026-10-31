@@ -35,16 +35,7 @@ pub async fn speech_sts_creds(
     device_key_file: Option<&str>,
     delegation_file: Option<&str>,
 ) -> Result<SpeechStsResult> {
-    let mut client = BackendClient::new(
-        Some(broker_url.to_string()),
-        None,
-        None,
-        None,
-        Some(session_bearer.to_string()),
-        None,
-        None,
-        String::new(),
-    );
+    let mut client = BackendClient::new(Some(broker_url.to_string()), None, None, None);
     // #369 DELEGATED mode (sandbox) vs direct K10 mode vs bare — the same
     // three-way the storage clients use (cred_admin::memory_canonical_get).
     let effective_dkh = match delegation_file {

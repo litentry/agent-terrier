@@ -309,7 +309,6 @@ mod tests {
             keys_file,
             audit_url: None,
             require_audit: false,
-            aws_region: "us-east-1".into(),
             speech_backend: None,
             search: None,
             decision: Default::default(),

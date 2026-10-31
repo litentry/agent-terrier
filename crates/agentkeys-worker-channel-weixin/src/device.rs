@@ -494,17 +494,7 @@ impl GatewayDevice {
         let key = self.key()?;
         let device_key_hash = key.device_key_hash()?;
         let jwt = self.session().await?;
-        let client = BackendClient::new(
-            Some(broker),
-            None,
-            None,
-            None,
-            Some(jwt.clone()),
-            None,
-            None,
-            String::new(),
-        )
-        .with_device_key(key);
+        let client = BackendClient::new(Some(broker), None, None, None).with_device_key(key);
         let (op, service) = if publish {
             (
                 CapMintOp::ChannelPublish,

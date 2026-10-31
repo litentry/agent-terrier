@@ -495,18 +495,14 @@ enum CredAction {
         operator_omni: String,
         #[arg(long, env = "AGENTKEYS_ACTOR_OMNI")]
         actor_omni: String,
-        #[arg(long, env = "AGENTKEYS_DEVICE_KEY_HASH")]
-        device_key_hash: String,
+        #[arg(long, env = "AGENTKEYS_DEVICE_KEY_FILE")]
+        device_key_file: String,
         #[arg(long, env = "AGENTKEYS_SESSION_BEARER")]
         session_bearer: String,
         #[arg(long, env = "AGENTKEYS_BROKER_URL")]
         broker_url: String,
         #[arg(long, env = "AGENTKEYS_WORKER_CRED_URL")]
         cred_url: String,
-        #[arg(long, env = "VAULT_ROLE_ARN")]
-        vault_role_arn: String,
-        #[arg(long, env = "REGION", default_value = "us-east-1")]
-        region: String,
     },
     /// List the agent's authorized credential services from the off-chain
     /// manifest (#216). The chain stores only keccak(service) hashes — it can
@@ -549,18 +545,14 @@ enum CredAction {
         operator_omni: String,
         #[arg(long, env = "AGENTKEYS_ACTOR_OMNI")]
         actor_omni: String,
-        #[arg(long, env = "AGENTKEYS_DEVICE_KEY_HASH")]
-        device_key_hash: String,
+        #[arg(long, env = "AGENTKEYS_DEVICE_KEY_FILE")]
+        device_key_file: String,
         #[arg(long, env = "AGENTKEYS_SESSION_BEARER")]
         session_bearer: String,
         #[arg(long, env = "AGENTKEYS_BROKER_URL")]
         broker_url: String,
         #[arg(long, env = "AGENTKEYS_WORKER_CRED_URL")]
         cred_url: String,
-        #[arg(long, env = "VAULT_ROLE_ARN")]
-        vault_role_arn: String,
-        #[arg(long, env = "REGION", default_value = "us-east-1")]
-        region: String,
     },
 }
 
@@ -885,16 +877,7 @@ enum InboxAction {
 
 #[derive(Subcommand)]
 enum MemoryAction {
-    /// #295 P1 — delegate-side READ of the MASTER's CANONICAL memory namespace
-    /// (the master-hub distribution channel). Gated by the actor's on-chain
-    /// `knowledge:<ns>` scope grant; prints the decrypted plaintext. This is the
-    /// delegated-fetch path the #566 daemon memory mirror also rides —
-    /// §7a (A'): the delegate sends ONLY its OWN session + the cap to the memory
-    /// worker and gets back plaintext, NEVER S3 creds. The WORKER fetches the
-    /// exact-object scoped STS server-side, so the delegate can't bypass the
-    /// worker's audit/chain re-verify nor hold the operator session. Needs the
-    /// broker + memory-worker URLs and the DELEGATE's own session (NOT the
-    /// master's). Identity/session come from flags or env.
+    /// Read owner canonical memory using the actor session and device proof.
     CanonicalGet {
         /// The memory namespace to read (e.g. `travel`). Carried as the cap
         /// `service` and the worker S3 key suffix.
@@ -904,30 +887,27 @@ enum MemoryAction {
         operator_omni: String,
         #[arg(long, env = "AGENTKEYS_ACTOR_OMNI")]
         actor_omni: String,
-        #[arg(long, env = "AGENTKEYS_DEVICE_KEY_HASH")]
-        device_key_hash: String,
+        #[arg(
+            long,
+            env = "AGENTKEYS_DEVICE_KEY_FILE",
+            required_unless_present = "delegation_file",
+            conflicts_with = "delegation_file"
+        )]
+        device_key_file: Option<String>,
         #[arg(long, env = "AGENTKEYS_SESSION_BEARER")]
         session_bearer: String,
         #[arg(long, env = "AGENTKEYS_BROKER_URL")]
         broker_url: String,
         #[arg(long, env = "AGENTKEYS_WORKER_MEMORY_URL")]
         memory_url: String,
-        #[arg(long, env = "REGION", default_value = "us-east-1")]
-        region: String,
         /// #369 DELEGATED mode: a `delegation bootstrap` output file. When set, the
         /// cap-PoP is signed by the sandbox's ephemeral key carried in it + the
         /// device-signed `delegation_path` is attached (the sandbox holds no K10).
-        /// Unset → the legacy direct path (`device_key_hash` is the caller's own).
+        /// Without delegation, use the existing registered device key file.
         #[arg(long, env = "AGENTKEYS_DELEGATION_FILE")]
         delegation_file: Option<String>,
     },
-    /// #339 P2 — PUSH a learning into the master's absorption inbox (the
-    /// master-hub "push" channel): a proposal the master later CURATES into
-    /// canonical memory (a pull-request, never a blind write). Gated by the
-    /// DELEGATE's on-chain `proposal:<ns>` grant (DISTINCT from the `knowledge:<ns>`
-    /// read grant) and run under the delegate's OWN session (A', §8): the worker
-    /// writes server-side under a broker-minted scoped STS, so the delegate holds
-    /// no S3 creds and provenance is worker-stamped. Identity/session from flags or env.
+    /// Submit a proposal under the actor's separate proposal grant.
     InboxPush {
         /// The bare memory namespace the proposal targets (e.g. `travel`). Built
         /// into the cap `service` as `proposal:<ns>`; the master curates it into
@@ -950,16 +930,14 @@ enum MemoryAction {
         operator_omni: String,
         #[arg(long, env = "AGENTKEYS_ACTOR_OMNI")]
         actor_omni: String,
-        #[arg(long, env = "AGENTKEYS_DEVICE_KEY_HASH")]
-        device_key_hash: String,
+        #[arg(long, env = "AGENTKEYS_DEVICE_KEY_FILE")]
+        device_key_file: String,
         #[arg(long, env = "AGENTKEYS_SESSION_BEARER")]
         session_bearer: String,
         #[arg(long, env = "AGENTKEYS_BROKER_URL")]
         broker_url: String,
         #[arg(long, env = "AGENTKEYS_WORKER_MEMORY_URL")]
         memory_url: String,
-        #[arg(long, env = "REGION", default_value = "us-east-1")]
-        region: String,
     },
     /// #339 P2 — LIST the master's absorption-inbox curate queue: every delegate
     /// proposal awaiting review. The MASTER-side twin of `inbox-push`; it drives
@@ -1874,22 +1852,20 @@ async fn main() {
                 namespace,
                 operator_omni,
                 actor_omni,
-                device_key_hash,
+                device_key_file,
                 session_bearer,
                 broker_url,
                 memory_url,
-                region,
                 delegation_file,
             } => {
                 agentkeys_cli::cred_admin::memory_canonical_get(
                     namespace,
                     operator_omni,
                     actor_omni,
-                    device_key_hash,
+                    device_key_file.as_deref(),
                     session_bearer,
                     broker_url,
                     memory_url,
-                    region,
                     delegation_file.as_deref(),
                 )
                 .await
@@ -1901,11 +1877,10 @@ async fn main() {
                 kind,
                 operator_omni,
                 actor_omni,
-                device_key_hash,
+                device_key_file,
                 session_bearer,
                 broker_url,
                 memory_url,
-                region,
             } => match agentkeys_backend_client::protocol::ContextKind::parse(kind) {
                 None => Err(anyhow::anyhow!(
                     "--kind must be one of knowledge|skill|persona (got `{kind}`)"
@@ -1918,11 +1893,10 @@ async fn main() {
                         kind,
                         operator_omni,
                         actor_omni,
-                        device_key_hash,
+                        device_key_file,
                         session_bearer,
                         broker_url,
                         memory_url,
-                        region,
                     )
                     .await
                 }
@@ -2273,12 +2247,10 @@ async fn main() {
                 manifest,
                 operator_omni,
                 actor_omni,
-                device_key_hash,
+                device_key_file,
                 session_bearer,
                 broker_url,
                 cred_url,
-                vault_role_arn,
-                region,
             } => {
                 // #216 default-key selection (off-chain). Resolve which service to
                 // fetch — explicit > --select N (1-based) > master-designated
@@ -2296,12 +2268,10 @@ async fn main() {
                             &resolved,
                             operator_omni,
                             actor_omni,
-                            device_key_hash,
+                            device_key_file,
                             session_bearer,
                             broker_url,
                             cred_url,
-                            vault_role_arn,
-                            region,
                         )
                         .await
                     }
@@ -2314,12 +2284,10 @@ async fn main() {
                 secret_env,
                 operator_omni,
                 actor_omni,
-                device_key_hash,
+                device_key_file,
                 session_bearer,
                 broker_url,
                 cred_url,
-                vault_role_arn,
-                region,
             } => {
                 let resolved: anyhow::Result<String> = match (secret, secret_env) {
                     (Some(s), _) => Ok(s.clone()),
@@ -2336,12 +2304,10 @@ async fn main() {
                         &secret_value,
                         operator_omni,
                         actor_omni,
-                        device_key_hash,
+                        device_key_file,
                         session_bearer,
                         broker_url,
                         cred_url,
-                        vault_role_arn,
-                        region,
                     )
                     .await
                     .map(|s3_key| format!("stored `{service}` → {s3_key}")),

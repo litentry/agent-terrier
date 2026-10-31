@@ -1,10 +1,4 @@
-//! `BackendClient` — the one implementation of the broker/worker HTTP chain
-//! (cap-mint → STS relay → worker put/get → audit append).
-//!
-//! This is the reference impl extracted out of the MCP server's
-//! `HttpBackend` (issue #203). The MCP server's `HttpBackend` now delegates
-//! here; the daemon's `ui_bridge` real-memory path calls it directly. There is
-//! no second hand-coded chain.
+//! Shared capability minting and worker transport.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -67,9 +61,7 @@ pub enum BackendError {
     Parse(String),
 }
 
-/// The broker/worker chain client. Holds the endpoint URLs + the per-actor STS
-/// relay config (issue #90). Construct one and reuse it across calls — it wraps
-/// a single pooled `reqwest::Client`.
+/// Pooled client for explicit broker and worker endpoints.
 pub struct BackendClient {
     pub client: Client,
     pub broker_url: Option<String>,
@@ -78,13 +70,6 @@ pub struct BackendClient {
     /// Cred worker base URL (#216 agent-side vaulted-key fetch). `None` → no
     /// cred-fetch available.
     pub cred_url: Option<String>,
-    /// Agent session JWT (omni == the actor). Used to mint per-actor STS creds
-    /// for the worker S3 relay (issue #90). `None` → no relay (worker falls
-    /// back to its own creds).
-    pub agent_session_bearer: Option<String>,
-    pub memory_role_arn: Option<String>,
-    pub vault_role_arn: Option<String>,
-    pub region: String,
     /// The caller's K10 device key, used to sign the cap-mint proof-of-possession
     /// (issue #76). `None` → `cap_mint` errors `NotConfigured("device_key")`,
     /// because a cap without a valid K10 PoP is rejected by the broker + worker
@@ -97,51 +82,14 @@ pub struct BackendClient {
     /// bound `device_key_hash` + co-signature that the worker re-verifies. `None`
     /// = the direct #76 path (the client holds the actor's own registered K10).
     pub delegation: Option<Delegation>,
-    /// The VE data plane's credential mint for this actor's OWN namespace: the
-    /// signer's chain-gated `/dev/sign-sts` (#513 rule 3 at issuance), reached
-    /// with the actor's own session bearer. When set, own-namespace memory ops
-    /// carry signer-minted `X-Aws-*` creds scoped to `bots/<actor>/*` of the
-    /// memory bucket — the broker is out of that loop. `None` = not a VE stack
-    /// (the AWS relay above) or a delegate that should fall back to the
-    /// worker-minted `/v1/cap/own-sts` (#716).
-    pub signer_sts: Option<SignerSts>,
-}
-
-/// The signer-mint coordinates (`BackendClient::with_signer_sts`).
-#[derive(Clone, Debug)]
-pub struct SignerSts {
-    /// The stack's signer base URL (derived `signer.<zone>` or the override).
-    pub signer_url: String,
-    /// The actor's omni (`0x`+64 hex) — must equal the session bearer's claim;
-    /// the signer refuses a mismatch (`actor_mismatch`).
-    pub actor_omni: String,
-}
-
-/// Which signer failures may fall back to the worker-minted own-sts path: only
-/// the "signer not there" class — an unarmed endpoint (503
-/// `sts_signing_not_configured`), a transport failure, a broker OIDC mint that
-/// could not be reached. Every 4xx is an AUTHZ or contract verdict
-/// (`grant_not_found`, `actor_mismatch`, `ttl_too_long`, …) and stays a hard
-/// error: a refused delegate must never quietly obtain a credential elsewhere.
-pub(crate) fn signer_failure_falls_back(e: &BackendError) -> bool {
-    match e {
-        BackendError::Http { status, .. } => *status >= 500,
-        BackendError::Transport(_) => true,
-        _ => false,
-    }
 }
 
 impl BackendClient {
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         broker_url: Option<String>,
         memory_url: Option<String>,
         audit_url: Option<String>,
         cred_url: Option<String>,
-        agent_session_bearer: Option<String>,
-        memory_role_arn: Option<String>,
-        vault_role_arn: Option<String>,
-        region: String,
     ) -> Self {
         Self {
             client: Client::new(),
@@ -149,36 +97,15 @@ impl BackendClient {
             memory_url,
             audit_url,
             cred_url,
-            agent_session_bearer,
-            memory_role_arn,
-            vault_role_arn,
-            region,
             device_key: None,
             remote_cap_pop: None,
             delegation: None,
-            signer_sts: None,
         }
-    }
-
-    /// Route this client's OWN-namespace memory credential through the VE
-    /// signer's `/dev/sign-sts` (the stack's data-plane mint, #513/#514): the
-    /// actor's own J1 + the broker-minted OIDC JWT → class-scoped, actor-scoped
-    /// creds, chain-gated at issuance. Requires `agent_session_bearer`.
-    pub fn with_signer_sts(
-        mut self,
-        signer_url: impl Into<String>,
-        actor_omni: impl Into<String>,
-    ) -> Self {
-        self.signer_sts = Some(SignerSts {
-            signer_url: signer_url.into(),
-            actor_omni: actor_omni.into(),
-        });
-        self
     }
 
     /// Attach the K10 device key used to sign the cap-mint proof-of-possession
     /// (issue #76). The caller loads it from its owner-only key file
-    /// (`device_crypto::DeviceKey::load_or_generate`) and injects it here so
+    /// (`device_crypto::DeviceKey::load`) and injects it here so
     /// every `cap_mint` is PoP-signed.
     pub fn with_device_key(
         mut self,
@@ -236,78 +163,6 @@ impl BackendClient {
         self.cred_url
             .as_deref()
             .ok_or(BackendError::NotConfigured("cred_url"))
-    }
-
-    /// Mint per-actor AWS STS creds via the broker and return the three
-    /// `X-Aws-*` header pairs the worker's `StsCreds` extractor reads. The
-    /// agent session JWT's `omni_account` == the actor, so the broker's
-    /// `/v1/mint-oidc-jwt` tags the web-identity token with
-    /// `agentkeys_actor_omni`, and `AssumeRoleWithWebIdentity(role_arn)`
-    /// returns creds scoped (by the bucket policy's
-    /// `${aws:PrincipalTag/agentkeys_actor_omni}`) to `bots/<actor>/<class>/*`.
-    /// Forwarding these to the worker is what makes per-actor S3 isolation hold
-    /// at the AWS layer (arch.md §17.2). Returns `None` when the relay isn't
-    /// configured (agent bearer or role ARN missing) — the worker then falls
-    /// back to its own credential chain (dev/stage-1 behavior).
-    pub async fn sts_headers(
-        &self,
-        role_arn: Option<&String>,
-    ) -> Result<Option<[(&'static str, String); 3]>, BackendError> {
-        let bearer = self
-            .agent_session_bearer
-            .as_deref()
-            .filter(|b| !b.is_empty());
-        let role = role_arn.map(String::as_str).filter(|r| !r.is_empty());
-        match (bearer, role) {
-            (Some(bearer), Some(role)) => {
-                let creds = agentkeys_provisioner::fetch_via_broker_default_ttl(
-                    self.broker()?,
-                    bearer,
-                    role,
-                    &self.region,
-                )
-                .await
-                .map_err(|e| BackendError::Transport(format!("sts relay (role {role}): {e}")))?;
-                Ok(Some([
-                    ("x-aws-access-key-id", creds.access_key_id),
-                    ("x-aws-secret-access-key", creds.secret_access_key),
-                    ("x-aws-session-token", creds.session_token),
-                ]))
-            }
-            // Neither configured → no per-actor relay. Legitimate for the
-            // legacy/--reuse-agent path, but a SILENT downgrade here is exactly
-            // how a real-mode misconfig turns into a confusing worker 502
-            // (issue #90), so make it loud. The worker then uses its own creds.
-            (None, None) => {
-                tracing::warn!(
-                    "STS relay NOT configured (no agent-session-bearer + role ARN) — forwarding \
-                     no X-Aws-* headers; the worker will use its own credentials. For per-actor \
-                     isolation set --agent-session-bearer + --memory-role-arn/--vault-role-arn."
-                );
-                Ok(None)
-            }
-            // Bearer without a role ARN = a deployment with NO per-actor AWS
-            // relay at all (the VE stack: workers mint their own TOS creds via
-            // signer custody — no role ARNs exist). NOT a misconfig: proceed
-            // with no X-Aws-* headers, like the neither-configured arm. The
-            // old hard error here made the checkpoint RESTORE permanently
-            // fail on VE while saves (whose client sets no bearer field)
-            // sailed through the (None, None) arm — issue #657.
-            (Some(_), None) => {
-                tracing::debug!(
-                    "no per-data-class role ARN configured — STS relay skipped (no-AWS \
-                     posture); the worker uses its own credentials"
-                );
-                Ok(None)
-            }
-            // A role ARN without the bearer can never mint — the one genuinely
-            // inconsistent shape; fail loud BEFORE the worker call rather than
-            // silently dropping per-actor isolation (issue #90).
-            (None, Some(_)) => Err(BackendError::NotConfigured(
-                "STS relay partially configured — a per-data-class role ARN is set but \
-                 --agent-session-bearer is missing; the relay cannot mint",
-            )),
-        }
     }
 
     /// `POST /v1/cap/<op>` — mint a signed, data-class-explicit cap. The
@@ -406,17 +261,7 @@ impl BackendClient {
                         delegation_path,
                     }
                 }
-                None => BrokerCapRequest {
-                    operator_omni: req.operator_omni,
-                    actor_omni: req.actor_omni,
-                    service: req.service,
-                    device_key_hash: req.device_key_hash,
-                    ttl_seconds: Some(req.ttl_seconds),
-                    client_sig: None,
-                    client_nonce: None,
-                    client_ts: None,
-                    delegation_path: None,
-                },
+                None => return Err(BackendError::NotConfigured("device_key")),
             }
         };
 
@@ -440,16 +285,7 @@ impl BackendClient {
             .map_err(|e| BackendError::Parse(e.to_string()))
     }
 
-    /// M1 stub — the broker doesn't expose `/v1/revoke/cap/:id` yet (paired
-    /// with the vendor portal in M4). Returns a structured "local only" verdict
-    /// so the demo + parent UI can render it. The wire format stays the same
-    /// when the real endpoint lands.
-    /// `POST /v1/cap/speech-sts` (#441) — redeem a `SpeechUse` cap (minted via
-    /// [`Self::cap_mint`] with `CapMintOp::SpeechUse`, service `"speech"`) for
-    /// short-TTL AWS creds valid ONLY for Transcribe streaming + Polly
-    /// synthesis. The bearer is the ACTOR's own session (`agent_session_bearer`
-    /// when set — the sandbox/device path — else the operator session for
-    /// master-self use). No long-lived speech secret exists on this stack.
+    /// Redeem a speech capability through an explicitly configured speech service.
     pub async fn speech_sts(
         &self,
         cap: CapToken,
@@ -484,127 +320,15 @@ impl BackendClient {
         })
     }
 
-    /// #716 — the credential the memory worker gets for an OWN-namespace op:
-    /// the relayed `X-Aws-*` headers when the AWS relay is configured, else
-    /// the caller's session bearer so the worker can redeem the cap at the
-    /// broker's `/v1/cap/own-sts` SERVER-SIDE (the VE posture — the sandbox
-    /// holds no role ARN; before this, its checkpoint puts reached the worker
-    /// credential-less). Pure verdict in [`Self::own_bearer_when_no_relay`].
-    async fn attach_memory_creds(
-        &self,
-        mut req: reqwest::RequestBuilder,
-        verbs: &[&str],
-    ) -> Result<reqwest::RequestBuilder, BackendError> {
-        // Precedence: the AWS relay (a role ARN is configured) → the VE signer
-        // mint (this stack's data plane) → the session bearer (the worker mints
-        // own-sts server-side). Each arm is explicit; a signer refusal that is
-        // an AUTHZ verdict (4xx: grant_not_found, actor_mismatch, …) is a hard
-        // error — never quietly downgraded to the bearer path.
-        let mut relayed = self.sts_headers(self.memory_role_arn.as_ref()).await?;
-        if relayed.is_none() && self.signer_sts.is_some() {
-            match self.signer_sts_headers("memory", verbs).await {
-                Ok(h) => relayed = Some(h),
-                Err(e) if signer_failure_falls_back(&e) => {
-                    tracing::warn!(
-                        error = %e,
-                        "signer sign-sts unavailable for the own-namespace op — falling back to the \
-                         session bearer (the memory worker mints /v1/cap/own-sts server-side)"
-                    );
-                }
-                Err(e) => return Err(e),
-            }
-        }
-        if let Some(bearer) = self.own_bearer_when_no_relay(relayed.is_some()) {
-            req = req.bearer_auth(bearer);
-        }
-        if let Some(headers) = relayed {
-            for (k, v) in headers {
-                req = req.header(k, v);
-            }
-        }
-        Ok(req)
-    }
-
-    /// The VE signer mint for ONE own-namespace op: broker OIDC JWT (identity)
-    /// → signer `/dev/sign-sts` with the intent `{data_class, verbs}` (the
-    /// signer renders the per-actor policy itself and, when armed, re-verifies
-    /// the actor's on-chain device binding before signing) → `X-Aws-*` headers.
-    /// The daemon names only the INTENT — never a role, never a policy.
-    async fn signer_sts_headers(
-        &self,
-        data_class: &str,
-        verbs: &[&str],
-    ) -> Result<[(&'static str, String); 3], BackendError> {
-        let signer = self
-            .signer_sts
-            .as_ref()
-            .ok_or(BackendError::NotConfigured("signer_sts"))?;
-        let bearer = self
-            .agent_session_bearer
-            .as_deref()
-            .filter(|b| !b.is_empty())
-            .ok_or(BackendError::NotConfigured("agent_session_bearer"))?;
-        let jwt = agentkeys_provisioner::fetch_oidc_jwt(self.broker()?, bearer)
-            .await
-            .map_err(|e| {
-                BackendError::Transport(format!("broker OIDC mint ({data_class}): {e}"))
-            })?;
-        let body = agentkeys_protocol::SignStsBody {
-            omni_account: signer.actor_omni.clone(),
-            data_class: data_class.to_string(),
-            verbs: verbs.iter().map(|v| v.to_string()).collect(),
-            ttl_seconds: 900,
-            oidc_token: jwt.jwt,
-        };
-        let url = format!("{}/dev/sign-sts", signer.signer_url.trim_end_matches('/'));
-        let resp = self
-            .client
-            .post(&url)
-            .bearer_auth(bearer)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| BackendError::Transport(format!("signer sign-sts ({data_class}): {e}")))?;
-        if !resp.status().is_success() {
-            let status = resp.status().as_u16();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(BackendError::Http { status, body });
-        }
-        let out: agentkeys_protocol::SignStsResult = resp
-            .json()
-            .await
-            .map_err(|e| BackendError::Parse(format!("signer sign-sts ({data_class}): {e}")))?;
-        Ok([
-            ("x-aws-access-key-id", out.access_key_id),
-            ("x-aws-secret-access-key", out.secret_access_key),
-            ("x-aws-session-token", out.session_token),
-        ])
-    }
-
-    /// The bearer the worker's own-namespace path needs: only when NO relayed
-    /// creds ride the request (the worker prefers `X-Aws-*` when present) and
-    /// a session bearer is configured.
-    fn own_bearer_when_no_relay(&self, relayed: bool) -> Option<&str> {
-        if relayed {
-            return None;
-        }
-        self.agent_session_bearer
-            .as_deref()
-            .filter(|b| !b.is_empty())
-    }
-
-    /// cap (already minted) → STS relay → `POST /v1/memory/put`. Returns the
-    /// worker's S3 key + envelope size.
     pub async fn memory_put(&self, input: MemoryPutInput) -> Result<MemoryPutResult, BackendError> {
         let url = format!("{}/v1/memory/put", self.memory()?);
-        let mut req = self.client.post(&url).json(&MemoryPutBody {
+        let req = self.client.post(&url).json(&MemoryPutBody {
             cap: input.cap,
             plaintext_b64: input.plaintext_b64,
             namespace: input.namespace.clone(),
             object_key: input.object_key.clone(),
             expected_content_hash: input.expected_content_hash.clone(),
         });
-        req = self.attach_memory_creds(req, &["get", "put"]).await?;
         let resp = req
             .send()
             .await
@@ -629,16 +353,14 @@ impl BackendClient {
         })
     }
 
-    /// cap (already minted) → STS relay → `POST /v1/memory/get`. Returns the
-    /// decrypted plaintext (base64).
+    /// Read actor memory using the supplied capability.
     pub async fn memory_get(&self, input: MemoryGetInput) -> Result<MemoryGetResult, BackendError> {
         let url = format!("{}/v1/memory/get", self.memory()?);
-        let mut req = self.client.post(&url).json(&MemoryGetBody {
+        let req = self.client.post(&url).json(&MemoryGetBody {
             cap: input.cap,
             namespace: input.namespace.clone(),
             object_key: input.object_key.clone(),
         });
-        req = self.attach_memory_creds(req, &["get"]).await?;
         let resp = req
             .send()
             .await
@@ -662,36 +384,15 @@ impl BackendClient {
         })
     }
 
-    /// `POST /v1/memory/canonical-get` — delegated READ of the master's
-    /// CANONICAL memory (master-hub #295 P1 distribution). The `cap` is a
-    /// `CanonicalFetch`/`Memory` cap (minted via [`Self::cap_mint`] with
-    /// `CapMintOp::MemoryCanonicalGet`); the worker keys the read on the
-    /// OPERATOR prefix (`bots/<operator>/memory/`) for this op.
-    ///
-    /// §7a (A', the Codex-review fix): the read is performed SERVER-SIDE. This
-    /// client sends ONLY the delegate's own session bearer + the cap, and gets
-    /// back plaintext — NEVER any AWS creds. The WORKER relays the bearer to the
-    /// broker's `/v1/cap/canonical-sts` for an exact-object scoped STS that never
-    /// leaves the server, so the delegate cannot bypass the worker's audit/chain
-    /// re-verify (it holds no creds) nor hold the operator session.
-    /// `agent_session_bearer` is the DELEGATE's session.
+    /// Read owner canonical memory using a delegated capability.
     pub async fn memory_canonical_get(
         &self,
         input: MemoryGetInput,
     ) -> Result<MemoryGetResult, BackendError> {
-        // A': send ONLY the delegate's session bearer + the cap to the worker.
-        // The worker fetches the exact-object scoped STS server-side; no AWS
-        // creds ever reach this client.
-        let bearer = self
-            .agent_session_bearer
-            .as_deref()
-            .filter(|b| !b.is_empty())
-            .ok_or(BackendError::NotConfigured("agent_session_bearer"))?;
         let url = format!("{}/v1/memory/canonical-get", self.memory()?);
         let resp = self
             .client
             .post(&url)
-            .bearer_auth(bearer)
             .json(&MemoryGetBody {
                 cap: input.cap,
                 namespace: input.namespace.clone(),
@@ -720,19 +421,7 @@ impl BackendClient {
         })
     }
 
-    /// `POST /v1/memory/inbox-append` — a delegate PUSHes a proposal to the
-    /// master's absorption inbox (master-hub #339 P2). `cap` is an `Append`/`Memory`
-    /// cap (minted via [`Self::cap_mint`] with `CapMintOp::MemoryAppend`, service
-    /// `proposal:<ns>`); `key` is the proposed memory key and `plaintext_b64` the body.
-    ///
-    /// §8 (A', mirrors canonical-get): the write runs SERVER-SIDE. This client
-    /// sends ONLY the delegate's own session bearer + the cap and gets back a
-    /// receipt — NEVER any AWS creds. The WORKER relays the bearer to the broker's
-    /// `/v1/cap/inbox-sts` for a PUT-only, sub-prefix-scoped STS that never leaves
-    /// the server. `agent_session_bearer` is the DELEGATE's session.
-    /// `kind` labels WHAT the delegate proposes (`knowledge`/`skill`/`persona`,
-    /// #390 §16.2) — the worker stamps it into the stored item; the master's
-    /// curate gate applies the per-kind policy (persona is never adoptable).
+    /// Append a proposal using a delegated append capability.
     pub async fn memory_inbox_append(
         &self,
         cap: CapToken,
@@ -740,16 +429,10 @@ impl BackendClient {
         plaintext_b64: String,
         kind: agentkeys_protocol::ContextKind,
     ) -> Result<MemoryInboxAppendResp, BackendError> {
-        let bearer = self
-            .agent_session_bearer
-            .as_deref()
-            .filter(|b| !b.is_empty())
-            .ok_or(BackendError::NotConfigured("agent_session_bearer"))?;
         let url = format!("{}/v1/memory/inbox-append", self.memory()?);
         let resp = self
             .client
             .post(&url)
-            .bearer_auth(bearer)
             .json(&MemoryInboxAppendBody {
                 cap,
                 key,
@@ -769,20 +452,13 @@ impl BackendClient {
             .map_err(|e| BackendError::Parse(e.to_string()))
     }
 
-    /// `POST /v1/memory/inbox-list` — the MASTER lists its own inbox (the curate
-    /// queue). Master-self cap (operator == actor); STS relayed under the memory
-    /// role like own-memory reads. Returns the per-item provenance metadata.
+    /// List the owner inbox using an owner capability.
     pub async fn memory_inbox_list(
         &self,
         cap: CapToken,
     ) -> Result<Vec<InboxItemMeta>, BackendError> {
         let url = format!("{}/v1/memory/inbox-list", self.memory()?);
-        let mut req = self.client.post(&url).json(&InboxListBody { cap });
-        if let Some(headers) = self.sts_headers(self.memory_role_arn.as_ref()).await? {
-            for (k, v) in headers {
-                req = req.header(k, v);
-            }
-        }
+        let req = self.client.post(&url).json(&InboxListBody { cap });
         let resp = req
             .send()
             .await
@@ -806,12 +482,7 @@ impl BackendClient {
         s3_key: String,
     ) -> Result<InboxItem, BackendError> {
         let url = format!("{}/v1/memory/inbox-get", self.memory()?);
-        let mut req = self.client.post(&url).json(&InboxGetBody { cap, s3_key });
-        if let Some(headers) = self.sts_headers(self.memory_role_arn.as_ref()).await? {
-            for (k, v) in headers {
-                req = req.header(k, v);
-            }
-        }
+        let req = self.client.post(&url).json(&InboxGetBody { cap, s3_key });
         let resp = req
             .send()
             .await
@@ -836,15 +507,10 @@ impl BackendClient {
         s3_key: String,
     ) -> Result<bool, BackendError> {
         let url = format!("{}/v1/memory/inbox-delete", self.memory()?);
-        let mut req = self
+        let req = self
             .client
             .post(&url)
             .json(&InboxDeleteBody { cap, s3_key });
-        if let Some(headers) = self.sts_headers(self.memory_role_arn.as_ref()).await? {
-            for (k, v) in headers {
-                req = req.header(k, v);
-            }
-        }
         let resp = req
             .send()
             .await
@@ -861,25 +527,13 @@ impl BackendClient {
         Ok(parsed.deleted)
     }
 
-    /// `POST /v1/cred/fetch` — fetch + decrypt a stored credential's plaintext
-    /// (#216 agent-side vaulted-key fetch). The `cap` (a cred-fetch cap with the
-    /// `service` signed inside) is minted separately via [`Self::cap_mint`]; this
-    /// forwards STS creds under the VAULT role for the worker's S3 GET of
-    /// `bots/<operator>/credentials/<service>.enc` — the operator's vault is the
-    /// ONLY cred vault (single-vault, docs/plan/single-vault-credentials.md), so
-    /// a delegated fetch requires the operator-session-minted STS the wire
-    /// stages. Returns the base64 plaintext.
+    /// Read an authorized credential using the supplied capability.
     pub async fn cred_fetch(&self, input: CredFetchInput) -> Result<CredFetchResult, BackendError> {
         let url = format!("{}/v1/cred/fetch", self.cred()?);
-        let mut req = self
+        let req = self
             .client
             .post(&url)
             .json(&CredFetchBody { cap: input.cap });
-        if let Some(headers) = self.sts_headers(self.vault_role_arn.as_ref()).await? {
-            for (k, v) in headers {
-                req = req.header(k, v);
-            }
-        }
         let resp = req
             .send()
             .await
@@ -900,26 +554,16 @@ impl BackendClient {
         })
     }
 
-    /// `POST /v1/cred/store` — vault a credential (#216). MASTER-SELF ONLY
-    /// (single-vault, docs/plan/single-vault-credentials.md): a delegated store
-    /// cap is hard-rejected at both broker and worker
-    /// (`cred_store_not_master_self`), so the PUT always lands in
-    /// `bots/<operator>/credentials/`. The plaintext is base64 in the body
-    /// (the worker encrypts with the K3 KEK).
+    /// Store a credential using an owner capability; the local worker encrypts plaintext.
     pub async fn cred_store(&self, input: CredStoreInput) -> Result<CredStoreResult, BackendError> {
         let url = format!("{}/v1/cred/store", self.cred()?);
         // The high-level input is the legacy plaintext mode (CLI master store);
         // v3 envelope stores build `CredStoreBody` directly (daemon ui_bridge).
-        let mut req = self.client.post(&url).json(&CredStoreBody {
+        let req = self.client.post(&url).json(&CredStoreBody {
             cap: input.cap,
             plaintext_b64: Some(input.plaintext_b64),
             envelope_b64: None,
         });
-        if let Some(headers) = self.sts_headers(self.vault_role_arn.as_ref()).await? {
-            for (k, v) in headers {
-                req = req.header(k, v);
-            }
-        }
         let resp = req
             .send()
             .await
@@ -992,114 +636,141 @@ impl BackendClient {
 }
 
 #[cfg(test)]
-mod sts_relay_tests {
+mod local_transport_tests {
     use super::*;
-
-    fn client(bearer: Option<&str>, role: Option<&str>) -> BackendClient {
-        BackendClient::new(
-            Some("http://127.0.0.1:1".into()),
-            None,
-            None,
-            None,
-            bearer.map(String::from),
-            role.map(String::from),
-            None,
-            "us-east-1".into(),
-        )
-    }
-
-    /// #657 — a bearer WITHOUT a role ARN is the no-AWS (VE) posture, not a
-    /// misconfig: the relay is skipped and the worker uses its own creds.
-    /// The old hard error here made every VE checkpoint RESTORE give up
-    /// while saves (bearer-less client) passed the (None, None) arm.
-    #[tokio::test]
-    async fn bearer_without_role_skips_the_relay() {
-        let c = client(Some("jwt"), None);
-        let out = c.sts_headers(c.memory_role_arn.as_ref()).await.unwrap();
-        assert!(out.is_none());
-    }
+    use axum::{http::HeaderMap, routing::post, Json, Router};
+    use serde_json::json;
 
     #[tokio::test]
-    async fn neither_configured_skips_the_relay() {
-        let c = client(None, None);
-        assert!(c.sts_headers(None).await.unwrap().is_none());
-    }
-
-    /// A role ARN without the bearer can never mint — the one genuinely
-    /// inconsistent shape stays a loud pre-flight error (issue #90).
-    #[tokio::test]
-    async fn role_without_bearer_fails_loud() {
-        let c = client(None, Some("arn:aws:iam::1:role/x"));
-        let err = c.sts_headers(c.memory_role_arn.as_ref()).await.unwrap_err();
-        assert!(matches!(err, BackendError::NotConfigured(_)));
-    }
-
-    /// The signer fallback verdict: unavailability falls back (loudly, the
-    /// caller logs), an authorization/contract refusal never does.
-    #[test]
-    fn signer_fallback_only_on_unavailability() {
-        let http = |status: u16| BackendError::Http {
-            status,
-            body: String::new(),
+    async fn cap_mint_uses_registered_key_proof_and_preserves_broker_refusal() {
+        use agentkeys_core::device_crypto::DeviceKey;
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
         };
-        assert!(signer_failure_falls_back(&http(503)));
-        assert!(signer_failure_falls_back(&http(502)));
-        assert!(signer_failure_falls_back(&http(500)));
-        assert!(signer_failure_falls_back(&BackendError::Transport(
-            "x".into()
-        )));
-        for refused in [400u16, 401, 403, 404, 422] {
-            assert!(!signer_failure_falls_back(&http(refused)), "{refused}");
-        }
-        assert!(!signer_failure_falls_back(&BackendError::NotConfigured(
-            "x"
-        )));
-        assert!(!signer_failure_falls_back(&BackendError::Parse("x".into())));
+        let directory = tempfile::tempdir().unwrap();
+        let key = Arc::new(
+            DeviceKey::load_or_generate(directory.path().join("device").to_str().unwrap(), false)
+                .unwrap(),
+        );
+        let calls = Arc::new(AtomicUsize::new(0));
+        let expected_key = key.clone();
+        let observed_calls = calls.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let router = Router::new().route(
+            "/v1/cap/memory-get",
+            post(
+                move |headers: HeaderMap, Json(body): Json<BrokerCapRequest>| {
+                    let key = expected_key.clone();
+                    let calls = observed_calls.clone();
+                    async move {
+                        assert_eq!(headers["authorization"], "Bearer synthetic-session");
+                        assert_eq!(body.device_key_hash, key.device_key_hash().unwrap());
+                        assert_eq!(
+                            body.client_sig.as_deref(),
+                            Some(
+                                key.cap_pop_sig(
+                                    &body.operator_omni,
+                                    &body.actor_omni,
+                                    &body.service,
+                                    "fetch",
+                                    "memory",
+                                    body.client_nonce.as_deref().unwrap(),
+                                    body.client_ts.unwrap(),
+                                )
+                                .unwrap()
+                                .as_str()
+                            )
+                        );
+                        let status = if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                            axum::http::StatusCode::OK
+                        } else {
+                            axum::http::StatusCode::FORBIDDEN
+                        };
+                        (status, Json(json!({"synthetic":"capability"})))
+                    }
+                },
+            ),
+        );
+        let task = tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+        let client = BackendClient::new(Some(url), None, None, None).with_device_key(key);
+        let request = CapMintRequest {
+            operator_omni: "11".repeat(32),
+            actor_omni: "22".repeat(32),
+            service: "knowledge:notes".into(),
+            device_key_hash: "33".repeat(32),
+            ttl_seconds: 60,
+        };
+        client
+            .cap_mint(CapMintOp::MemoryGet, request.clone(), "synthetic-session")
+            .await
+            .unwrap();
+        let error = client
+            .cap_mint(CapMintOp::MemoryGet, request, "synthetic-session")
+            .await
+            .unwrap_err();
+        assert!(matches!(error, BackendError::Http { status: 403, .. }));
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        task.abort();
     }
 
-    #[test]
-    fn with_signer_sts_records_the_coordinates() {
-        let c = BackendClient::new(
-            Some("https://broker.example".into()),
-            Some("https://memory.example".into()),
-            None,
-            None,
-            Some("agent-jwt".into()),
-            None,
-            None,
-            "us-east-1".into(),
-        )
-        .with_signer_sts("https://signer.example/", format!("0x{}", "ab".repeat(32)));
-        let s = c.signer_sts.as_ref().unwrap();
-        assert_eq!(s.signer_url, "https://signer.example/");
-        assert!(s.actor_omni.starts_with("0xab"));
+    #[tokio::test]
+    async fn canonical_memory_requires_no_cloud_credentials() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new().route(
+                    "/v1/memory/canonical-get",
+                    post(
+                        |headers: HeaderMap, Json(body): Json<MemoryGetBody>| async move {
+                            assert!(!headers.contains_key("authorization"));
+                            assert!(!headers
+                                .keys()
+                                .any(|name| name.as_str().starts_with("x-aws-")));
+                            assert_eq!(body.cap, json!({"synthetic":"capability"}));
+                            Json(json!({"ok":true,"plaintext_b64":"bG9jYWw="}))
+                        },
+                    ),
+                ),
+            )
+            .await
+            .unwrap();
+        });
+        let client = BackendClient::new(None, Some(url), None, None);
+        let result = client
+            .memory_canonical_get(MemoryGetInput {
+                cap: json!({"synthetic":"capability"}),
+                namespace: "notes".into(),
+                object_key: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(result.plaintext_b64, "bG9jYWw=");
+        server.abort();
     }
 
-    // #716 — the own-namespace bearer rides ONLY when no relay creds do.
-    #[test]
-    fn own_bearer_rides_only_without_relayed_creds() {
-        let c = BackendClient::new(
-            Some("https://broker.example".into()),
-            Some("https://memory.example".into()),
-            None,
-            None,
-            Some("agent-jwt".into()),
-            None,
-            None,
-            "us-east-1".into(),
-        );
-        assert_eq!(c.own_bearer_when_no_relay(false), Some("agent-jwt"));
-        assert_eq!(c.own_bearer_when_no_relay(true), None);
-        let no_bearer = BackendClient::new(
-            None,
-            None,
-            None,
-            None,
-            Some(String::new()),
-            None,
-            None,
-            "us-east-1".into(),
-        );
-        assert_eq!(no_bearer.own_bearer_when_no_relay(false), None);
+    #[tokio::test]
+    async fn missing_device_proof_is_rejected_before_network() {
+        let client = BackendClient::new(Some("http://127.0.0.1:1".into()), None, None, None);
+        let error = client
+            .cap_mint(
+                CapMintOp::MemoryGet,
+                CapMintRequest {
+                    operator_omni: "11".repeat(32),
+                    actor_omni: "22".repeat(32),
+                    service: "knowledge:notes".into(),
+                    device_key_hash: "33".repeat(32),
+                    ttl_seconds: 60,
+                },
+                "synthetic-session",
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(error, BackendError::NotConfigured("device_key")));
     }
 }
