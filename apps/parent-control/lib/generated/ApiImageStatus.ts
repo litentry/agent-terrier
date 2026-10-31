@@ -2,7 +2,6 @@
 import type { ApiDelegateImageStatus } from "./ApiDelegateImageStatus";
 
 /**
- * The fleet image-staleness answer (#577): which delegates run older bits
- * than the current pre-cache registration.
+ * Runtime image identities shared by the broker, daemon and browser.
  */
-export type ApiImageStatus = { image: string | null, current_registration_id: string | null, precache_status: string | null, delegates: Array<ApiDelegateImageStatus>, };
+export type ApiImageStatus = { image: string | null, current_image_id: string | null, image_status: string | null, delegates: Array<ApiDelegateImageStatus>, };

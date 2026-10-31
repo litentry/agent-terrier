@@ -61,77 +61,6 @@ enum Command {
         #[arg(long)]
         out: PathBuf,
     },
-
-    /// #568 — one-shot refresh of the veFaaS pre-cache entry for CR_IMAGE
-    /// (List → Delete → Precache → poll until Preheated/已预热). Run after
-    /// every image push: veFaaS spawns the PRE-CACHED copy of a tag, so a
-    /// same-tag re-push is invisible until this runs (the 2026-07-23
-    /// silent-chat trap). Reads the SAME env family as the broker unit
-    /// (setup-image.sh reconstructs it from the rendered unit); needs the
-    /// #568 vefaas image actions on the broker VE identity. Exits 0 only
-    /// once the entry reports Preheated. `--prune-stale` adds the #598 GC
-    /// after the refresh; `--prune-only` runs the GC alone.
-    #[command(group(
-        clap::ArgGroup::new("prune")
-            .args(["prune_stale", "prune_only"])
-            .multiple(true)
-    ))]
-    PrecacheRefresh {
-        /// Max seconds to wait for the entry to reach Preheated. Default 1h:
-        /// a real preheat of a sandbox image took ~30 MINUTES (measured
-        /// 2026-07-26 — submitted 17:29 UTC, `success` 17:58), so the old
-        /// 600 s default timed out on a perfectly healthy preheat. Exceeding
-        /// this is not fatal — a re-run RESUMES the wait rather than
-        /// restarting the preheat.
-        #[arg(long, default_value_t = 3600)]
-        timeout_secs: u64,
-
-        /// #577 — KILL the live sandbox instances that pin the registration
-        /// before deleting it, instead of bailing with the who-to-archive
-        /// list. Kill-only: the on-chain bindings stay ACTIVE, so once the
-        /// preheat completes each delegate comes back on the NEW image via
-        /// one parent-control "update runtime" click (same identity, grants,
-        /// channel — no archive ceremony). The killed instances' in-RAM
-        /// conversations die with them (they would under archive too); their
-        /// on-disk Hermes home is NOT handed off on this path — the
-        /// registration must be free for the ~30-min preheat, longer than a
-        /// snapshot may sit in broker RAM (D2).
-        #[arg(long, default_value_t = false)]
-        kill_pinners: bool,
-
-        /// #598 GC — after the refresh, delete the pre-cache registrations
-        /// older than `--prune-retention-days` that are neither a registration
-        /// of the current `CR_IMAGE` nor the last row standing. Versioned tags
-        /// mint a NEW registration per cycle by design, so without a sweep the
-        /// set grows into the account cap (30, measured 2026-10-04) and the
-        /// refusal lands on a future ship. Never kills pinners: a registration
-        /// a live instance runs is skipped, not forced.
-        #[arg(long, default_value_t = false)]
-        prune_stale: bool,
-
-        /// Run ONLY the GC — skip the refresh (no push, no preheat wait,
-        /// nothing registered). The scheduled hygiene entry point:
-        /// `setup-image.sh --prune-stale`.
-        #[arg(long, default_value_t = false)]
-        prune_only: bool,
-
-        /// GC retention window in days (≥ 1). Default: the console banner's
-        /// 15-day default retention (read 2026-08-11). Applies only while more
-        /// than one registration exists — the sweep leaves one standing.
-        #[arg(
-            long,
-            requires = "prune",
-            default_value_t = agentkeys_broker_server::ve_faas::PRECACHE_DEFAULT_RETENTION_DAYS,
-            value_parser = clap::value_parser!(i64).range(1..)
-        )]
-        prune_retention_days: i64,
-
-        /// Plan the GC and print every row's verdict without deleting.
-        /// Requires `--prune-stale` or `--prune-only`, so a dry run can never
-        /// turn into a real refresh by omission.
-        #[arg(long, requires = "prune", default_value_t = false)]
-        prune_dry_run: bool,
-    },
 }
 
 #[derive(Copy, Clone, ValueEnum)]
@@ -154,22 +83,6 @@ async fn main() -> anyhow::Result<()> {
 
     match args.command {
         Some(Command::Keygen { purpose, out }) => return run_keygen(purpose, out),
-        Some(Command::PrecacheRefresh {
-            timeout_secs,
-            kill_pinners,
-            prune_stale,
-            prune_only,
-            prune_retention_days,
-            prune_dry_run,
-        }) => {
-            let prune = PruneOpts {
-                enabled: prune_stale || prune_only,
-                only: prune_only,
-                retention_days: prune_retention_days,
-                dry_run: prune_dry_run,
-            };
-            return run_precache_refresh(timeout_secs, kill_pinners, prune).await;
-        }
         None => {}
     }
 
@@ -270,10 +183,6 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    // #377/#440 broker-driven sandbox lifecycle behind the per-cloud seam:
-    // SANDBOX_FUNCTION_ID enables veFaaS (VE), AGENTKEYS_SANDBOX_ECS_CLUSTER
-    // enables ECS/Fargate (AWS); neither = clean no-op; both, or a half-set
-    // config, refuses to boot — never a silently degraded spawn path.
     let sandbox = agentkeys_broker_server::sandbox_backend::SandboxBackend::from_env()
         .await
         .map_err(|e| std::io::Error::other(format!("sandbox lifecycle config: {e}")))?
@@ -282,43 +191,11 @@ async fn main() -> anyhow::Result<()> {
         Some(b) => tracing::info!(
             backend = %b.kind(),
             runtime = %b.runtime_ref(),
-            "sandbox lifecycle ENABLED — delegates get a dsh-sandbox on pair/resolve (#377/#440)"
+            "local sandbox lifecycle enabled"
         ),
         None => tracing::info!(
-            "sandbox lifecycle disabled (no SANDBOX_FUNCTION_ID / AGENTKEYS_SANDBOX_ECS_CLUSTER) — devices use their compiled AGENT_BASE_URL"
+            "local sandbox lifecycle disabled; configure AGENT_TERRIER_SANDBOX_IMAGE to enable it"
         ),
-    }
-
-    // #543 — precache CR_IMAGE in veFaaS so CreateSandbox doesn't 404
-    // `ResourceNotFound` (image not in the pre-cache list) on a freshly-pushed
-    // image. Fire-and-forget: veFaaS precache is async (returns a ticket; the
-    // console shows "Preheated"), so it never blocks boot. VE-only — from_env()
-    // is None off the VE stack. REGISTRATION only (#568): it lists first and
-    // registers only an ABSENT URL, so a registered one is never re-added —
-    // since 2026-09-30 veFaaS accepts a duplicate instead of answering
-    // `already exists`, and the broker's 24 h restart minted one per boot until
-    // the account hit its pre-cache cap (measured 2026-10-04). Refreshing a
-    // re-pushed tag stays the `precache-refresh` verb's job (setup-image.sh).
-    if let Ok(Some(vefaas)) = agentkeys_broker_server::ve_faas::VeFaasClient::from_env() {
-        tokio::spawn(async move {
-            match vefaas.precache_image().await {
-                Ok(ticket) if ticket.is_empty() => {}
-                Ok(ticket) => {
-                    tracing::info!(ticket = %ticket, "veFaaS CR_IMAGE precache submitted (#543)")
-                }
-                Err(e) => tracing::warn!(
-                    error = %format!("{e:#}"),
-                    "veFaaS CR_IMAGE precache failed — CreateSandbox may 404 until the image is precached (console 镜像预热)"
-                ),
-            }
-        });
-    }
-    // #715 — say, at every boot, whether the sandbox gateway demands a
-    // credential (GetFunction.EnableSecretToken) and whether this broker
-    // holds it. An open gateway is an ERROR line naming the ceremony; the
-    // broker still boots (spawns must keep working while the operator flips).
-    if let Some(backend) = sandbox.as_ref() {
-        backend.log_gateway_posture().await;
     }
 
     let http = reqwest::Client::builder()
@@ -505,53 +382,6 @@ async fn shutdown_signal() {
     tracing::info!("shutdown signal received; draining in-flight requests");
 }
 
-/// #568 — the `precache-refresh` verb body. Deliberately does NOT load
-/// BrokerConfig (no chain profile, no keypairs): the whole job is the veFaaS
-/// image pre-cache, so it needs exactly the VeFaasClient env family and
-/// nothing else — runnable on the broker host while the unit keeps serving.
-async fn run_precache_refresh(
-    timeout_secs: u64,
-    kill_pinners: bool,
-    prune: PruneOpts,
-) -> anyhow::Result<()> {
-    let client = agentkeys_broker_server::ve_faas::VeFaasClient::from_env()?.ok_or_else(|| {
-        anyhow::anyhow!(
-            "precache-refresh needs the VE sandbox env family (SANDBOX_FUNCTION_ID + \
-             SANDBOX_GATEWAY_URL + VOLCENGINE_ACCESS_KEY/_SECRET_KEY + CR_IMAGE) — run it \
-             under the broker unit's env (setup-image.sh reconstructs it from the rendered \
-             unit's Environment=/EnvironmentFile= lines). Not a VE sandbox stack? There is \
-             nothing to refresh."
-        )
-    })?;
-    // stdout is the operator/script contract (tracing goes to stderr).
-    if !prune.only {
-        let image = client.config.image.clone();
-        let image_id = client
-            .refresh_precache(std::time::Duration::from_secs(timeout_secs), kill_pinners)
-            .await?;
-        println!(
-            "precache-refresh OK — {image} re-registered (ImageId {image_id}) and Preheated (已预热)"
-        );
-    }
-    if prune.enabled {
-        // After the refresh, never before: the just-preheated row must exist
-        // before anything is swept.
-        let report = client
-            .prune_stale_precache(prune.retention_days, prune.dry_run)
-            .await?;
-        println!("{}", report.summary(prune.retention_days, prune.dry_run));
-    }
-    Ok(())
-}
-
-/// #598 GC knobs, threaded from the CLI.
-struct PruneOpts {
-    enabled: bool,
-    only: bool,
-    retention_days: i64,
-    dry_run: bool,
-}
-
 fn run_keygen(purpose: KeygenPurpose, out: PathBuf) -> anyhow::Result<()> {
     if out.exists() {
         anyhow::bail!(
@@ -595,61 +425,5 @@ fn warn_if_non_loopback_without_tls(bind: &str) {
              Bearer tokens and minted AWS credentials will traverse the network in cleartext. \
              Terminate TLS at a reverse proxy (nginx, ALB, Traefik) before exposing the broker."
         );
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn parse(argv: &[&str]) -> Result<Args, clap::Error> {
-        Args::try_parse_from(std::iter::once("agentkeys-broker-server").chain(argv.iter().copied()))
-    }
-
-    #[test]
-    fn prune_flags_never_turn_a_dry_run_into_a_refresh() {
-        // The plain refresh still parses — the GC defaults trigger nothing.
-        assert!(parse(&["precache-refresh"]).is_ok());
-        // A dry run or a window without a prune verb is refused: it would
-        // otherwise run a REAL refresh (delete + re-add) by omission.
-        assert!(parse(&["precache-refresh", "--prune-dry-run"]).is_err());
-        assert!(parse(&["precache-refresh", "--prune-retention-days", "7"]).is_err());
-        assert!(parse(&["precache-refresh", "--prune-only", "--prune-dry-run"]).is_ok());
-        assert!(parse(&[
-            "precache-refresh",
-            "--prune-stale",
-            "--prune-retention-days",
-            "7"
-        ])
-        .is_ok());
-        // A zero window would sweep every row that is not current.
-        assert!(parse(&[
-            "precache-refresh",
-            "--prune-only",
-            "--prune-retention-days",
-            "0"
-        ])
-        .is_err());
-
-        match parse(&["precache-refresh", "--prune-only"])
-            .unwrap()
-            .command
-        {
-            Some(Command::PrecacheRefresh {
-                prune_only,
-                prune_stale,
-                prune_dry_run,
-                prune_retention_days,
-                kill_pinners,
-                ..
-            }) => {
-                assert!(prune_only && !prune_stale && !prune_dry_run && !kill_pinners);
-                assert_eq!(
-                    prune_retention_days,
-                    agentkeys_broker_server::ve_faas::PRECACHE_DEFAULT_RETENTION_DAYS
-                );
-            }
-            _ => panic!("expected the precache-refresh verb"),
-        }
     }
 }

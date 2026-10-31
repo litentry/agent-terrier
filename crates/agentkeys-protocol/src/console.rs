@@ -727,14 +727,19 @@ pub struct DaemonImageStatusRequest {
     pub device_key_hashes: Vec<String>,
 }
 
-/// The fleet image-staleness answer (#577): which delegates run older bits
-/// than the current pre-cache registration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentImageStatusRequest {
+    pub operator_omni: String,
+    pub device_key_hashes: Vec<String>,
+}
+
+/// Runtime image identities shared by the broker, daemon and browser.
 #[derive(Clone, Debug, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
 pub struct ApiImageStatus {
     pub image: Option<String>,
-    pub current_registration_id: Option<String>,
-    pub precache_status: Option<String>,
+    pub current_image_id: Option<String>,
+    pub image_status: Option<String>,
     pub delegates: Vec<ApiDelegateImageStatus>,
 }
 
@@ -744,15 +749,11 @@ pub struct ApiDelegateImageStatus {
     pub device_key_hash: String,
     pub sandbox_id: Option<String>,
     pub sandbox_status: Option<String>,
-    /// The instance's veFaaS lease deadline, verbatim (`null` on backends
-    /// without one).
+    /// Optional lease deadline in RFC3339 format.
     pub expire_at: Option<String>,
-    pub booted_registration_id: Option<String>,
-    /// The frozen registration's source image ref — the VERSIONED tag the
-    /// instance actually booted (#598 `…:vYYYYMMDD-HHMMSS-g<sha8>`), the
-    /// human "which build is this delegate on" answer next to the fleet's
-    /// current `image` above.
-    pub booted_image_url: Option<String>,
+    pub booted_image_id: Option<String>,
+    /// Image reference used when this instance was created.
+    pub booted_image_ref: Option<String>,
     /// The LIVE agent identity the instance's bridge reports (#577 follow-up):
     /// agent name the bridge reports (`dsh` since #621), its running version (the bump
     /// ground truth), and the LLM endpoint id.
@@ -760,7 +761,7 @@ pub struct ApiDelegateImageStatus {
     pub agent_version: Option<String>,
     pub model: Option<String>,
     /// `true` = stale, `false` = current, `null` = unknowable (no live
-    /// instance / app-default image / no registration to compare).
+    /// instance / no image identity to compare).
     pub stale: Option<bool>,
     pub error: Option<String>,
 }

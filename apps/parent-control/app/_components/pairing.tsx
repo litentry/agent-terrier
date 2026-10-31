@@ -167,7 +167,7 @@ export function DelegatesPage({
   const [updating, setUpdating] = useState<Set<string>>(new Set());
   // Post-update verification (#577 observability): after the update POST
   // returns, poll image-status until the REPLACEMENT reports it booted the
-  // current registration (and, once its bridge finishes the ACP handshake,
+  // current image identity (and, once its bridge finishes the ACP handshake,
   // which engine/version is actually running) — the durable per-card
   // `lastUpdate` line is the record; toasts are just the live echo.
   const [verifying, setVerifying] = useState<Set<string>>(new Set());
@@ -211,7 +211,7 @@ export function DelegatesPage({
   }, []);
 
   // Poll until the replacement instance provably runs the current image (its
-  // frozen registration == the current one) and, best-effort, until its
+  // booted image identity == the current one) and, best-effort, until its
   // bridge reports the live engine/version. ~60s cap: a sandbox that hasn't
   // handshaken by then is recorded as "not reporting yet", never left silent.
   const verifyUpdated = useCallback(
@@ -227,12 +227,12 @@ export function DelegatesPage({
           const row = r.data.delegates[0];
           const onCurrent =
             row?.stale === false ||
-            (!!row?.booted_registration_id &&
-              row.booted_registration_id === r.data.current_registration_id);
+            (!!row?.booted_image_id &&
+              row.booted_image_id === r.data.current_image_id);
           if (row && onCurrent) {
             const ver = [row.agent_engine, row.agent_version].filter(Boolean).join(' ');
-            const tag = imageTag(row.booted_image_url);
-            if (!row.agent_version && i < 11) continue; // registration is current — keep waiting for the live version
+            const tag = imageTag(row.booted_image_ref);
+            if (!row.agent_version && i < 11) continue; // image is current — keep waiting for the live version
             recordUpdate(
               dkh,
               true,
@@ -438,7 +438,7 @@ export function DelegatesPage({
       {view === 'devices' && imageStatus?.image && (
         <p className="muted" style={{ fontSize: 11.5, margin: '0 0 8px' }} title={imageStatus.image}>
           fleet current image · {imageTag(imageStatus.image)}
-          {imageStatus.precache_status ? ` · precache ${imageStatus.precache_status}` : ''}
+          {imageStatus.image_status ? ` · ${imageStatus.image_status}` : ''}
         </p>
       )}
       {view === 'devices' && (
@@ -449,8 +449,7 @@ export function DelegatesPage({
                 <Dot status={a.status} pulse={a.lastActive.endsWith('m ago')} />
                 <span style={{ fontWeight: 600 }}>{a.label.replace(' (revoked)', '')}</span>
                 {a.justPaired && <span className="chip ok" style={{ marginLeft: 'auto' }}>new</span>}
-                {/* #577 — running older image bits than the current precache
-                    registration; one click below brings it current. */}
+                {/* #577 — running older image bits than the configured image; one click below brings it current. */}
                 {staleFor(a.deviceKeyHash) === true && (
                   <span className="chip warn" style={{ marginLeft: a.justPaired ? 0 : 'auto' }}>
                     update available
@@ -495,14 +494,14 @@ export function DelegatesPage({
                         <dd
                           title={[
                             rt.model ? `LLM endpoint: ${rt.model}` : null,
-                            rt.booted_image_url ? `booted image: ${rt.booted_image_url}` : null,
+                            rt.booted_image_ref ? `booted image: ${rt.booted_image_ref}` : null,
                           ]
                             .filter(Boolean)
                             .join('\n') || undefined}
                         >
-                          {rt.agent_engine ?? (rt.booted_image_url ? 'sandbox' : 'booting')}
+                          {rt.agent_engine ?? (rt.booted_image_ref ? 'sandbox' : 'booting')}
                           {rt.agent_version ? ` ${rt.agent_version}` : ''}
-                          {imageTag(rt.booted_image_url) ? ` · ${imageTag(rt.booted_image_url)}` : ''}
+                          {imageTag(rt.booted_image_ref) ? ` · ${imageTag(rt.booted_image_ref)}` : ''}
                           {rt.stale === false ? ' · current' : rt.stale === true ? ' · update available' : ''}
                         </dd>
                       ) : (
@@ -518,8 +517,8 @@ export function DelegatesPage({
                           <dd
                             className="mono"
                             title={`${rt.sandbox_id}${
-                              rt.booted_registration_id
-                                ? ` · image registration ${rt.booted_registration_id}`
+                              rt.booted_image_id
+                                ? ` · image ${rt.booted_image_id}`
                                 : ''
                             }`}
                           >

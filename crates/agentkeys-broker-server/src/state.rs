@@ -67,20 +67,9 @@ pub struct AppState {
     /// OmniAccount. Recovery flow consults this to find which master
     /// should sign the recovery grant.
     pub identity_link_store: Arc<IdentityLinkStore>,
-    /// #377/#440 broker-driven sandbox lifecycle (one dsh-sandbox per
-    /// delegate device, spawned on pair/resolve, killed on unpair) behind the
-    /// per-cloud [`SandboxBackend`](crate::sandbox_backend::SandboxBackend)
-    /// seam (veFaaS on VE, ECS/Fargate on AWS). `None` when the host carries
-    /// no sandbox config, and every hook site is then a no-op.
+    /// Runtime adapter; absent when local runtime configuration is not supplied.
     pub sandbox: Option<Arc<crate::sandbox_backend::SandboxBackend>>,
-    /// #669 — cold-creates in flight per delegate (`device_key_hash` → when it
-    /// started). A wake whose delegate is here JOINS instead of creating: the
-    /// channel worker's wake call gives up after 20 s while a veFaaS create
-    /// takes ~20-30 s, so the create runs detached from the request, and a
-    /// second feed event meanwhile must not create again (measured 2026-09-27:
-    /// two wakes 7 s apart → two live instances of one app, the second's
-    /// relay-key provisioning rotating the key under the first →
-    /// `401 unknown relay key` on every turn the first one took).
+    /// In-flight creates are shared by concurrent wake requests for the same device.
     pub wake_creates_in_flight:
         Arc<std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>>,
     /// #427 spawn/archive ceremony context, build → submit (IN-MEMORY by
