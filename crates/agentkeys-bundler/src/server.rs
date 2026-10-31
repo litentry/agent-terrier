@@ -18,46 +18,6 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{info, warn};
 
-/// Profile-aware env read: `BASE_<CHAIN>` falling back to bare `BASE` — the
-/// same convention the broker's `load_accept_config` uses.
-fn env_profile(base: &str) -> Result<String> {
-    let p = std::env::var("AGENTKEYS_CHAIN")
-        .unwrap_or_else(|_| "heima".into())
-        .to_uppercase()
-        .replace('-', "_");
-    std::env::var(format!("{base}_{p}"))
-        .or_else(|_| std::env::var(base))
-        .map_err(|_| anyhow!("env {base}[_{p}] not set"))
-}
-
-/// Chain id from the compiled-in chain profile for `AGENTKEYS_CHAIN` — the SAME
-/// source of truth the broker resolves against. A host that sets only
-/// `AGENTKEYS_CHAIN=base` therefore gets Base's `8453`, never the legacy Heima
-/// default that silently made the bundler sign + broadcast `handleOps` for the
-/// wrong chain (the Base register-never-broadcast bug). Returns the id as a
-/// string so it flows through the same `BundlerBootValues.chain_id` field as an
-/// explicit `AGENTKEYS_CHAIN_ID[_<CHAIN>]` override; `None` only for an unknown
-/// chain with no compiled profile, which `from_values` then rejects (fail loud).
-fn chain_id_from_chain_profile() -> Option<String> {
-    let chain = std::env::var("AGENTKEYS_CHAIN").unwrap_or_else(|_| "heima".into());
-    agentkeys_core::chain_profile::ChainProfile::load_builtin(&chain)
-        .ok()
-        .map(|p| p.chain_id.to_string())
-}
-
-/// The submitter EOA's gas floor (`funding.deploy_min_wei`) from the compiled
-/// chain profile — the SAME number the fleet WALLETS board reds the `bundler`
-/// row at (#294/#230), so "the board says red" and "the bundler refuses" can
-/// never disagree. `None` (no profile / no funding block) ⇒ the gas gate is
-/// simply not enforced; it never invents a floor.
-fn gas_floor_from_chain_profile() -> Option<String> {
-    let chain = std::env::var("AGENTKEYS_CHAIN").unwrap_or_else(|_| "heima".into());
-    agentkeys_core::chain_profile::ChainProfile::load_builtin(&chain)
-        .ok()
-        .and_then(|p| p.funding)
-        .map(|f| f.deploy_min_wei)
-}
-
 fn addr20(hex_s: &str, name: &str) -> Result<[u8; 20]> {
     hex::decode(hex_s.trim().trim_start_matches("0x"))
         .map_err(|e| anyhow!("{name}: {e}"))?
@@ -131,24 +91,40 @@ pub struct BundlerBootValues {
 }
 
 impl BundlerBootValues {
-    pub fn from_process_env() -> Self {
-        Self {
-            rpc_url: std::env::var("AGENTKEYS_CHAIN_RPC_HTTP").ok(),
-            // Explicit override first (profileless chains / local dev), else the
-            // compiled chain profile for AGENTKEYS_CHAIN (SoT). No Heima default.
-            chain_id: env_profile("AGENTKEYS_CHAIN_ID")
-                .ok()
-                .or_else(chain_id_from_chain_profile),
-            entry_point: env_profile("ENTRYPOINT_ADDRESS").ok(),
-            signer_key: std::env::var("AGENTKEYS_BUNDLER_SIGNER_KEY")
-                .or_else(|_| std::env::var("BROKER_SPONSOR_SIGNER_KEY"))
-                .ok(),
-            handleops_gas_limit: std::env::var("AGENTKEYS_HANDLEOPS_GAS_LIMIT").ok(),
-            gas_price: std::env::var("AGENTKEYS_BUNDLER_GAS_PRICE").ok(),
-            gas_floor_wei: std::env::var("AGENTKEYS_BUNDLER_GAS_FLOOR_WEI")
-                .ok()
-                .or_else(gas_floor_from_chain_profile),
-        }
+    pub fn from_process_env() -> Result<Self> {
+        Self::from_lookup(|key| std::env::var(key).ok())
+    }
+
+    fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Result<Self> {
+        let (profile, _) = agentkeys_core::chain_profile::ChainProfile::resolve(
+            None,
+            lookup("AGENTKEYS_CHAIN").as_deref(),
+            lookup("AGENTKEYS_CHAIN_PROFILE_FILE").as_deref(),
+        )?;
+        let suffix = profile.name.to_uppercase().replace('-', "_");
+        let profile_value =
+            |base: &str| lookup(&format!("{base}_{suffix}")).or_else(|| lookup(base));
+        Ok(Self {
+            rpc_url: Some(
+                agentkeys_core::chain_profile::rpc_http_override(&profile.name, &lookup)
+                    .unwrap_or(profile.rpc.http),
+            ),
+            chain_id: profile_value("AGENTKEYS_CHAIN_ID")
+                .or_else(|| Some(profile.chain_id.to_string())),
+            entry_point: profile_value("ENTRYPOINT_ADDRESS").or_else(|| {
+                profile
+                    .contracts
+                    .iter()
+                    .find(|contract| contract.name == "EntryPoint")
+                    .map(|contract| contract.address.clone())
+            }),
+            signer_key: lookup("AGENTKEYS_BUNDLER_SIGNER_KEY")
+                .or_else(|| lookup("BROKER_SPONSOR_SIGNER_KEY")),
+            handleops_gas_limit: lookup("AGENTKEYS_HANDLEOPS_GAS_LIMIT"),
+            gas_price: lookup("AGENTKEYS_BUNDLER_GAS_PRICE"),
+            gas_floor_wei: lookup("AGENTKEYS_BUNDLER_GAS_FLOOR_WEI")
+                .or_else(|| profile.funding.map(|funding| funding.deploy_min_wei)),
+        })
     }
 }
 
@@ -156,7 +132,7 @@ impl BundlerBoot {
     /// Read the env vars listed on [`BundlerBootValues`] once, then
     /// validate via [`Self::from_values`].
     pub fn from_env() -> Result<Self> {
-        Self::from_values(BundlerBootValues::from_process_env())
+        Self::from_values(BundlerBootValues::from_process_env()?)
     }
 
     /// Pure half of [`Self::from_env`] — all validation and Degraded/Ready
@@ -217,14 +193,17 @@ impl BundlerBoot {
             .and_then(|s| s.parse().ok())
             .unwrap_or(4_000_000);
         let gas_price = values.gas_price.and_then(|s| s.parse().ok());
-        // Unparseable ⇒ None (gate off), never a guessed floor: a wrong floor
-        // would either block a funded submitter or pass a broke one.
         let gas_floor_wei = values
             .gas_floor_wei
             .as_deref()
             .map(str::trim)
             .filter(|s| !s.is_empty())
-            .and_then(|s| s.parse().ok());
+            .map(|value| {
+                value
+                    .parse()
+                    .context("invalid AGENTKEYS_BUNDLER_GAS_FLOOR_WEI")
+            })
+            .transpose()?;
         Ok(Self::Ready(Box::new(BundlerConfig {
             rpc_url,
             chain_id,
@@ -894,6 +873,28 @@ mod tests {
     }
 
     #[test]
+    fn bundler_uses_custom_profile_and_rejects_invalid_explicit_configuration() {
+        let profile_path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../e2e/fixtures/chain-profiles/local-test.json"
+        );
+        let values = BundlerBootValues::from_lookup(|key| {
+            (key == "AGENTKEYS_CHAIN_PROFILE_FILE").then(|| profile_path.to_string())
+        })
+        .unwrap();
+        assert_eq!(values.chain_id.as_deref(), Some("31338"));
+        assert!(values.entry_point.is_some());
+        assert!(BundlerBootValues::from_lookup(
+            |key| (key == "AGENTKEYS_CHAIN_PROFILE_FILE").then(|| "missing-profile.json".into())
+        )
+        .is_err());
+        assert!(BundlerBootValues::from_lookup(
+            |key| (key == "AGENTKEYS_CHAIN").then(|| "unknown".into())
+        )
+        .is_err());
+    }
+
+    #[test]
     fn gas_floor_from_profile_and_override_parse() {
         let ep = format!("0x{}", "66".repeat(20));
         let key = format!("0x{}", "46".repeat(32));
@@ -906,18 +907,17 @@ mod tests {
             BundlerBoot::Ready(c) => assert_eq!(c.gas_floor_wei, Some(5_000_000_000_000_000_000)),
             _ => panic!("expected ready"),
         }
-        // Unparseable ⇒ None (gate off), never a guessed floor.
         let bad = BundlerBootValues {
             gas_floor_wei: Some("not-a-number".into()),
             ..boot_values(Some("http://127.0.0.1:1"), Some(&ep), Some(&key))
         };
-        match BundlerBoot::from_values(bad).unwrap() {
-            BundlerBoot::Ready(c) => assert_eq!(c.gas_floor_wei, None),
-            _ => panic!("expected ready"),
-        }
-        // Absent ⇒ resolved from the compiled chain profile (Heima carries a
-        // funding.deploy_min_wei) — from_process_env's or_else path.
-        assert!(gas_floor_from_chain_profile().is_some());
+        assert!(BundlerBoot::from_values(bad)
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("GAS_FLOOR"));
+        let values = BundlerBootValues::from_lookup(|_| None).unwrap();
+        assert!(values.gas_floor_wei.is_some());
     }
 
     #[tokio::test]
@@ -1096,14 +1096,14 @@ mod tests {
     }
 
     #[test]
-    fn compiled_profiles_pin_base_and_heima_chain_ids() {
-        use agentkeys_core::chain_profile::ChainProfile;
-        // The SoT the bundler now resolves against: a Base host MUST sign for 8453,
-        // a Heima host for 212013 — never a hardcoded default.
-        assert_eq!(ChainProfile::load_builtin("base").unwrap().chain_id, 8453);
+    fn default_profile_is_local_and_other_chains_need_explicit_configuration() {
+        use agentkeys_core::chain_profile::{ChainProfile, DEFAULT_PROFILE};
         assert_eq!(
-            ChainProfile::load_builtin("heima").unwrap().chain_id,
-            212_013
+            ChainProfile::load_builtin(DEFAULT_PROFILE)
+                .unwrap()
+                .chain_id,
+            31337
         );
+        assert!(ChainProfile::load_builtin("unconfigured-network").is_err());
     }
 }

@@ -1,157 +1,222 @@
-//! End-to-end `agentkeys k11 ...` subcommand tests.
-//!
-//! Codex review pass 2 flagged that the prior k11 module tests only
-//! verified the underlying functions; this file proves the clap
-//! subcommand actually parses + dispatches.
-
 use assert_cmd::Command;
 use predicates::str::contains;
 use tempfile::TempDir;
 
-fn test_omni() -> String {
-    format!("0x{}", "a".repeat(64))
-}
-
-/// An `agentkeys` `Command` with `HOME` rooted at a throwaway tempdir. The
-/// subprocess's k11 enrollment writes to `$HOME/.agentkeys/k11/<omni>.json`
-/// (see `enroll()` → `k11_dir()` in `src/k11.rs`), so without this every run would
-/// pollute the developer's real home and leave a stale `<omni>.json` behind —
-/// the same shared-FS-path smell that flaked `k11::tests::enroll_writes_file_*`.
-/// Keep the returned `TempDir` in scope until after `cmd.assert()`; dropping it
-/// deletes the directory mid-run.
 fn isolated_cmd() -> (Command, TempDir) {
-    let home = tempfile::tempdir().expect("create temp HOME");
-    let mut cmd = Command::cargo_bin("agentkeys").expect("agentkeys binary");
-    cmd.env("HOME", home.path());
-    (cmd, home)
+    let directory = tempfile::tempdir().unwrap();
+    let mut command = Command::cargo_bin("agentkeys").unwrap();
+    command
+        .env("HOME", directory.path())
+        .env("AGENTKEYS_CHAIN", "anvil")
+        .env("AGENT_TERRIER_LOCAL_DEV", "1")
+        .env_remove("AGENTKEYS_CHAIN_PROFILE_FILE")
+        .env_remove("AGENTKEYS_CHAIN_RPC_HTTP")
+        .env_remove("AGENTKEYS_CHAIN_RPC_HTTP_ANVIL")
+        .env_remove("AGENTKEYS_K11_STUB")
+        .env_remove("AGENTKEYS_ALLOW_STAGE1_STUBS")
+        .args(["--backend", "http://localhost:0"]);
+    (command, directory)
+}
+
+fn enroll(command: &mut Command) {
+    command.args([
+        "k11",
+        "enroll",
+        "--operator-omni",
+        &format!("0x{}", "a".repeat(64)),
+    ]);
 }
 
 #[test]
-fn k11_enroll_stub_mode_emits_json() {
-    let omni = test_omni();
-    let (mut cmd, _home) = isolated_cmd();
-    // Stub mode is the default; explicitly set AGENTKEYS_K11_STUB=1 to be
-    // resilient to env leaks from CI.
-    cmd.env("AGENTKEYS_K11_STUB", "1")
-        // Stub mode is dev-chain-only without explicit opt-in
-        // (arch.md §22b.1 fail-loud on mainnet).
-        .env("AGENTKEYS_CHAIN", "heima-paseo")
-        // The `backend` top-level CLI flag is required for the CLI to
-        // parse, even though k11 doesn't use it. Hand it a dummy.
-        .arg("--backend")
-        .arg("http://localhost:0")
-        .arg("k11")
-        .arg("enroll")
-        .arg("--operator-omni")
-        .arg(&omni);
-    cmd.assert()
-        .success()
-        .stdout(contains("\"mode\": \"stage1-stub\""))
-        .stdout(contains(&omni));
+fn stub_requires_explicit_opt_in() {
+    let (mut command, directory) = isolated_cmd();
+    enroll(&mut command);
+    command
+        .assert()
+        .failure()
+        .stderr(contains("AGENTKEYS_K11_STUB"));
+    assert!(!directory.path().join(".agentkeys/k11").exists());
 }
 
 #[test]
-fn k11_assert_stub_mode_emits_hex() {
-    let omni = test_omni();
-    let (mut cmd, _home) = isolated_cmd();
-    cmd.env("AGENTKEYS_K11_STUB", "1")
-        // Stub mode is dev-chain-only without explicit opt-in
-        // (arch.md §22b.1 fail-loud on mainnet).
-        .env("AGENTKEYS_CHAIN", "heima-paseo")
-        .arg("--backend")
-        .arg("http://localhost:0")
-        .arg("k11")
-        .arg("assert")
-        .arg("--operator-omni")
-        .arg(&omni)
-        .arg("--message-hex")
-        .arg("deadbeef");
-    cmd.assert()
+fn explicitly_enabled_local_stub_enrolls_and_asserts() {
+    let (mut command, _directory) = isolated_cmd();
+    command.env("AGENTKEYS_K11_STUB", "1");
+    enroll(&mut command);
+    command.assert().success().stdout(contains("stage1-stub"));
+    let (mut command, _directory) = isolated_cmd();
+    command.env("AGENTKEYS_K11_STUB", "1").args([
+        "k11",
+        "assert",
+        "--operator-omni",
+        &format!("0x{}", "a".repeat(64)),
+        "--message-hex",
+        "deadbeef",
+    ]);
+    command
+        .assert()
         .success()
-        // Stage-1 stub assertion starts with `"stage1-k11-stub:"` ASCII =
-        // hex `7374616765312d6b31312d737475623a` (16 chars × 2 hex each).
         .stdout(contains("0x7374616765312d6b31312d737475623a"));
 }
 
 #[test]
-fn k11_non_stub_mode_without_webauthn_errors_with_actionable_hint() {
-    // AGENTKEYS_K11_STUB=0 + no --webauthn → error pointing at the two
-    // ways to proceed (either pass --webauthn or set STUB=1). Real
-    // ceremony lives behind --webauthn (no more "stage 2 not shipped").
-    let omni = test_omni();
-    let (mut cmd, _home) = isolated_cmd();
-    cmd.env("AGENTKEYS_K11_STUB", "0")
-        .env("AGENTKEYS_CHAIN", "heima-paseo")
-        .arg("--backend")
-        .arg("http://localhost:0")
-        .arg("k11")
-        .arg("enroll")
-        .arg("--operator-omni")
-        .arg(&omni);
-    cmd.assert()
+fn stub_without_local_development_marker_cannot_write_credentials() {
+    let (mut command, directory) = isolated_cmd();
+    command
+        .env("AGENTKEYS_K11_STUB", "1")
+        .env_remove("AGENT_TERRIER_LOCAL_DEV");
+    enroll(&mut command);
+    command
+        .assert()
         .failure()
-        .stderr(contains("--webauthn"))
-        .stderr(contains("AGENTKEYS_K11_STUB"));
+        .stderr(contains("development signing requires"));
+    assert!(!directory.path().join(".agentkeys/k11").exists());
 }
 
 #[test]
-fn k11_stub_mode_on_mainnet_hard_errors_without_opt_in() {
-    // Codex audit fix: AGENTKEYS_CHAIN=heima + stub mode + no opt-in must
-    // HARD ERROR (not just warn) so operators can't silently sign master
-    // mutations against mainnet with stub bytes.
-    let omni = test_omni();
-    let (mut cmd, _home) = isolated_cmd();
-    cmd.env("AGENTKEYS_K11_STUB", "1")
-        .env("AGENTKEYS_CHAIN", "heima")
-        .env_remove("AGENTKEYS_ALLOW_STAGE1_STUBS")
-        .arg("--backend")
-        .arg("http://localhost:0")
-        .arg("k11")
-        .arg("enroll")
-        .arg("--operator-omni")
-        .arg(&omni);
-    cmd.assert()
-        .failure()
-        .stderr(contains("permitted on chain=heima"))
-        .stderr(contains("AGENTKEYS_ALLOW_STAGE1_STUBS"));
-}
-
-#[test]
-fn k11_stub_mode_on_mainnet_opt_in_warns_but_succeeds() {
-    // With explicit opt-in, mainnet stub mode is allowed but loudly
-    // warned. For staging / smoke tests against mainnet that can't yet
-    // use Touch ID (CI runners, headless boxes).
-    let omni = test_omni();
-    let (mut cmd, _home) = isolated_cmd();
-    cmd.env("AGENTKEYS_K11_STUB", "1")
-        .env("AGENTKEYS_CHAIN", "heima")
+fn remote_custom_profile_cannot_be_overridden_by_anvil_name_or_legacy_opt_in() {
+    let (mut command, directory) = isolated_cmd();
+    let mut profile = agentkeys_core::chain_profile::ChainProfile::load_builtin("anvil").unwrap();
+    profile.chain_kind = agentkeys_core::chain_profile::ChainKind::EthereumL1;
+    let path = directory.path().join("remote.json");
+    std::fs::write(&path, serde_json::to_vec(&profile).unwrap()).unwrap();
+    command
+        .env("AGENTKEYS_CHAIN_PROFILE_FILE", path)
+        .env("AGENTKEYS_K11_STUB", "1")
         .env("AGENTKEYS_ALLOW_STAGE1_STUBS", "1")
-        .arg("--backend")
-        .arg("http://localhost:0")
-        .arg("k11")
-        .arg("enroll")
-        .arg("--operator-omni")
-        .arg(&omni);
-    cmd.assert()
-        .success()
-        .stderr(contains("WARN"))
-        .stdout(contains("\"mode\": \"stage1-stub\""));
+        .args(["--chain", "anvil"]);
+    enroll(&mut command);
+    command
+        .assert()
+        .failure()
+        .stderr(contains("development signing requires"));
+    assert!(!directory.path().join(".agentkeys/k11").exists());
 }
 
 #[test]
-fn k11_assert_rejects_invalid_omni() {
-    let (mut cmd, _home) = isolated_cmd();
-    cmd.env("AGENTKEYS_K11_STUB", "1")
-        // Stub mode is dev-chain-only without explicit opt-in
-        // (arch.md §22b.1 fail-loud on mainnet).
-        .env("AGENTKEYS_CHAIN", "heima-paseo")
-        .arg("--backend")
-        .arg("http://localhost:0")
-        .arg("k11")
-        .arg("assert")
-        .arg("--operator-omni")
-        .arg("0xabc") // too short
-        .arg("--message-hex")
-        .arg("00");
-    cmd.assert().failure().stderr(contains("64-hex"));
+fn software_keygen_needs_local_marker_and_does_not_touch_existing_file_on_denial() {
+    let (mut command, directory) = isolated_cmd();
+    let key_path = directory.path().join("test-passkey.pem");
+    std::fs::write(&key_path, "existing canary").unwrap();
+    command
+        .env_remove("AGENT_TERRIER_LOCAL_DEV")
+        .args(["k11", "software-keygen", "--key-file"])
+        .arg(&key_path);
+    command
+        .assert()
+        .failure()
+        .stderr(contains("development signing requires"));
+    assert_eq!(
+        std::fs::read_to_string(key_path).unwrap(),
+        "existing canary"
+    );
+}
+
+#[test]
+fn remote_rpc_override_cannot_create_a_development_key() {
+    for variable in ["AGENTKEYS_CHAIN_RPC_HTTP", "AGENTKEYS_CHAIN_RPC_HTTP_ANVIL"] {
+        let (mut command, directory) = isolated_cmd();
+        let key_path = directory.path().join("test-passkey.pem");
+        command
+            .env(variable, "https://rpc.example.test")
+            .args(["k11", "software-keygen", "--key-file"])
+            .arg(&key_path);
+        command
+            .assert()
+            .failure()
+            .stderr(contains("development signing requires"));
+        assert!(!key_path.exists());
+    }
+}
+
+#[test]
+fn software_sign_is_fenced_before_key_file_access() {
+    let (mut command, directory) = isolated_cmd();
+    command
+        .env_remove("AGENT_TERRIER_LOCAL_DEV")
+        .args(["k11", "software-sign", "--key-file"])
+        .arg(directory.path().join("missing.pem"))
+        .args(["--userop-hash", &format!("0x{}", "b".repeat(64))]);
+    command
+        .assert()
+        .failure()
+        .stderr(contains("development signing requires"));
+}
+
+#[test]
+fn local_software_keygen_emits_public_coordinates_only() {
+    let (mut command, directory) = isolated_cmd();
+    let key_path = directory.path().join("test-passkey.pem");
+    command
+        .args(["k11", "software-keygen", "--key-file"])
+        .arg(&key_path);
+    let output = command.assert().success().get_output().stdout.clone();
+    let stdout = String::from_utf8(output).unwrap();
+    assert!(stdout.contains("PUBX=0x"));
+    assert!(stdout.contains("RPIDHASH=0x"));
+    assert!(!stdout.contains("PRIVATE"));
+    assert!(key_path.exists());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(key_path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+}
+
+#[test]
+fn explicit_unknown_chain_does_not_fall_back_to_local_default() {
+    let (mut command, directory) = isolated_cmd();
+    command
+        .env("AGENTKEYS_K11_STUB", "1")
+        .args(["--chain", "unknown-chain"]);
+    enroll(&mut command);
+    command
+        .assert()
+        .failure()
+        .stderr(contains("unknown chain profile"));
+    assert!(!directory.path().join(".agentkeys/k11").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn software_keys_reject_public_permissions_and_links_without_changing_the_key() {
+    use std::os::unix::fs::{symlink, PermissionsExt};
+    let (mut command, directory) = isolated_cmd();
+    let key_path = directory.path().join("passkey.pem");
+    command
+        .args(["k11", "software-keygen", "--key-file"])
+        .arg(&key_path);
+    command.assert().success();
+    let original = std::fs::read(&key_path).unwrap();
+    std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(agentkeys_cli::k11_webauthn::software_webauthn_keygen(
+        key_path.to_str().unwrap(),
+        "localhost"
+    )
+    .is_err());
+    assert!(agentkeys_cli::k11_webauthn::software_webauthn_sign(
+        key_path.to_str().unwrap(),
+        &format!("0x{}", "b".repeat(64)),
+        "localhost"
+    )
+    .is_err());
+    std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let link_path = directory.path().join("link.pem");
+    symlink(&key_path, &link_path).unwrap();
+    assert!(agentkeys_cli::k11_webauthn::software_webauthn_keygen(
+        link_path.to_str().unwrap(),
+        "localhost"
+    )
+    .is_err());
+    let hardlink_path = directory.path().join("hardlink.pem");
+    std::fs::hard_link(&key_path, &hardlink_path).unwrap();
+    assert!(agentkeys_cli::k11_webauthn::software_webauthn_keygen(
+        key_path.to_str().unwrap(),
+        "localhost"
+    )
+    .is_err());
+    assert_eq!(std::fs::read(key_path).unwrap(), original);
 }

@@ -45,7 +45,7 @@ impl HostedGatewayConfig {
             .filter(|value| !value.trim().is_empty())
             .ok_or("gateway_chain_not_configured")?;
         let profile = lookup("AGENTKEYS_CHAIN")
-            .unwrap_or_else(|| "heima".into())
+            .unwrap_or_else(|| agentkeys_core::chain_profile::DEFAULT_PROFILE.into())
             .to_uppercase()
             .replace('-', "_");
         let registry_name = format!("SIDECAR_REGISTRY_ADDRESS_{profile}");

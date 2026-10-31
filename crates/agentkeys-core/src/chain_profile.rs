@@ -1,32 +1,6 @@
-//! Chain profiles — one-stop config for every EVM backbone AgentKeys can target.
-//!
-//! AgentKeys's chain layer is pluggable per arch.md §22: contracts are plain
-//! Solidity portable across any EVM-compatible chain (Heima, Base, Ethereum,
-//! Sepolia, Anvil for local dev, …). Each chain has different RPC endpoints,
-//! confirmation depth, gas model, and explorer URL shape. This module loads a
-//! named profile that bundles all of these into one struct so callers (CLI,
-//! daemon, broker, workers) don't have to know which env var maps to which
-//! chain.
-//!
-//! ## Selecting a profile
-//!
-//! Order of resolution (first match wins):
-//!
-//! 1. Explicit `ChainProfile::load_from_file(path)` — operator points at a
-//!    custom JSON file. For chains the binary doesn't ship by default.
-//! 2. `AGENTKEYS_CHAIN_PROFILE_FILE` env var → load_from_file(path)
-//! 3. `--chain <name>` CLI flag → `ChainProfile::load_builtin(name)`
-//! 4. `AGENTKEYS_CHAIN` env var → `ChainProfile::load_builtin(name)`
-//! 5. Default: `heima` (per arch.md §22 default chain backbone)
-//!
-//! ## Built-in profiles
-//!
-//! The binary embeds 7 profiles at compile time via `include_str!`. Adding a
-//! new built-in is a one-file change under `chain-profiles/<name>.json` plus
-//! one entry in the `BUILTIN_PROFILES` slice. Operators with custom chains
-//! ship their own JSON and point at it via env var — no recompile needed.
-//!
-//! ## Wire shape: see `chain-profiles/heima.json` for the canonical example.
+//! Local chain configuration and explicit custom profiles.
+//! Resolution order: profile file, CLI name, environment name, local default.
+//! Signing material is never part of a chain profile.
 
 use std::fs;
 use std::path::Path;
@@ -34,29 +8,27 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-/// Compile-time embedded profiles. Adding a new chain backbone = drop a JSON
-/// under `chain-profiles/` + append a `(name, include_str!(...))` row here.
-const BUILTIN_PROFILES: &[(&str, &str)] = &[
-    ("heima", include_str!("../chain-profiles/heima.json")),
-    (
-        "heima-paseo",
-        include_str!("../chain-profiles/heima-paseo.json"),
-    ),
-    ("base", include_str!("../chain-profiles/base.json")),
-    (
-        "base-sepolia",
-        include_str!("../chain-profiles/base-sepolia.json"),
-    ),
-    ("ethereum", include_str!("../chain-profiles/ethereum.json")),
-    ("sepolia", include_str!("../chain-profiles/sepolia.json")),
-    ("anvil", include_str!("../chain-profiles/anvil.json")),
-];
+const BUILTIN_PROFILES: &[(&str, &str)] =
+    &[("anvil", include_str!("../chain-profiles/anvil.json"))];
 
-/// The default chain when nothing is specified. Matches arch.md §22.
-pub const DEFAULT_PROFILE: &str = "heima";
+pub const DEFAULT_PROFILE: &str = "anvil";
+
+pub fn rpc_http_override(
+    chain_name: &str,
+    lookup: impl Fn(&str) -> Option<String>,
+) -> Option<String> {
+    let suffix = chain_name.to_uppercase().replace('-', "_");
+    lookup(&format!("AGENTKEYS_CHAIN_RPC_HTTP_{suffix}"))
+        .or_else(|| lookup("AGENTKEYS_CHAIN_RPC_HTTP"))
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
 
 #[derive(Debug, Error)]
 pub enum ChainProfileError {
+    #[error("development signing requires AGENT_TERRIER_LOCAL_DEV=1, the local development chain ID and a loopback RPC endpoint")]
+    DevelopmentSigningForbidden,
+
     #[error("unknown chain profile '{0}'; built-ins: {1}")]
     UnknownProfile(String, String),
 
@@ -89,14 +61,7 @@ pub struct ChainProfile {
     pub finality: FinalityConfig,
     pub gas: GasConfig,
     pub deploy: DeployConfig,
-    /// Deployed contract registry for this chain — the addresses the
-    /// broker/daemon/workers read and the parent-control UI displays (#153).
-    /// Empty for chains where AgentKeys contracts aren't deployed. **This is the
-    /// single machine-readable source of truth for deployed addresses**; the
-    /// human view `docs/spec/deployed-contracts.md` points HERE, and
-    /// `scripts/operator/chain/heima-bring-up.sh` rewrites this array (+ `contract_set_version`)
-    /// programmatically on every fresh deploy. Operators targeting a custom
-    /// deploy override it via a profile file.
+    /// Runtime deployment addresses; local setup writes these to an ignored custom profile.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub contracts: Vec<ContractInfo>,
     /// Version of the deployed contract SET for this chain (e.g. `"0.1"`). The
@@ -328,6 +293,7 @@ pub struct Funding {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DeployConfig {
     /// Env var the operator sets with their deployer private key for
     /// hot-key contract deploys via Foundry. In production sovereign-mode
@@ -337,20 +303,12 @@ pub struct DeployConfig {
     pub foundry_chain_arg: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub faucet_url: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub default_test_key: Option<String>,
 }
 
-/// Per-profile development-environment metadata. Populated for testnet /
-/// local-dev profiles; absent for production chains.
-///
-/// The `is_development_default` flag identifies the canonical chain
-/// AgentKeys operators should use when bringing up a fresh dev/test
-/// deployment. Per convention (arch.md §22a): production default is
-/// `heima` mainnet, development default is `heima-paseo` testnet.
+/// Development metadata, with the local profile selected by default.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DevEnvironment {
-    /// `true` for the canonical development chain (heima-paseo). Callers
+    /// `true` for the canonical local development chain. Callers
     /// pick the dev default by scanning all built-in profiles for the
     /// one with this flag set.
     #[serde(default)]
@@ -367,6 +325,7 @@ pub struct DevEnvironment {
 /// bypassing every other origin check. Testnet convenience; never in
 /// production.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SudoConfig {
     /// `true` if the runtime ships `pallet_sudo`.
     pub enabled: bool,
@@ -374,10 +333,6 @@ pub struct SudoConfig {
     /// well-known Substrate dev account).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub sudoer_alias: String,
-    /// SURI seed phrase for the sudoer, when known. For Alice this is
-    /// the well-known dev phrase published in `subkey` docs.
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub sudoer_seed_phrase: String,
     /// Sudoer public key in hex (`0x...`).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub sudoer_public_key: String,
@@ -396,6 +351,35 @@ pub struct SudoConfig {
 }
 
 impl ChainProfile {
+    pub fn require_local_development(
+        &self,
+        enabled: bool,
+        rpc_override: Option<&str>,
+    ) -> Result<(), ChainProfileError> {
+        let expected_chain_id = Self::load_builtin(DEFAULT_PROFILE)?.chain_id;
+        let endpoint = rpc_override.unwrap_or(&self.rpc.http);
+        let is_loopback = reqwest::Url::parse(endpoint).is_ok_and(|url| {
+            let host = url.host_str().unwrap_or("");
+            let host = host.trim_start_matches('[').trim_end_matches(']');
+            url.scheme() == "http"
+                && url.username().is_empty()
+                && url.password().is_none()
+                && (host == "localhost"
+                    || host
+                        .parse::<std::net::IpAddr>()
+                        .is_ok_and(|ip| ip.is_loopback()))
+        });
+        if enabled
+            && self.chain_kind == ChainKind::LocalDev
+            && self.chain_id == expected_chain_id
+            && is_loopback
+        {
+            Ok(())
+        } else {
+            Err(ChainProfileError::DevelopmentSigningForbidden)
+        }
+    }
+
     /// Load one of the built-in profiles by name. Names are case-insensitive.
     ///
     /// Use this for the standard chains AgentKeys ships with. For operator-
@@ -467,11 +451,7 @@ impl ChainProfile {
         BUILTIN_PROFILES.iter().map(|(n, _)| *n).collect()
     }
 
-    /// Find the canonical development-default profile across all built-ins
-    /// (the one with `dev_environment.is_development_default == true`).
-    /// Per arch.md §22a: this is `heima-paseo`. Used by tooling that wants
-    /// to differentiate "the production default" (`DEFAULT_PROFILE`) from
-    /// "the dev default" (this method).
+    /// Find the development default in the public profile inventory.
     pub fn development_default_name() -> Option<&'static str> {
         for (name, json) in BUILTIN_PROFILES {
             if let Ok(p) = serde_json::from_str::<ChainProfile>(json) {
@@ -492,340 +472,117 @@ impl ChainProfile {
 mod tests {
     use super::*;
 
+    fn fixture() -> ChainProfile {
+        serde_json::from_str(include_str!(
+            "../../../e2e/fixtures/chain-profiles/local-test.json"
+        ))
+        .unwrap()
+    }
+
     #[test]
-    fn every_builtin_loads_and_parses() {
-        for name in ChainProfile::list_builtin_names() {
-            let p = ChainProfile::load_builtin(name)
-                .unwrap_or_else(|e| panic!("builtin '{name}' failed to load: {e}"));
-            assert_eq!(p.name, name, "profile.name must match file name");
+    fn development_signing_checks_profile_kind_id_and_effective_endpoint() {
+        let mut profile = ChainProfile::load_builtin(DEFAULT_PROFILE).unwrap();
+        assert!(profile.require_local_development(true, None).is_ok());
+        assert!(profile.require_local_development(false, None).is_err());
+        for endpoint in [
+            "https://rpc.example.test",
+            "http://localhost.example.test",
+            "http://192.0.2.1",
+            "http://user:password@localhost",
+            "",
+        ] {
+            assert!(profile
+                .require_local_development(true, Some(endpoint))
+                .is_err());
         }
+        assert!(profile
+            .require_local_development(true, Some("http://[::1]:8545"))
+            .is_ok());
+        profile.chain_kind = ChainKind::EthereumL1;
+        assert!(profile.require_local_development(true, None).is_err());
+        profile.chain_kind = ChainKind::LocalDev;
+        profile.chain_id += 1;
+        assert!(profile.require_local_development(true, None).is_err());
     }
 
     #[test]
-    fn heima_profile_has_known_values() {
-        let p = ChainProfile::load_builtin("heima").unwrap();
-        assert_eq!(p.chain_id, 212013);
-        assert_eq!(p.chain_kind, ChainKind::SubstrateFrontier);
-        assert_eq!(p.token.symbol, "HEI");
-        assert!(
-            p.rpc.substrate_wss.is_some(),
-            "heima must carry substrate_wss"
-        );
-    }
-
-    #[test]
-    fn heima_carries_full_contract_registry_and_version() {
-        let p = ChainProfile::load_builtin("heima").unwrap();
-        // heima.json is now the machine-readable SOURCE OF TRUTH for deployed
-        // addresses (scripts/operator/chain/heima-bring-up.sh rewrites the contracts[] array +
-        // contract_set_version on every deploy). So pin SHAPE + COMPLETENESS,
-        // NOT exact address values: every expected contract present, a purpose,
-        // a well-formed 20-byte address, and a contract-set version. Pinning
-        // exact addresses here would just duplicate the JSON and break this test
-        // on every legitimate redeploy.
-        let expected = [
-            "AgentKeysScope",
-            "SidecarRegistry",
-            "K3EpochCounter",
-            "CredentialAudit",
-            "P256Verifier",
-            "K11Verifier",
-            "EntryPoint",
-            "P256AccountFactory",
-            "VerifyingPaymaster",
-        ];
-        for name in expected {
-            let c = p
-                .contract(name)
-                .unwrap_or_else(|| panic!("heima profile must carry {name}"));
-            assert!(!c.purpose.is_empty(), "{name} must carry a purpose");
-            let hexpart = c.address.strip_prefix("0x").unwrap_or(&c.address);
-            assert_eq!(
-                hexpart.len(),
-                40,
-                "{name} address must be 20 bytes: {}",
-                c.address
-            );
-            assert!(
-                hexpart.chars().all(|ch| ch.is_ascii_hexdigit()),
-                "{name} address must be hex: {}",
-                c.address
-            );
-        }
-        // The contract-set version (the deploy idempotency key) must be recorded.
-        let version = p
-            .contract_set_version
-            .as_deref()
-            .expect("heima profile must record contract_set_version");
-        assert!(
-            !version.is_empty(),
-            "contract_set_version must be non-empty"
-        );
-        // Case-insensitive lookup + miss path.
-        assert!(p.contract("credentialaudit").is_some());
-        assert!(p.contract("NotAContract").is_none());
-    }
-
-    #[test]
-    fn base_gas_carries_precompile_verification_limit_heima_defaults() {
-        // #278 D6: the register DEPLOYS the P256Account inside the UserOp (initCode),
-        // and the EntryPoint runs that ~1.3M deploy within verificationGasLimit — so
-        // even with Base's cheap RIP-7212 precompile verify (#287) the value must cover
-        // the DEPLOY (1.6M here; the earlier 200k OOG'd it → AA13). Heima stays on the
-        // broker's 1.5M default (None here).
-        let base = ChainProfile::load_builtin("base").unwrap();
-        assert_eq!(base.gas.verification_gas_limit, Some(1_600_000));
-        let heima = ChainProfile::load_builtin("heima").unwrap();
-        assert_eq!(heima.gas.verification_gas_limit, None);
-        assert_eq!(heima.gas.pre_verification_gas, None);
-    }
-
-    #[test]
-    fn heima_explorer_uses_real_evm_explorer_urls() {
-        // #153: the chain page + audit decode link to the live Heima EVM
-        // explorer — contracts under /contract/, accounts under /address/.
-        let p = ChainProfile::load_builtin("heima").unwrap();
-        let addr = "0x8336968273D26C4AcB7B29a76A442339FC10533D";
-        assert_eq!(
-            p.explorer.contract_url(addr),
-            format!("https://explorer.heima.network/contract/{addr}")
-        );
-        assert_eq!(
-            p.explorer.address_url(addr),
-            format!("https://explorer.heima.network/address/{addr}")
-        );
-    }
-
-    #[test]
-    fn contract_url_falls_back_to_address_url_without_template() {
-        // base has no contract_url_template → contract_url() === address_url().
-        let p = ChainProfile::load_builtin("base").unwrap();
-        let addr = "0x0000000000000000000000000000000000000001";
-        assert_eq!(p.explorer.contract_url(addr), p.explorer.address_url(addr));
-    }
-
-    #[test]
-    fn production_l1_chains_have_no_agentkeys_contracts() {
-        // ethereum mainnet has no AgentKeys deploy — registry must be empty
-        // (the field defaults to an empty vec when absent from the JSON).
-        let p = ChainProfile::load_builtin("ethereum").unwrap();
-        assert!(p.contracts.is_empty());
-    }
-
-    #[test]
-    fn base_profile_has_known_values() {
-        let p = ChainProfile::load_builtin("base").unwrap();
-        assert_eq!(p.chain_id, 8453);
-        assert_eq!(p.chain_kind, ChainKind::OptimismL2);
-        assert_eq!(p.finality.default_block_tag, "safe");
-        assert!(
-            p.rpc.substrate_wss.is_none(),
-            "base must not carry substrate_wss"
-        );
-    }
-
-    #[test]
-    fn base_funding_is_eth_sized_and_below_heima() {
-        // The deploy scripts read funding.* from the profile so ETH chains aren't
-        // funded at HEI-sized amounts. Pin the base values are present + far below
-        // heima's (a HEI-sized account deposit on Base would escrow ~$1000s and
-        // exceed the deployer balance — the 2026-06-14 register-affordability fix).
-        let base = ChainProfile::load_builtin("base").unwrap();
-        let heima = ChainProfile::load_builtin("heima").unwrap();
-        let bf = base.funding.as_ref().expect("base carries funding");
-        let hf = heima.funding.as_ref().expect("heima carries funding");
-        let wei = |s: &str| s.parse::<u128>().expect("funding wei parses");
-        assert_eq!(
-            bf.deploy_min_wei, "3000000000000000",
-            "base deploy floor = 0.003 ETH"
-        );
-        assert_eq!(
-            bf.userop_max_fee_wei, "1000000000",
-            "base register maxfee = 1 gwei"
-        );
-        assert!(
-            wei(&bf.account_deposit_wei) < wei(&hf.account_deposit_wei),
-            "base account deposit must be far below heima's HEI-sized one"
-        );
-        assert!(
-            wei(&bf.userop_max_fee_wei) < wei(&hf.userop_max_fee_wei),
-            "base register maxfee must be below heima's 40 gwei"
-        );
-        // Funding is OPTIONAL: a profile with no deployed set (anvil) may omit it
-        // and the deploy scripts fall back to their built-in defaults.
-        assert!(ChainProfile::load_builtin("anvil")
-            .unwrap()
-            .funding
-            .is_none());
-    }
-
-    #[test]
-    fn heima_entrypoint_buffer_exceeds_the_deployer_ed_reserve() {
-        // The deployer ED reserve (`ed_buffer_wei`, ≈ the ExistentialDeposit, held
-        // back in the register pre-flight) and the EntryPoint contract's standing
-        // buffer (`entrypoint_native_buffer_wei`, the AA91 guard) are DISTINCT: the
-        // latter must be ≫ the former. Conflating them over-charged the deployer
-        // pre-flight (need = deposit + 1.0 HEI instead of deposit + ~0.1 HEI).
-        let heima = ChainProfile::load_builtin("heima").unwrap();
-        let hf = heima.funding.as_ref().expect("heima carries funding");
-        let wei = |s: &str| s.parse::<u128>().expect("funding wei parses");
-        assert!(
-            !hf.ed_buffer_wei.is_empty() && !hf.entrypoint_native_buffer_wei.is_empty(),
-            "heima must set both the ED reserve and the EntryPoint buffer"
-        );
-        assert!(
-            wei(&hf.entrypoint_native_buffer_wei) > wei(&hf.ed_buffer_wei),
-            "the EntryPoint native buffer must exceed the bare deployer ED reserve"
-        );
-    }
-
-    #[test]
-    fn ethereum_profile_uses_finalized_tag() {
-        let p = ChainProfile::load_builtin("ethereum").unwrap();
-        assert_eq!(p.chain_id, 1);
-        assert_eq!(p.finality.default_block_tag, "finalized");
-        assert!(p.finality.confirmation_blocks >= 32);
-    }
-
-    #[test]
-    fn anvil_profile_has_instant_finality() {
-        let p = ChainProfile::load_builtin("anvil").unwrap();
-        assert_eq!(p.chain_id, 31337);
-        assert_eq!(p.finality.confirmation_blocks, 0);
-        assert_eq!(p.finality.confirmation_seconds, 0);
-        assert!(
-            p.deploy.default_test_key.is_some(),
-            "anvil ships a default test key"
-        );
-    }
-
-    #[test]
-    fn case_insensitive_lookup() {
-        let a = ChainProfile::load_builtin("HEIMA").unwrap();
-        let b = ChainProfile::load_builtin("heima").unwrap();
-        assert_eq!(a.chain_id, b.chain_id);
-    }
-
-    #[test]
-    fn unknown_profile_lists_available() {
-        let err = ChainProfile::load_builtin("doesnotexist").unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("doesnotexist"));
-        assert!(msg.contains("heima"));
-        assert!(msg.contains("ethereum"));
-    }
-
-    #[test]
-    fn resolve_uses_default_when_nothing_given() {
-        let (p, why) = ChainProfile::resolve(None, None, None).unwrap();
-        assert_eq!(p.name, DEFAULT_PROFILE);
-        assert!(why.contains(DEFAULT_PROFILE));
-    }
-
-    #[test]
-    fn resolve_cli_name_beats_env_name() {
-        let (p, _) = ChainProfile::resolve(Some("base"), Some("ethereum"), None).unwrap();
-        assert_eq!(p.name, "base");
-    }
-
-    #[test]
-    fn resolve_env_file_beats_cli_name() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("custom.json");
-        // Reuse the heima json content so deserialize succeeds; rename it to
-        // prove the file path won.
-        let body = r#"{
-          "name": "custom-x",
-          "display_name": "custom",
-          "chain_id": 999,
-          "chain_kind": "ethereum-l1",
-          "rpc": {"http": "http://x", "wss": "ws://x"},
-          "explorer": {"url": "", "tx_url_template": "", "address_url_template": ""},
-          "token": {"symbol": "X", "decimals": 18},
-          "finality": {"default_block_tag": "latest"},
-          "gas": {"model": "legacy", "max_priority_fee_gwei": 0, "max_fee_gwei": 0},
-          "deploy": {"deployer_env_var": "X_KEY", "foundry_chain_arg": "x"}
-        }"#;
-        std::fs::write(&path, body).unwrap();
-        let (p, why) =
-            ChainProfile::resolve(Some("base"), Some("ethereum"), Some(path.to_str().unwrap()))
-                .unwrap();
-        assert_eq!(p.name, "custom-x");
-        assert_eq!(p.chain_id, 999);
-        assert!(why.contains("AGENTKEYS_CHAIN_PROFILE_FILE"));
-    }
-
-    #[test]
-    fn explorer_url_substitution() {
-        let p = ChainProfile::load_builtin("base").unwrap();
-        let url = p.explorer.tx_url("0xabc123");
-        assert!(url.contains("0xabc123"));
-        assert!(url.starts_with("https://basescan.org"));
-    }
-
-    #[test]
-    fn heima_paseo_chain_id_is_2013() {
-        // Heima Paseo's EVM chain ID is 2013 (= HEIMA_PARA_ID; mainnet's
-        // 212013 prefixes the year). Verified live 2026-05-18 against
-        // https://rpc.paseo-parachain.heima.network — eth_chainId
-        // returns 0x7dd. Pin this so a future "let's auto-detect"
-        // refactor doesn't silently swap to the wrong chain.
-        let p = ChainProfile::load_builtin("heima-paseo").unwrap();
-        assert_eq!(p.chain_id, 2013);
-        let mainnet = ChainProfile::load_builtin("heima").unwrap();
-        assert_ne!(
-            p.chain_id, mainnet.chain_id,
-            "paseo and mainnet must not collide"
-        );
-    }
-
-    #[test]
-    fn heima_paseo_is_development_default_with_alice_sudo() {
-        let p = ChainProfile::load_builtin("heima-paseo").unwrap();
-        let dev = p
-            .dev_environment
-            .as_ref()
-            .expect("heima-paseo carries dev metadata");
-        assert!(dev.is_development_default, "heima-paseo is THE dev default");
-        let sudo = dev.sudo.as_ref().expect("heima-paseo carries sudo config");
-        assert!(sudo.enabled);
-        assert_eq!(sudo.sudoer_alias, "alice");
-        // Pin the well-known Alice public key — guards against accidental
-        // edits substituting a different dev account.
-        assert_eq!(
-            sudo.sudoer_public_key,
-            "0xd43593c715fdd31c61141abd04a99fd6822c8558854ccde39a5684e7a56da27d"
-        );
-        assert!(
-            sudo.sudoer_seed_phrase.contains("//Alice"),
-            "Alice seed phrase must derive via //Alice"
-        );
-        assert!(
-            !sudo.warnings.is_empty(),
-            "sudo warnings must surface to operators"
-        );
-    }
-
-    #[test]
-    fn development_default_name_returns_heima_paseo() {
-        // Per arch.md §22a, heima-paseo is the canonical dev default.
-        // Adding a second dev-default profile would break this — that's
-        // the intended behavior (you can have one production default and
-        // one dev default, no more).
+    fn default_is_local_without_deployed_accounts_or_signing_material() {
+        let (profile, reason) = ChainProfile::resolve(None, None, None).unwrap();
+        assert_eq!(profile.name, DEFAULT_PROFILE);
+        assert_eq!(profile.chain_kind, ChainKind::LocalDev);
+        assert_eq!(profile.chain_id, 31337);
+        assert_eq!(profile.rpc.http, "http://localhost:8545");
+        assert!(profile.contracts.is_empty());
         assert_eq!(
             ChainProfile::development_default_name(),
-            Some("heima-paseo")
+            Some(DEFAULT_PROFILE)
+        );
+        assert_eq!(ChainProfile::list_builtin_names(), vec![DEFAULT_PROFILE]);
+        assert!(reason.contains(DEFAULT_PROFILE));
+    }
+
+    #[test]
+    fn explicit_unknown_configuration_fails_instead_of_selecting_a_default() {
+        assert!(ChainProfile::resolve(Some("unknown"), None, None).is_err());
+        assert!(ChainProfile::resolve(None, Some("unknown"), None).is_err());
+        assert!(ChainProfile::resolve(None, None, Some("missing-profile.json")).is_err());
+        assert_eq!(
+            ChainProfile::load_builtin("ANVIL").unwrap().name,
+            DEFAULT_PROFILE
         );
     }
 
     #[test]
-    fn production_chains_carry_no_dev_environment() {
-        for name in &["heima", "base", "base-sepolia", "ethereum", "sepolia"] {
-            let p = ChainProfile::load_builtin(name).unwrap();
-            assert!(
-                p.dev_environment.is_none(),
-                "{name} is production-shaped; must NOT have dev_environment metadata"
-            );
-        }
+    fn explicit_profile_file_wins_and_cli_name_precedes_environment() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("profile.json");
+        std::fs::write(&path, serde_json::to_vec(&fixture()).unwrap()).unwrap();
+        let (profile, _) =
+            ChainProfile::resolve(Some("unknown"), Some("unknown"), path.to_str()).unwrap();
+        assert_eq!(profile.name, "test-chain");
+        assert_eq!(
+            ChainProfile::resolve(Some("anvil"), Some("unknown"), None)
+                .unwrap()
+                .0
+                .name,
+            "anvil"
+        );
+    }
+
+    #[test]
+    fn custom_registry_and_explorer_remain_supported() {
+        let mut profile = fixture();
+        assert!(profile.contract("credentialaudit").is_some());
+        assert!(profile.contract("missing").is_none());
+        let address = format!("0x{}", "01".repeat(20));
+        assert_eq!(
+            profile.explorer.contract_url(&address),
+            profile.explorer.address_url(&address)
+        );
+        profile.explorer.contract_url_template =
+            "https://explorer.example.test/contract/{address}".into();
+        assert_eq!(
+            profile.explorer.contract_url(&address),
+            format!("https://explorer.example.test/contract/{address}")
+        );
+        assert_eq!(
+            profile.explorer.tx_url("synthetic-hash"),
+            "https://explorer.example.test/tx/synthetic-hash"
+        );
+    }
+
+    #[test]
+    fn profiles_reject_embedded_signing_material_without_echoing_it() {
+        let mut profile = serde_json::to_value(fixture()).unwrap();
+        let canary = "synthetic-sensitive-canary";
+        profile["deploy"]["default_test_key"] = canary.into();
+        let error = serde_json::from_value::<ChainProfile>(profile).unwrap_err();
+        assert!(error.to_string().contains("unknown field"));
+        assert!(!error.to_string().contains(canary));
+        let sudo = serde_json::json!({"enabled": true, "sudoer_seed_phrase": canary});
+        assert!(!serde_json::from_value::<SudoConfig>(sudo)
+            .unwrap_err()
+            .to_string()
+            .contains(canary));
     }
 }

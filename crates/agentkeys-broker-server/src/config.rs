@@ -336,7 +336,7 @@ mod login_chain_tests {
     use super::*;
     #[test]
     fn hosted_login_uses_the_deployed_profile_without_a_duplicate_chain_id_env() {
-        let profile = agentkeys_core::chain_profile::ChainProfile::load_builtin("heima").unwrap();
+        let profile = agentkeys_core::chain_profile::ChainProfile::load_builtin("anvil").unwrap();
         assert_eq!(
             configured_chain_id(None, Some(&profile)),
             Some(profile.chain_id)

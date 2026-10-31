@@ -20,7 +20,7 @@
     "default_block_tag": "latest",
     "confirmation_blocks": 0,
     "confirmation_seconds": 0,
-    "notes": "Anvil produces instant-final blocks. Use this profile for unit/integration tests and demo bring-up before pointing at a live chain. Default mnemonic at http://localhost:8545 gives 10 pre-funded accounts; first deployer key is the canonical Foundry test key."
+    "notes": "Local development only. Generate throwaway signing material during setup; no signing key is embedded in this profile."
   },
   "gas": {
     "model": "legacy",
@@ -29,7 +29,15 @@
   },
   "deploy": {
     "deployer_env_var": "AGENTKEYS_ANVIL_DEPLOYER_KEY",
-    "foundry_chain_arg": "anvil",
-    "default_test_key": "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+    "foundry_chain_arg": "anvil"
+  },
+  "dev_environment": {
+    "is_development_default": true
+  },
+  "funding": {
+    "deploy_min_wei": "10000000000000000",
+    "account_deposit_wei": "100000000000000000",
+    "ed_buffer_wei": "0",
+    "entrypoint_native_buffer_wei": "0"
   }
 }

@@ -20,7 +20,7 @@ RULES = {
     "access-token": re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{40,})\b"),
     "cloud-access-key": re.compile(r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b"),
     "credential-literal": re.compile(
-        r"""(?i)(?:private[_-]?key|secret[_-]?key|api[_-]?key|password|mnemonic|access[_-]?token)\s*["']?\s*[:=]\s*["']([A-Za-z0-9+/=_ -]{24,})["']"""
+        r"""(?i)(?:private[_-]?key|secret[_-]?key|api[_-]?key|password|mnemonic|seed[_-]?phrase|default[_-]?test[_-]?key|access[_-]?token)\s*["']?\s*[:=]\s*["']([A-Za-z0-9+/=_ -]{24,})["']"""
     ),
     "personal-path": re.compile(r"/(?:Users|home)/(?!runner(?:/|$)|example(?:/|$))[A-Za-z0-9._-]+/"),
     "unapproved-project-link": re.compile(

@@ -50,3 +50,11 @@ The complete CLI and light manager must call these owners rather than duplicate 
 |---|---|---|
 | Runtime lifecycle and provider-specific implementations | Broker runtime interface | #3 establishes neutral contracts; #6 supplies the local adapter; no provider implementation in the public release |
 | Repeated worker authorization helpers | Worker verification and protocol types | #3 and #5 consolidate pure policy while retaining independent enforcement at each boundary |
+
+## Chain configuration
+
+The only built-in profile and default is `anvil`. It contains no deployed accounts, contract addresses or reusable signing keys. Local setup must generate fresh throwaway identities and write deployment addresses to an ignored runtime profile. Explicit `AGENTKEYS_CHAIN_PROFILE_FILE` takes precedence over `--chain`, then `AGENTKEYS_CHAIN`, then the default. Invalid explicit profiles fail instead of silently falling back. Profile schemas reject embedded deploy keys and seed phrases.
+
+Software passkey commands require `AGENT_TERRIER_LOCAL_DEV=1`, the local development chain kind and ID, and a loopback HTTP RPC endpoint. Deterministic K11 parser-test stubs are disabled by default and additionally require `AGENTKEYS_K11_STUB=1`. They are not acceptance evidence for authorization. The local release must use real P-256 signatures and verify the running chain before any deployment; that runtime handshake remains part of #4.
+
+Development passkeys are created as new owner-only files (0600) and reused without overwriting them. Loading rejects symlinks, hard links, other owners and group/world-readable files. Passkey contents never appear in CLI output. Unix file permissions are required for this development storage mode.

@@ -162,7 +162,8 @@ pub(crate) fn addr20(hex_s: &str, name: &str) -> Result<[u8; 20], String> {
 /// Profile-aware env read: `BASE_<CHAIN>` (e.g. `SIDECAR_REGISTRY_ADDRESS_HEIMA`),
 /// falling back to the bare `BASE` — the same convention the operator env uses.
 pub(crate) fn env_profile(base: &str) -> Result<String, String> {
-    let profile = std::env::var("AGENTKEYS_CHAIN").unwrap_or_else(|_| "heima".into());
+    let profile = std::env::var("AGENTKEYS_CHAIN")
+        .unwrap_or_else(|_| agentkeys_core::chain_profile::DEFAULT_PROFILE.into());
     resolve_profile_var(base, &profile, |k| std::env::var(k).ok())
 }
 
@@ -231,10 +232,7 @@ fn enforce_profile_drift_guard(
         return Ok(());
     }
     Err(format!(
-        "{detail} — the broker is on a STALE deployment; re-sync: setup-broker-host.sh \
-         --ref <branch> (or set AGENTKEYS_ACCEPT_ALLOW_ADDR_OVERRIDE=1 only if this \
-         env's own contract deploy legitimately differs from the compiled profile, \
-         e.g. the CI/test stack)"
+        "{detail} — update the custom chain profile to match the intended deployment before submitting"
     ))
 }
 
@@ -252,13 +250,6 @@ fn enforce_profile_drift_guard(
 pub fn load_accept_config() -> Result<(AcceptConfig, SigningKey), String> {
     let rpc_url = std::env::var("AGENTKEYS_CHAIN_RPC_HTTP")
         .map_err(|_| "env AGENTKEYS_CHAIN_RPC_HTTP not set".to_string())?;
-    // chain_id resolves env > chain-profile > heima fallback (finalized AFTER the
-    // profile resolves below). The `chain_id` is a `userOpHash` preimage, so a wrong
-    // value makes EVERY sponsored op (#278 register included) fail the EntryPoint's
-    // signature check as a misleading SIG_VALIDATION_FAILED ("wrong passkey") — the
-    // #225 trap. The bare-env fallback to Heima's 212013 silently mis-signed Base
-    // ops when `AGENTKEYS_CHAIN_ID[_<CHAIN>]` was unset; preferring the compiled
-    // chain profile (which carries the correct id) closes that.
     let chain_id_env: Option<u64> = env_profile("AGENTKEYS_CHAIN_ID")
         .ok()
         .and_then(|s| s.trim().parse().ok());
@@ -299,7 +290,7 @@ pub fn load_accept_config() -> Result<(AcceptConfig, SigningKey), String> {
     // with the compiled-in chain profile — fail loud with the re-sync command
     // instead of building doomed UserOps that surface as "wrong passkey". Profile
     // resolution mirrors env_profile's chain pick ($AGENTKEYS_CHAIN, default
-    // heima); $AGENTKEYS_CHAIN_PROFILE_FILE wins when set.
+    // local); $AGENTKEYS_CHAIN_PROFILE_FILE wins when set.
     let resolved_profile = match agentkeys_core::chain_profile::ChainProfile::resolve(
         None,
         std::env::var("AGENTKEYS_CHAIN").ok().as_deref(),
@@ -322,12 +313,7 @@ pub fn load_accept_config() -> Result<(AcceptConfig, SigningKey), String> {
             )?;
             Some(chain_profile)
         }
-        // An unresolvable profile (operator-custom chain name with no built-in
-        // JSON) has no registry to drift-check against — don't take accept down.
-        Err(e) => {
-            tracing::warn!("accept drift guard skipped — chain profile unresolved: {e}");
-            None
-        }
+        Err(error) => return Err(format!("cannot resolve accept chain profile: {error}")),
     };
 
     // #278 D6: verificationGasLimit / preVerificationGas are env > profile > default
@@ -339,17 +325,8 @@ pub fn load_accept_config() -> Result<(AcceptConfig, SigningKey), String> {
     // with the cheap precompile (the earlier 200k OOG'd the deploy → AA13). Chains on
     // the pure-Solidity verifier keep the 1.5M default. Lowering it below the real
     // cost reverts inside validateUserOp as a false SIG_VALIDATION_FAILED (#225 / gap #7).
-    // Finalize chain_id: explicit env wins, else the compiled profile's id, else a
-    // loud-warned heima fallback (only reachable on a custom chain with no env + no
-    // built-in profile — exactly the case the old silent 212013 default mis-signed).
-    let chain_id: u64 = crate::config::configured_chain_id(chain_id_env, resolved_profile.as_ref())
-        .unwrap_or_else(|| {
-            tracing::warn!(
-                "AGENTKEYS_CHAIN_ID unset and no chain profile resolved — defaulting to heima 212013; \
-                 set AGENTKEYS_CHAIN_ID[_<CHAIN>] or use a built-in chain or sponsored ops will mis-sign"
-            );
-            212_013
-        });
+    let chain_id = crate::config::configured_chain_id(chain_id_env, resolved_profile.as_ref())
+        .ok_or_else(|| "accept requires a configured chain ID".to_string())?;
     let (prof_vgl, prof_pvg) = resolved_profile
         .as_ref()
         .map(|p| (p.gas.verification_gas_limit, p.gas.pre_verification_gas))
@@ -1464,8 +1441,12 @@ mod tests {
 
     // ─── #231 drift guard: accept-env vs compiled chain profile ─────────────
 
-    fn heima_profile() -> agentkeys_core::chain_profile::ChainProfile {
-        agentkeys_core::chain_profile::ChainProfile::load_builtin("heima").unwrap()
+    fn test_profile() -> agentkeys_core::chain_profile::ChainProfile {
+        serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../e2e/fixtures/chain-profiles/local-test.json"
+        )))
+        .unwrap()
     }
 
     fn profile_addr20(
@@ -1477,7 +1458,7 @@ mod tests {
 
     #[test]
     fn drift_guard_passes_when_env_matches_profile() {
-        let p = heima_profile();
+        let p = test_profile();
         let checks = [
             (
                 "ENTRYPOINT_ADDRESS",
@@ -1500,7 +1481,7 @@ mod tests {
 
     #[test]
     fn drift_guard_fails_loud_on_mismatch_naming_both_addresses() {
-        let p = heima_profile();
+        let p = test_profile();
         // the incident shape: the broker env still on a stale (pre-cutover) registry
         let stale = [0x1a; 20];
         let err = enforce_profile_drift_guard(
@@ -1520,13 +1501,12 @@ mod tests {
             err.contains(&p.contract("SidecarRegistry").unwrap().address),
             "{err}"
         );
-        assert!(err.contains("STALE deployment"), "{err}");
-        assert!(err.contains("setup-broker-host.sh --ref"), "{err}");
+        assert!(err.contains("update the custom chain profile"), "{err}");
     }
 
     #[test]
     fn drift_guard_override_downgrades_mismatch_to_warn_not_fail() {
-        let p = heima_profile();
+        let p = test_profile();
         assert!(enforce_profile_drift_guard(
             &p,
             &[("SIDECAR_REGISTRY_ADDRESS", "SidecarRegistry", [0x1a; 20])],
@@ -1539,7 +1519,7 @@ mod tests {
     fn drift_guard_skips_contracts_the_profile_does_not_carry() {
         // A chain profile with no deployed-contract registry (e.g. a local dev
         // chain) has nothing to drift from — the guard must not block accept.
-        let mut p = heima_profile();
+        let mut p = test_profile();
         p.contracts.clear();
         assert!(enforce_profile_drift_guard(
             &p,

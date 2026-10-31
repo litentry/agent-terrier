@@ -195,7 +195,7 @@ pub struct CommandContext {
     pub envelope_version: EnvelopeVersionFlag,
     /// v2 stage 1: which EVM chain backbone to talk to. Resolved per
     /// `ChainProfile::resolve` order — CLI `--chain` flag wins over
-    /// `$AGENTKEYS_CHAIN` env over the built-in default `heima`.
+    /// `$AGENTKEYS_CHAIN` env over the built-in local default.
     /// `None` means "not yet resolved" — call `chain_profile()` to
     /// materialize. Cached after first resolution.
     pub chain_profile_cli_name: Option<String>,
@@ -247,8 +247,8 @@ impl CommandContext {
     }
 
     /// Resolve the chain profile per the documented precedence
-    /// (`--chain` > `$AGENTKEYS_CHAIN` > `$AGENTKEYS_CHAIN_PROFILE_FILE` >
-    /// built-in default `heima`). Cached after first call so verbose
+    /// (`$AGENTKEYS_CHAIN_PROFILE_FILE` > `--chain` > `$AGENTKEYS_CHAIN` >
+    /// built-in local default). Cached after first call so verbose
     /// output doesn't print the resolution debug string twice.
     pub fn chain_profile(&self) -> Result<&ChainProfile> {
         if let Some(p) = self.cached_chain_profile.get() {
@@ -270,6 +270,16 @@ impl CommandContext {
         }
         let _ = self.cached_chain_profile.set(profile);
         Ok(self.cached_chain_profile.get().unwrap())
+    }
+
+    pub fn require_local_development(&self) -> Result<()> {
+        let enabled = std::env::var("AGENT_TERRIER_LOCAL_DEV").as_deref() == Ok("1");
+        let profile = self.chain_profile()?;
+        let rpc_override = agentkeys_core::chain_profile::rpc_http_override(&profile.name, |key| {
+            std::env::var(key).ok()
+        });
+        profile.require_local_development(enabled, rpc_override.as_deref())?;
+        Ok(())
     }
 
     pub fn with_broker_url(mut self, broker_url: Option<String>) -> Self {

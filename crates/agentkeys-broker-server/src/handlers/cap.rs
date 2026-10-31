@@ -947,13 +947,14 @@ pub(crate) struct ChainContracts {
 }
 
 impl ChainContracts {
-    /// Resolve from env using the AGENTKEYS_CHAIN profile (default `heima`).
+    /// Resolve from env using the AGENTKEYS_CHAIN profile (default local profile).
     /// Pattern: env keys are `{NAME}_{PROFILE_UC}` where PROFILE_UC =
     /// uppercased chain name with `-` → `_`. Matches the shape used in
     /// scripts/operator-workstation.env so broker/worker/CLI/bash all
     /// read the same value.
     pub(crate) fn from_state(_state: &SharedState) -> Result<Self, CapError> {
-        let profile = std::env::var("AGENTKEYS_CHAIN").unwrap_or_else(|_| "heima".into());
+        let profile = std::env::var("AGENTKEYS_CHAIN")
+            .unwrap_or_else(|_| agentkeys_core::chain_profile::DEFAULT_PROFILE.into());
         let profile_uc = profile.to_uppercase().replace('-', "_");
         let rpc_url = std::env::var("AGENTKEYS_CHAIN_RPC_HTTP")
             .or_else(|_| std::env::var(format!("CHAIN_RPC_HTTP_{profile_uc}")))

@@ -26,8 +26,8 @@ pub struct MemoryWorkerConfig {
 
 impl MemoryWorkerConfig {
     pub fn from_env() -> anyhow::Result<Self> {
-        let chain_profile =
-            std::env::var("AGENTKEYS_CHAIN").unwrap_or_else(|_| "heima".to_string());
+        let chain_profile = std::env::var("AGENTKEYS_CHAIN")
+            .unwrap_or_else(|_| agentkeys_core::chain_profile::DEFAULT_PROFILE.to_string());
         let profile_uc = chain_profile.to_uppercase().replace('-', "_");
 
         let memory_bucket = std::env::var("MEMORY_BUCKET")

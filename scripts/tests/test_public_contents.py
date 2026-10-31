@@ -36,6 +36,13 @@ class PublicContentsTests(unittest.TestCase):
         self.assertEqual({item["rule"] for item in report["findings"]}, {"credential-literal", "personal-path"})
         self.assertNotIn(secret, json.dumps(report))
 
+    def test_rejects_profile_signing_material_without_echoing_values(self):
+        canary = "synthetic-only-" + "z" * 32
+        for field in ["default_test_key", "sudoer_seed_phrase"]:
+            report = self.check_text(json.dumps({field: canary}))
+            self.assertEqual(report["findings"][0]["rule"], "credential-literal")
+            self.assertNotIn(canary, json.dumps(report))
+
     def test_rejects_credential_file_and_firmware(self):
         self.assertTrue(self.check_text("placeholder", ".env")["findings"])
         self.assertTrue(self.check_text("placeholder", "firmware/main.c")["findings"])
