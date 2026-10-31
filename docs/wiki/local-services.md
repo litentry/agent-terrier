@@ -32,6 +32,19 @@ Local, from the same checkout and state directory:
 
 The login receipt omits the bearer. The protected development session file is described in [local owner](./local-owner.md). The launcher does not authorize data operations itself: the broker, workers and object services keep their independent signature and chain checks.
 
+## Store and fetch a development credential
+
+Local, from the same checkout and state directory, using a synthetic example:
+
+```bash
+printf %s 'local-development-example' | ./terrier cred store example --name developer --secret-stdin
+./terrier cred fetch example --name developer
+```
+
+`store` reads exact UTF-8 bytes from stdin (including any newline), with a 64 KiB limit. Its JSON receipt contains no secret. `fetch` deliberately returns the decrypted value in the JSON `secret` field. Both commands load the existing protected owner session and request key directly in the native client; no bearer or key is copied into command arguments or the child environment. The wrapper resolves endpoints from the healthy owned supervisor and verifies the deployment identity.
+
+Expired sessions, wrong owners, wrong request keys, a different broker, unsafe session files and missing original keys fail. Log in again when the session expires; missing keys must be restored. Native local credential requests require the development profile and loopback endpoints, ignore HTTP proxies, and refuse redirects. The shared credential client still obtains a fresh capability and the broker, worker and object store independently enforce authorization. This command currently supports owner credential storage/read; delegate-session commands and other data-class operations remain unfinished.
+
 ## Inspect and stop
 
 Local, from the same checkout and state directory:
@@ -54,6 +67,9 @@ Local, after building the binaries and preparing contract dependencies:
 ```bash
 python3 -m unittest discover -s scripts/tests
 python3 scripts/tests/qualify_local_services.py
+python3 scripts/tests/qualify_local_credentials.py
 ```
 
 The explicit qualifier starts actual contracts and all nine service processes, registers and logs in an owner, stores/fetches a credential, and restarts the service group without replacing its keys or issuer. It checks missing-key and changed-deployment refusal, preserves an unrelated listener, injects a component startup failure, verifies cleanup and confirms the chain remains owned and running. It then restarts successfully and reads the same credential. This is separate from the fast default unit-test loop and from the remaining complete agent/model journey.
+
+The credential qualifier drives `terrier cred` through real owner sessions. It checks exact round-trip bytes and restart persistence, cross-owner isolation, expired/invalid/mismatched sessions, private-file permissions, missing keys, deployment mismatch, input bounds and remote endpoint refusal. Redirect and proxy controls prove no follow-on request reaches the alternate listener. Denied stores must leave the database unchanged, and error output must omit bearer and credential values.

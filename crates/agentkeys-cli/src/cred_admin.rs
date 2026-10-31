@@ -53,18 +53,28 @@ pub async fn cred_fetch(
         Some(cred_url.to_string()),
     );
     let (client, device_key_hash) = configure_actor_client(client, Some(device_key_file), None)?;
+    cred_fetch_with(
+        &client,
+        CapMintRequest {
+            operator_omni: normalize_omni_0x(operator_omni),
+            actor_omni: normalize_omni_0x(actor_omni),
+            service: service.to_string(),
+            device_key_hash,
+            ttl_seconds: 300,
+        },
+        session_bearer,
+    )
+    .await
+}
+
+pub async fn cred_fetch_with(
+    client: &BackendClient,
+    request: CapMintRequest,
+    session_bearer: &str,
+) -> Result<String> {
+    let service = request.service.clone();
     let cap = client
-        .cap_mint(
-            CapMintOp::CredFetch,
-            CapMintRequest {
-                operator_omni: normalize_omni_0x(operator_omni),
-                actor_omni: normalize_omni_0x(actor_omni),
-                service: service.to_string(),
-                device_key_hash: device_key_hash.to_string(),
-                ttl_seconds: 300,
-            },
-            session_bearer,
-        )
+        .cap_mint(CapMintOp::CredFetch, request, session_bearer)
         .await
         .with_context(|| format!("cap-mint cred-fetch for service `{service}`"))?;
     let result = client
@@ -245,18 +255,30 @@ pub async fn cred_store(
         Some(cred_url.to_string()),
     );
     let (client, device_key_hash) = configure_actor_client(client, Some(device_key_file), None)?;
+    cred_store_with(
+        &client,
+        CapMintRequest {
+            operator_omni: normalize_omni_0x(operator_omni),
+            actor_omni: normalize_omni_0x(actor_omni),
+            service: service.to_string(),
+            device_key_hash,
+            ttl_seconds: 300,
+        },
+        session_bearer,
+        secret,
+    )
+    .await
+}
+
+pub async fn cred_store_with(
+    client: &BackendClient,
+    request: CapMintRequest,
+    session_bearer: &str,
+    secret: &str,
+) -> Result<String> {
+    let service = request.service.clone();
     let cap = client
-        .cap_mint(
-            CapMintOp::CredStore,
-            CapMintRequest {
-                operator_omni: normalize_omni_0x(operator_omni),
-                actor_omni: normalize_omni_0x(actor_omni),
-                service: service.to_string(),
-                device_key_hash: device_key_hash.to_string(),
-                ttl_seconds: 300,
-            },
-            session_bearer,
-        )
+        .cap_mint(CapMintOp::CredStore, request, session_bearer)
         .await
         .with_context(|| format!("cap-mint cred-store for service `{service}`"))?;
     let result = client

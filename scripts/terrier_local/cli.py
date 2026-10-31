@@ -4,7 +4,7 @@ from pathlib import Path
 import subprocess
 import sys
 
-from . import chain, contracts, deployment, local_state, models, owner, services
+from . import chain, contracts, data, deployment, local_state, models, owner, services
 
 
 def main():
@@ -28,6 +28,11 @@ def main():
     service_parser.add_argument("action", choices=["start", "status", "doctor", "logs", "stop"])
     service_parser.add_argument("--bin-dir", type=Path, help="Directory containing built public service binaries")
     service_parser.add_argument("--broker-port", type=int, help="Broker port for the first service startup")
+    credential_parser = commands.add_parser("cred", help="Use an existing local owner session for credentials")
+    credential_parser.add_argument("action", choices=["store", "fetch"])
+    credential_parser.add_argument("service")
+    credential_parser.add_argument("--name", required=True, help="Local owner name")
+    credential_parser.add_argument("--secret-stdin", action="store_true", help="Read exact UTF-8 input for store")
     owner_parser = commands.add_parser("owner", help="Real local owner registration and scope operations")
     owner_parser.add_argument("action", choices=["register", "grant", "revoke", "bind", "unbind", "login"])
     owner_parser.add_argument("--name", required=True, help="Local owner name")
@@ -57,6 +62,10 @@ def main():
             print(json.dumps(result, indent=2))
             return 0
         state = local_state.state_directory(repository)
+        if arguments.command == "cred":
+            with local_state.exclusive_lock(state / "operation.lock"):
+                return data.credential(repository, state, arguments.action, arguments.name,
+                                       arguments.service, arguments.secret_stdin)
         if arguments.command == "_serve-services":
             return services.serve(repository, state, arguments.bin_dir)
         if arguments.command == "services":
