@@ -436,17 +436,8 @@ pub(crate) fn parse_endpoint_enrollments(
                 e.label
             ));
         }
-        let dkh_hex = format!("0x{}", norm_omni(&e.device_key_hash));
-        let payload = agent_pop_payload(&dkh_hex);
-        let recovered = agentkeys_core::device_crypto::ecrecover_eip191(&payload, &e.pop_sig)
-            .map_err(|err| format!("endpoint_enrollments[{i}].pop_sig: {err}"))?;
-        let recomputed = agentkeys_core::device_crypto::device_key_hash(&recovered)
-            .map_err(|err| format!("endpoint_enrollments[{i}]: device_key_hash: {err}"))?;
-        if norm_omni(&recomputed) != norm_omni(&e.device_key_hash) {
-            return Err(format!(
-                "endpoint_enrollments[{i}]: pop_sig does not prove device_key_hash"
-            ));
-        }
+        agentkeys_core::registry::verify_agent_pop(&e.device_key_hash, &e.pop_sig)
+            .map_err(|error| format!("endpoint_enrollments[{i}].pop_sig: {error}"))?;
         let actor = h32(
             &e.actor_omni,
             &format!("endpoint_enrollments[{i}].actor_omni"),

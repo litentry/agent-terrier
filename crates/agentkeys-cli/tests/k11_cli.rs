@@ -31,6 +31,71 @@ fn enroll(command: &mut Command) {
 }
 
 #[test]
+fn local_device_identity_keeps_its_key_and_proves_the_public_enrollment() {
+    let (mut command, directory) = isolated_cmd();
+    let key_path = directory.path().join("device.key");
+    let operator = hex::encode([1; 32]);
+    let arguments = [
+        "chain",
+        "device-identity",
+        "--operator-omni",
+        &operator,
+        "--label",
+        "local-agent",
+        "--kind",
+        "delegate",
+        "--key-file",
+        key_path.to_str().unwrap(),
+    ];
+    command.args(arguments);
+    let output = command.assert().success().get_output().stdout.clone();
+    let enrollment: agentkeys_backend_client::protocol::EndpointEnrollment =
+        serde_json::from_slice(&output).unwrap();
+    let device = agentkeys_core::device_crypto::DeviceKey::load_or_generate(
+        key_path.to_str().unwrap(),
+        false,
+    )
+    .unwrap();
+    assert_eq!(
+        agentkeys_core::registry::verify_agent_pop(
+            &enrollment.device_key_hash,
+            &enrollment.pop_sig
+        )
+        .unwrap(),
+        device.address()
+    );
+    assert_eq!(
+        enrollment.actor_omni,
+        format!(
+            "0x{}",
+            hex::encode(agentkeys_core::actor_omni::child_omni(
+                &[1; 32],
+                "local-agent"
+            ))
+        )
+    );
+    let key = std::fs::read_to_string(&key_path).unwrap();
+    assert!(!String::from_utf8(output)
+        .unwrap()
+        .contains(key.trim_start_matches("0x")));
+    let (mut repeated, _directory) = isolated_cmd();
+    repeated.args(arguments).assert().success();
+    assert_eq!(std::fs::read_to_string(&key_path).unwrap(), key);
+    let (mut denied, _directory) = isolated_cmd();
+    denied
+        .env_remove("AGENT_TERRIER_LOCAL_DEV")
+        .args(arguments)
+        .assert()
+        .failure()
+        .stderr(contains("development"));
+    assert_eq!(std::fs::read_to_string(&key_path).unwrap(), key);
+    assert!(
+        agentkeys_core::registry::verify_agent_pop(&hex::encode([2; 32]), &enrollment.pop_sig)
+            .is_err()
+    );
+}
+
+#[test]
 fn local_owner_commands_reject_production_configuration_before_key_access() {
     for mode in ["flag-disabled", "remote-rpc", "production-profile"] {
         let (mut command, directory) = isolated_cmd();

@@ -73,6 +73,8 @@ Every software-key library call requires a `DevelopmentSigning` context construc
 
 `agentkeys-cli::local_owner` prepares and verifies actual P-256 owner operations; `terrier_local/owner.py` handles private local state and gas submission. `terrier owner register/grant/revoke` reuses the canonical account derivation, calldata, signing and receipt owners. See [local owner](wiki/local-owner.md) for the supported scope, key persistence and remaining broker/agent integration. Owner registration binds a fresh random development identity; it does not attest to an external identity.
 
+`terrier device identity` generates an actor-owned K10 and the existing `EndpointEnrollment` public schema. `owner bind/unbind` verifies HDKD lineage, proof and current chain binding before signing the canonical atomic registration/grant or revocation/scope-clear batch. The actor key is never read by the owner operation. `agentkeys-core::registry` owns registry decoding and enrollment proof verification shared with the broker. Local device/delegate enrollment is headless; automatic container-owned identity generation and broker session integration remain pending.
+
 ## Local agent runtime
 
 The broker accepts an injected `SandboxRuntime`; its public composition uses `DockerRuntime`. Agent creation reuses the existing authorized broker routes and create-only credential callback. Docker connects through an explicit local Unix socket, requires the development profile guard, inspects an already-loaded image and creates by immutable image digest with pulling disabled.

@@ -13,7 +13,7 @@ export type EndpointEnrollment = { actor_omni: string, device_key_hash: string, 
  */
 label: string, 
 /**
- * `gateway` · `console` — for the sheet.
+ * Presentation kind: gateway, console, or local device/delegate.
  */
 kind: string, 
 /**
