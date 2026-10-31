@@ -21,7 +21,8 @@
     "./daemon-client": "./lib/daemon-client.js",
     "./presets": "./lib/presets.js",
     "./sessions": "./lib/sessions.js",
-    "./runtime-config": "./lib/generated/model-runtime.js"
+    "./runtime-config": "./lib/generated/model-runtime.js",
+    "./runtime-layout": "./lib/generated/runtime-layout.js"
   },
   "files": [
     "lib/",

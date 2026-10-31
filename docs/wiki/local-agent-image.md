@@ -1,4 +1,4 @@
-The public runtime composition and image are available for component development. They reuse the shared agent loop, authenticated bridge, grant guards and session persistence. They are not yet the complete localhost deployment: broker-driven startup, container persistence, signer/service composition and the lightweight manager remain open in [epic #1](https://github.com/litentry/agent-terrier/issues/1).
+The public runtime composition and image are available for component development. They reuse the shared agent loop, authenticated bridge, grant guards and session persistence. They are not yet the complete localhost deployment: broker-driven startup, saved-session wiring, signer/service composition and the lightweight manager remain open in [epic #1](https://github.com/litentry/agent-terrier/issues/1).
 
 ## Build and test
 
@@ -39,7 +39,9 @@ The Dockerfile pins its public base image by digest. Its adjacent context allowl
 
 Endpoints accept local HTTP origins only, without embedded credentials, query strings or fragments. Model environment names come from generated protocol definitions. The recipe owns context capacity; the composition bounds reply output. No provider discovery, credential file loading, shell tool or unrestricted filesystem tool is mounted. Advertised daemon actions retain both the shared grant guard and the daemon's independent authorization.
 
-Session logs live under the private state directory; agent-process restart resumes them. Persistence through container replacement is not yet established. Docker engine administrators can inspect container state; this development image does not claim production wallet custody.
+Session logs live under the private state directory; agent-process restart resumes them. The shared Docker lifecycle now mounts a persistent volume owned by the namespace, device and actor. Its image directory and numeric user/group come from `agentkeys-protocol::runtime_layout`, also consumed by the image build through generated TypeScript. The directory is initialized with mode 0700. Container replacement and ordinary teardown preserve the volume; explicit reset requires the matching actor and no remaining container. Host-backed volumes, foreign labels and unexpected mounts are refused.
+
+The runtime's `--state-dir` still needs to be wired to this mount by automatic startup. File persistence through the real lifecycle is qualified, while complete agent-session recovery through that lifecycle remains pending. Docker engine administrators can inspect container state; this development image does not claim production wallet custody.
 
 ## Real-model qualification
 

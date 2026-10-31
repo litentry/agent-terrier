@@ -8,6 +8,7 @@ pub mod chain_abi;
 pub mod model_config;
 pub mod model_runtime;
 pub mod object_store;
+pub mod runtime_layout;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
