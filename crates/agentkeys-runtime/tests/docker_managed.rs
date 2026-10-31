@@ -8,7 +8,7 @@ use agentkeys_core::chain_profile::ChainProfile;
 use agentkeys_protocol::{model_runtime, sandbox_env};
 use agentkeys_runtime::docker_runtime::{DockerConfig, DockerRuntime, ManagedDockerConfig};
 use agentkeys_runtime::managed_agent::SERVICE_ENVIRONMENT;
-use agentkeys_runtime::{CreateEnvProvider, SandboxRuntime};
+use agentkeys_runtime::{CreateEnvProvider, SandboxBackend, SandboxRuntime};
 use anyhow::{ensure, Context, Result};
 use axum::{
     extract::State,
@@ -74,6 +74,8 @@ fn credential_callback(
     environment.insert(model_runtime::BASE_URL.into(), format!("{origin}/v1"));
     environment.insert(model_runtime::API_KEY.into(), model_token.into());
     environment.insert(model_runtime::MODEL_ID.into(), "local-test-model".into());
+    environment.insert(model_runtime::SPEECH_URL.into(), origin.into());
+    environment.insert(sandbox_env::MEMORY_NS.into(), "fixture-memory".into());
     environment.insert(sandbox_env::ACTOR_OMNI.into(), actor.into());
     environment.insert(sandbox_env::OPERATOR_OMNI.into(), hex::encode([8; 32]));
     environment.insert(sandbox_env::CHAT_CHANNEL_ID.into(), "opchat-fixture".into());
@@ -95,7 +97,7 @@ fn credential_callback(
 }
 
 async fn chat(
-    runtime: &DockerRuntime,
+    runtime: &dyn SandboxRuntime,
     id: &str,
     token: &str,
     message: &str,
@@ -150,7 +152,33 @@ async fn managed_docker_controller_transport_and_persistence() -> Result<()> {
                 .join("../../packages/agent-terrier-runtime/service-transport.mjs"),
         )?,
     };
-    let runtime = DockerRuntime::connect_managed(config.clone(), settings.clone()).await?;
+    let profile_file = tempfile::NamedTempFile::new()?;
+    serde_json::to_writer(&profile_file, &settings.chain_profile)?;
+    let configuration = BTreeMap::from([
+        ("AGENT_TERRIER_SANDBOX_IMAGE", config.image.clone()),
+        ("AGENT_TERRIER_LOCAL_DEV", "1".into()),
+        (
+            "AGENTKEYS_CHAIN_PROFILE_FILE",
+            profile_file.path().to_str().unwrap().into(),
+        ),
+        (
+            "AGENT_TERRIER_DOCKER_SOCKET",
+            config.socket.to_str().unwrap().into(),
+        ),
+        ("AGENT_TERRIER_RUNTIME_NAMESPACE", namespace.clone()),
+        (
+            "AGENT_TERRIER_SANDBOX_MEMORY_MIB",
+            config.memory_mib.to_string(),
+        ),
+        ("AGENT_TERRIER_SANDBOX_CPUS", config.cpu_count.to_string()),
+        (
+            "AGENT_TERRIER_TRANSPORT_SCRIPT",
+            settings.transport_script.to_str().unwrap().into(),
+        ),
+    ]);
+    let runtime = SandboxBackend::from_lookup(|name| configuration.get(name).cloned())
+        .await?
+        .context("configured runtime missing")?;
     let first_device = hex::encode([1; 32]);
     let first_actor = hex::encode([2; 32]);
     let second_device = hex::encode([3; 32]);
@@ -182,14 +210,14 @@ async fn managed_docker_controller_transport_and_persistence() -> Result<()> {
                 && !saved_metadata.contains("AGENTKEYS_SESSION_JWT"),
             "Docker metadata retained runtime credentials"
         );
-        let denial = chat(&runtime, &first.sandbox_id, "wrong-proof", "denied").await?;
+        let denial = chat(&*runtime, &first.sandbox_id, "wrong-proof", "denied").await?;
         ensure!(
             denial.status() == StatusCode::UNAUTHORIZED
                 && fixture.requests.lock().unwrap().is_empty(),
             "unauthorized chat reached model"
         );
         let marker = format!("remember-{}", uuid::Uuid::new_v4().simple());
-        let reply = chat(&runtime, &first.sandbox_id, &bridge_token, &marker).await?;
+        let reply = chat(&*runtime, &first.sandbox_id, &bridge_token, &marker).await?;
         ensure!(reply.status().is_success(), "managed chat failed");
         ensure!(
             reply
@@ -241,7 +269,7 @@ async fn managed_docker_controller_transport_and_persistence() -> Result<()> {
             "container was not replaced"
         );
         ensure!(
-            chat(&runtime, &restored.sandbox_id, &bridge_token, "recall")
+            chat(&*runtime, &restored.sandbox_id, &bridge_token, "recall")
                 .await?
                 .status()
                 .is_success(),
@@ -340,7 +368,10 @@ async fn managed_docker_controller_transport_and_persistence() -> Result<()> {
         (&second_device, &second_actor),
     ] {
         runtime.kill_for_device(device).await?;
-        runtime.reset_state_for_device(device, actor).await?;
+        DockerRuntime::connect_managed(config.clone(), settings.clone())
+            .await?
+            .reset_state_for_device(device, actor)
+            .await?;
     }
     server.abort();
     scenario

@@ -121,16 +121,7 @@ pub async fn provision_delegate_envs(
     }
 }
 
-/// The delegate identity + chat-link env set for a sandbox CREATE — the ONE
-/// owner (#546) of this assembly, injected identically by the #427 ceremony
-/// (values from the pending row) and the resolve/poll re-create path (values
-/// from the durable [`SpawnContext`](crate::storage::SpawnContext) row). Pure:
-/// the two env-var sources ride in as arguments ([`chat_link_env_sources`]
-/// reads them at the call sites) so tests never touch process env.
-///
-/// Omnis are canonicalized to `0x`+lowercase-hex; the channel worker URL is an
-/// OPTIONAL override — absent, the sandbox DERIVES `channel.<zone>` from the
-/// broker URL (worker URLs are derived, never a required pre-composed env).
+/// Shared identity and service configuration for initial creation and restart.
 #[allow(clippy::too_many_arguments)] // the ONE env-assembly owner — a param per env source
 pub(crate) fn delegate_identity_envs(
     actor_omni: &str,
@@ -138,8 +129,7 @@ pub(crate) fn delegate_identity_envs(
     k10_secret_hex: Option<&str>,
     session_jwt: Option<&str>,
     chat_channel_id: &str,
-    broker_url: Option<&str>,
-    channel_worker_override: Option<&str>,
+    service_environment: &[(String, String)],
     mgmt_token: Option<&str>,
     memory_ns: Option<&str>,
     bridge_token: Option<&str>,
@@ -178,15 +168,7 @@ pub(crate) fn delegate_identity_envs(
             chat_channel_id.to_string(),
         ));
     }
-    if let Some(url) = broker_url.filter(|u| !u.trim().is_empty()) {
-        envs.push((env_names::BROKER_URL.to_string(), url.trim().to_string()));
-    }
-    if let Some(url) = channel_worker_override.filter(|u| !u.trim().is_empty()) {
-        envs.push((
-            env_names::CHANNEL_WORKER_URL.to_string(),
-            url.trim().to_string(),
-        ));
-    }
+    envs.extend_from_slice(service_environment);
     // #594 — the delegate's own memory namespace, for the in-sandbox
     // checkpoint loop (OPTIONAL: absent, the daemon derives it from the
     // `opchat-<label>` channel id; pre-#594 rows have an empty ns).
@@ -333,20 +315,25 @@ pub(crate) fn mint_delegate_session_jwt(
     }
 }
 
-/// The broker-host env sources for [`delegate_identity_envs`]: the broker's own
-/// public URL (`BROKER_OIDC_ISSUER` — what the sandbox resolves against and
-/// derives worker URLs from) and the OPTIONAL channel-worker override.
-pub(crate) fn chat_link_env_sources() -> (Option<String>, Option<String>) {
-    let read = |k: &str| {
-        std::env::var(k)
-            .ok()
-            .map(|v| v.trim().to_string())
-            .filter(|v| !v.is_empty())
-    };
-    (
-        read("BROKER_OIDC_ISSUER"),
-        read("AGENTKEYS_WORKER_CHANNEL_URL"),
-    )
+pub(crate) fn delegate_service_environment(
+    lookup: impl Fn(&str) -> Option<String>,
+) -> Vec<(String, String)> {
+    use agentkeys_protocol::sandbox_env;
+    agentkeys_runtime::managed_agent::SERVICE_ENVIRONMENT
+        .iter()
+        .filter(|(service, _)| *service != "model")
+        .filter_map(|(_, destination)| {
+            let source = match *destination {
+                sandbox_env::BROKER_URL => "BROKER_OIDC_ISSUER",
+                sandbox_env::CHANNEL_WORKER_URL => "AGENTKEYS_WORKER_CHANNEL_URL",
+                _ => destination,
+            };
+            lookup(source)
+                .map(|value| value.trim().to_owned())
+                .filter(|value| !value.is_empty())
+                .map(|value| ((*destination).to_owned(), value))
+        })
+        .collect()
 }
 
 /// Ensure the delegate's sandbox exists (spawning it if needed) + emit the
@@ -401,7 +388,7 @@ pub async fn ensure_for_delegate_extra(
     };
     let (base_envs, gate_label) = match &ctx {
         Some(c) => {
-            let (issuer, worker_override) = chat_link_env_sources();
+            let service_environment = delegate_service_environment(|name| std::env::var(name).ok());
             // Legacy rows carry the K10 secret; #552 signer-custodied rows
             // carry only the derived address — mint a FRESH J1 per create so
             // a re-created sandbox always boots with a live signer credential.
@@ -422,8 +409,7 @@ pub async fn ensure_for_delegate_extra(
                 Some(&c.k10_secret_hex),
                 session_jwt.as_deref(),
                 &c.chat_channel_id,
-                issuer.as_deref(),
-                worker_override.as_deref(),
+                &service_environment,
                 Some(&sandbox_mgmt_token(&state.session_keypair, device_key_hash)),
                 Some(&c.memory_ns),
                 Some(&sandbox_bridge_token(
@@ -788,8 +774,10 @@ mod tests {
             Some("0xdead"),
             None,
             "opchat-watchdog",
-            Some("https://broker.example.cn"),
-            None,
+            &[(
+                agentkeys_protocol::sandbox_env::BROKER_URL.into(),
+                "https://broker.example.cn".into(),
+            )],
             Some("smt1_feed"),
             Some("watchdog"),
             Some("sbt1_feed"),
@@ -824,6 +812,32 @@ mod tests {
         // #715 — the in-pod bearer rides every armed create.
         assert_eq!(get("AGENTKEYS_BRIDGE_TOKEN"), "sbt1_feed");
         assert!(!keys.contains(&"AGENTKEYS_STS_PROVIDER"));
+    }
+
+    #[test]
+    fn local_service_addresses_cover_the_managed_runtime_without_forwarding_host_secrets() {
+        let sources = std::collections::BTreeMap::from([
+            ("BROKER_OIDC_ISSUER", "http://127.0.0.1:1"),
+            ("AGENTKEYS_SIGNER_URL", "http://127.0.0.1:2"),
+            ("AGENTKEYS_WORKER_CHANNEL_URL", "http://127.0.0.1:3"),
+            ("AGENTKEYS_WORKER_CRED_URL", "http://127.0.0.1:4"),
+            ("AGENTKEYS_WORKER_MEMORY_URL", "http://127.0.0.1:5"),
+            ("AGENTKEYS_WORKER_CONFIG_URL", "http://127.0.0.1:6"),
+            ("BROKER_SPONSOR_SIGNER_KEY", "synthetic-host-only-key"),
+            ("AGENTKEYS_GATE_ADMIN_TOKEN", "synthetic-host-only-token"),
+        ]);
+        let environment =
+            delegate_service_environment(|name| sources.get(name).map(|value| value.to_string()));
+        assert_eq!(environment.len(), 6);
+        for (service, name) in agentkeys_runtime::managed_agent::SERVICE_ENVIRONMENT {
+            if *service != "model" {
+                assert!(environment.iter().any(|(key, _)| key == name));
+            }
+        }
+        assert!(!environment
+            .iter()
+            .any(|(_, value)| value.contains("host-only")));
+        assert!(delegate_service_environment(|_| Some(" ".into())).is_empty());
     }
 
     /// #715 — the bridge token is a sibling derivation of the mgmt token under
@@ -891,8 +905,10 @@ mod tests {
             None,
             None,
             "",
-            None,
-            Some("https://channel.example.cn/"),
+            &[(
+                agentkeys_protocol::sandbox_env::CHANNEL_WORKER_URL.into(),
+                "https://channel.example.cn/".into(),
+            )],
             None,
             // #594 — a pre-#594 row's EMPTY ns injects nothing (the daemon
             // derives from the channel id instead).

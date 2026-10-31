@@ -146,12 +146,20 @@ impl SandboxBackend {
     }
 
     pub async fn from_env() -> Result<Option<Self>> {
-        let Some(config) =
-            crate::docker_runtime::DockerConfig::from_lookup(|key| std::env::var(key).ok())?
-        else {
+        Self::from_lookup(|name| std::env::var(name).ok()).await
+    }
+
+    pub async fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Result<Option<Self>> {
+        let Some(config) = crate::docker_runtime::DockerConfig::from_lookup(&lookup)? else {
+            anyhow::ensure!(
+                lookup("AGENT_TERRIER_TRANSPORT_SCRIPT").is_none(),
+                "managed transport requires an explicit runtime image"
+            );
             return Ok(None);
         };
-        let runtime = crate::docker_runtime::DockerRuntime::connect(config).await?;
+        let settings = crate::docker_runtime::ManagedDockerConfig::from_lookup(lookup)?;
+        let runtime =
+            crate::docker_runtime::DockerRuntime::connect_managed(config, settings).await?;
         Ok(Some(Self::new(Arc::new(runtime))))
     }
 }
@@ -166,6 +174,59 @@ impl std::ops::Deref for SandboxBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn environment_configuration_has_no_unmanaged_fallback() {
+        assert!(SandboxBackend::from_lookup(|_| None)
+            .await
+            .unwrap()
+            .is_none());
+        let mut values = std::collections::BTreeMap::from([
+            ("AGENT_TERRIER_SANDBOX_IMAGE", "fixture-image".to_owned()),
+            ("AGENT_TERRIER_LOCAL_DEV", "1".to_owned()),
+            ("AGENTKEYS_CHAIN", "anvil".to_owned()),
+        ]);
+        assert!(
+            SandboxBackend::from_lookup(|name| values.get(name).cloned())
+                .await
+                .is_err()
+        );
+        let directory = tempfile::tempdir().unwrap();
+        let script = directory.path().join("transport.mjs");
+        std::fs::write(&script, "process.exit(0);\n").unwrap();
+        values.insert(
+            "AGENT_TERRIER_TRANSPORT_SCRIPT",
+            std::fs::canonicalize(script)
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .into(),
+        );
+        let config = crate::docker_runtime::ManagedDockerConfig::from_lookup(|name| {
+            values.get(name).cloned()
+        })
+        .unwrap();
+        assert_eq!(config.chain_profile.chain_id, 31337);
+        values.insert("AGENTKEYS_CHAIN_RPC_HTTP", "http://127.0.0.1:23456".into());
+        let config = crate::docker_runtime::ManagedDockerConfig::from_lookup(|name| {
+            values.get(name).cloned()
+        })
+        .unwrap();
+        assert_eq!(config.chain_profile.rpc.http, "http://127.0.0.1:23456");
+        values.insert("AGENTKEYS_CHAIN_RPC_HTTP", "https://example.invalid".into());
+        assert!(
+            SandboxBackend::from_lookup(|name| values.get(name).cloned())
+                .await
+                .is_err()
+        );
+        values.remove("AGENT_TERRIER_SANDBOX_IMAGE");
+        assert!(
+            SandboxBackend::from_lookup(|name| values.get(name).cloned())
+                .await
+                .is_err()
+        );
+    }
+
     #[tokio::test]
     async fn one_delegate_serializes_whatever_the_hash_spelling() {
         let locks = DelegateLocks::default();

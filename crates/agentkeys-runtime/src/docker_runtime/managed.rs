@@ -10,6 +10,27 @@ pub struct ManagedDockerConfig {
 }
 
 impl ManagedDockerConfig {
+    pub fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Result<Self> {
+        let transport_script = lookup("AGENT_TERRIER_TRANSPORT_SCRIPT")
+            .context("managed Docker runtime requires AGENT_TERRIER_TRANSPORT_SCRIPT")?;
+        let (mut chain_profile, _) = agentkeys_core::chain_profile::ChainProfile::resolve(
+            None,
+            lookup("AGENTKEYS_CHAIN").as_deref(),
+            lookup("AGENTKEYS_CHAIN_PROFILE_FILE").as_deref(),
+        )?;
+        if let Some(rpc) =
+            agentkeys_core::chain_profile::rpc_http_override(&chain_profile.name, lookup)
+        {
+            chain_profile.rpc.http = rpc;
+        }
+        let configuration = Self {
+            chain_profile,
+            transport_script: PathBuf::from(transport_script),
+        };
+        configuration.validate()?;
+        Ok(configuration)
+    }
+
     pub fn validate(&self) -> Result<()> {
         self.chain_profile.require_local_development(true, None)?;
         ensure!(
@@ -184,6 +205,18 @@ impl LocalDockerCommand {
                 bootstrap
                     .environment
                     .insert((*name).into(), endpoints[*service].as_str().unwrap().into());
+            }
+            if bootstrap
+                .environment
+                .contains_key(agentkeys_protocol::model_runtime::SPEECH_URL)
+            {
+                let origin = agentkeys_protocol::model_runtime::relay_origin(
+                    &bootstrap.environment[agentkeys_protocol::model_runtime::BASE_URL],
+                )
+                .to_owned();
+                bootstrap
+                    .environment
+                    .insert(agentkeys_protocol::model_runtime::SPEECH_URL.into(), origin);
             }
             bootstrap.chain_profile.rpc.http = endpoints["chain"].as_str().unwrap().into();
             bootstrap.validate()?;
