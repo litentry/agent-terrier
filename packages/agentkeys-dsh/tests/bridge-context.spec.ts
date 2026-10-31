@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { mkdtempSync, readFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, readFileSync, existsSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Context } from '@deepseek-ai/cordis';
@@ -58,21 +58,25 @@ function fakeSystemPrompt() {
 }
 
 let ctx: Context | undefined;
+let scratchDirectory: string | undefined;
 afterEach(async () => {
   if (ctx) await ctx.fiber.dispose();
   ctx = undefined;
+  if (scratchDirectory) rmSync(scratchDirectory, { recursive: true, force: true });
+  scratchDirectory = undefined;
 });
 
 async function boot(withPrompt: boolean) {
   ctx = new Context();
   const cwd = mkdtempSync(join(tmpdir(), 'ak-bridge-ctx-'));
+  scratchDirectory = cwd;
   const agents = fakeAgents();
   const prompt = fakeSystemPrompt();
   ctx.provide('agents', agents.service);
   ctx.provide('sessions', {});
   if (withPrompt) ctx.provide('systemPrompt', prompt.service);
   await ctx.plugin(WebServer, { host: '127.0.0.1', port: 0 });
-  await ctx.plugin(sessionsPlugin, {});
+  await ctx.plugin(sessionsPlugin, { homeDir: join(cwd, 'sessions-home') });
   await ctx.plugin(bridgePlugin, { cwd, engine: 'dsh', model: 'mock-model', bridgeToken: BRIDGE_TOKEN });
   await new Promise((r) => setTimeout(r, 20));
   return { base: `http://127.0.0.1:${ctx.webServer.port}`, cwd, agents, prompt };

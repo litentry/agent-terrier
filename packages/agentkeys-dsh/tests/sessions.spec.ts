@@ -4,7 +4,7 @@ import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { Context } from '@deepseek-ai/cordis';
 import * as sessionsPlugin from '../src/sessions.js';
-import { SERVICE, SessionStore } from '../src/sessions.js';
+import { resolveRuntimeHome, SERVICE, SessionStore } from '../src/sessions.js';
 import { readIndex } from '../src/bridge-sessions.js';
 import type { ChatSessionSpec } from '../src/bridge-sessions.js';
 
@@ -22,6 +22,17 @@ const thread = (party: string, idle = 30): ChatSessionSpec => ({ window: 'thread
 const tap: ChatSessionSpec = { window: 'event', scope: 'ch-kitchen', context: 'The card' };
 
 describe('SessionStore (the typed-session policy service)', () => {
+  it('requires an explicit runtime home and gives config precedence without fallback', () => {
+    const configuredHome = path.join(os.tmpdir(), 'configured-home');
+    const environmentHome = path.join(os.tmpdir(), 'environment-home');
+    expect(resolveRuntimeHome(undefined, environmentHome)).toBe(environmentHome);
+    expect(resolveRuntimeHome(`${configuredHome}/`, environmentHome)).toBe(configuredHome);
+    expect(() => resolveRuntimeHome()).toThrow('runtime home');
+    expect(() => resolveRuntimeHome('', environmentHome)).toThrow('runtime home');
+    expect(() => resolveRuntimeHome('relative', environmentHome)).toThrow('runtime home');
+    expect(() => resolveRuntimeHome('/\0')).toThrow('runtime home');
+  });
+
   it('plans a thread, keeps it across turns, and ends it after silence — listeners hear it before the log retires', async () => {
     const store = new SessionStore(await scratchHome());
     const heard: Array<{ ids: readonly string[]; reason: string }> = [];
@@ -85,6 +96,16 @@ describe('SessionStore (the typed-session policy service)', () => {
       expect(store).toBeInstanceOf(SessionStore);
     } finally {
       await ctx.fiber.dispose();
+    }
+  });
+
+  it.each(['', 'relative-sessions', '/'])('rejects an invalid explicit runtime home: %j', async (homeDir) => {
+    const context = new Context();
+    try {
+      expect(() => sessionsPlugin.apply(context, { homeDir })).toThrow('runtime home');
+      expect((context as unknown as Record<string, unknown>)[SERVICE]).toBeUndefined();
+    } finally {
+      await context.fiber.dispose();
     }
   });
 });
