@@ -32,6 +32,8 @@ The session is stored as an owner-only `owners/<name>/session.json` development 
 
 ## Grant and revoke scope
 
+Scope revocation and device unbinding below change actual chain authority. Revoking an individual capability ID is currently unsupported; the native client returns an error instead of claiming that an unexecuted revocation succeeded. Capability expiry and the independent worker/storage grant and device checks remain enforced.
+
 Local, from the same checkout and shell, set the actor identity you intend to authorize:
 
 ```bash

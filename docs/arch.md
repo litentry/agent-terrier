@@ -116,6 +116,8 @@ Independent capability verification has one implementation in `agentkeys-core::c
 
 Chain authority decoding rejects malformed lengths, noncanonical integer padding and boolean values other than zero or one. Broker and worker checks project the same decoded registry record; they never truncate malformed values or treat parse errors as unrevoked devices. Registered state derives from the decoded registration timestamp. Unknown or revoked entries remain subject to each caller’s explicit authorization policy.
 
+Individual capability-ID revocation has no configured implementation: `BackendClient::cap_revoke` returns an explicit `capability_revocation` error and never reports a successful local-only revocation. Owners change real chain authority through the scope-revoke or device-unbind operations in [local owner](wiki/local-owner.md); worker and object-service checks enforce the resulting grant or device denial. Capability expiry remains independently enforced.
+
 ## Local object storage
 
 `agentkeys-local-store` owns the local SQLite object service. `agentkeys-protocol::object_store` owns its wire schema and capability-to-key/action rules. The service verifies signatures, actor proofs and current chain authority independently before any object operation; databases are bound to a single data class and have private file permissions. Expected-revision updates commit atomically. Database identity/version checks reject unrelated files.
