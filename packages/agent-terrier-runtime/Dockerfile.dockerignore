@@ -5,6 +5,8 @@
 !packages/agent-terrier-runtime/
 !packages/agent-terrier-runtime/package.json
 !packages/agent-terrier-runtime/start.mjs
+!packages/agent-terrier-runtime/service-transport.mjs
+!packages/agent-terrier-runtime/service-transport.test.mjs
 !packages/agent-terrier-runtime/runtime.test.mjs
 !packages/agent-terrier-runtime/test-support.mjs
 !packages/agent-terrier-runtime/qualify-model.mjs

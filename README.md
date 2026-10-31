@@ -44,7 +44,7 @@ The [local storage guide](docs/wiki/local-storage.md) documents the isolated obj
 
 The [local services guide](docs/wiki/local-services.md) covers `terrier services start/status/doctor/logs/stop`, real broker login, private persistent state and safe startup-failure cleanup. It uses the product binaries and keeps test orchestration separate.
 
-The [local agent image guide](docs/wiki/local-agent-image.md) covers the shared plugin composition, reproducible image build, fast process checks and real-model qualification. It records the remaining isolated-container service-connectivity gap explicitly.
+The [local agent image guide](docs/wiki/local-agent-image.md) covers the shared plugin composition, reproducible image build, fast process checks and real-model qualification through an explicit local-service connection with container networking disabled. Complete lifecycle and service composition remain under development.
 
 ## License
 

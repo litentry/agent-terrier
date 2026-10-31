@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "license": "Apache-2.0",
-  "scripts": {"test": "node --test runtime.test.mjs"},
+  "scripts": {"test": "node --test runtime.test.mjs service-transport.test.mjs"},
   "bin": {"agent-terrier-runtime": "start.mjs"},
   "dependencies": {
     "@agentkeys/dsh-suite": "0.1.0",

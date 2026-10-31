@@ -14,7 +14,7 @@ ENV NODE_ENV=production
 COPY --from=build /opt/terrier/packages/node_modules ./packages/node_modules
 COPY --from=build /opt/terrier/packages/agentkeys-dsh/lib ./packages/agentkeys-dsh/lib
 COPY packages/agentkeys-dsh/package.json packages/agentkeys-dsh/README.md ./packages/agentkeys-dsh/
-COPY packages/agent-terrier-runtime/package.json packages/agent-terrier-runtime/start.mjs ./packages/agent-terrier-runtime/
+COPY packages/agent-terrier-runtime/package.json packages/agent-terrier-runtime/start.mjs packages/agent-terrier-runtime/service-transport.mjs ./packages/agent-terrier-runtime/
 COPY presets/local-models.json ./presets/local-models.json
 COPY LICENSE NOTICE ./
 COPY LICENSES ./LICENSES
@@ -22,7 +22,7 @@ USER 1000:1000
 ENTRYPOINT ["node", "packages/agent-terrier-runtime/start.mjs"]
 
 FROM runtime AS qualification
-COPY packages/agent-terrier-runtime/runtime.test.mjs packages/agent-terrier-runtime/test-support.mjs packages/agent-terrier-runtime/qualify-model.mjs ./packages/agent-terrier-runtime/
-ENTRYPOINT ["node", "--test", "packages/agent-terrier-runtime/runtime.test.mjs"]
+COPY packages/agent-terrier-runtime/runtime.test.mjs packages/agent-terrier-runtime/service-transport.test.mjs packages/agent-terrier-runtime/test-support.mjs packages/agent-terrier-runtime/qualify-model.mjs ./packages/agent-terrier-runtime/
+ENTRYPOINT ["node", "--test", "packages/agent-terrier-runtime/runtime.test.mjs", "packages/agent-terrier-runtime/service-transport.test.mjs"]
 
 FROM runtime AS final
