@@ -7,7 +7,7 @@ use std::time::Duration;
 use anyhow::{ensure, Context, Result};
 use async_trait::async_trait;
 use serde::Deserialize;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::sandbox_backend::{
     CreateEnvProvider, DelegateLocks, EnsureOutcome, InstanceImageInfo, LiveRuntime, RuntimeImage,
@@ -21,6 +21,11 @@ const DEFAULT_MEMORY_MIB: u32 = 2048;
 const DEFAULT_CPU_COUNT: u32 = 2;
 const PROCESS_LIMIT: u32 = 256;
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(60);
+const FORWARD_TIMEOUT: Duration = Duration::from_secs(3600);
+const FORWARD_CONNECTION_LIMIT: usize = 32;
+const FORWARD_HEADER_LIMIT: usize = 32 * 1024;
+const FORWARD_AUTH_TIMEOUT: Duration = Duration::from_secs(5);
+const FORWARD_TOKEN_HEADER: &str = "x-agent-terrier-forward-token";
 
 #[derive(Clone, Debug)]
 pub struct DockerConfig {
@@ -99,6 +104,15 @@ impl DockerConfig {
 #[async_trait]
 trait DockerCommand: Send + Sync {
     async fn execute(&self, arguments: &[String], input: Option<Vec<u8>>) -> Result<Vec<u8>>;
+    async fn forward(
+        &self,
+        _id: &str,
+        _port: u16,
+        _stream: tokio::net::TcpStream,
+        _request: Vec<u8>,
+    ) -> Result<()> {
+        anyhow::bail!("Docker stream forwarding is unavailable")
+    }
 }
 
 struct LocalDockerCommand {
@@ -123,6 +137,53 @@ impl LocalDockerCommand {
 
 #[async_trait]
 impl DockerCommand for LocalDockerCommand {
+    async fn forward(
+        &self,
+        id: &str,
+        port: u16,
+        stream: tokio::net::TcpStream,
+        request: Vec<u8>,
+    ) -> Result<()> {
+        let mut command = self.command(|name| std::env::var_os(name));
+        let mut child = command
+            .args([
+                "exec",
+                "--interactive",
+                id,
+                "nc",
+                "127.0.0.1",
+                &port.to_string(),
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .context("start Docker management stream")?;
+        let mut input = child.stdin.take().context("Docker stream stdin missing")?;
+        let mut output = child
+            .stdout
+            .take()
+            .context("Docker stream stdout missing")?;
+        input.write_all(&request).await?;
+        let (mut reader, mut writer) = stream.into_split();
+        tokio::try_join!(
+            async {
+                tokio::io::copy(&mut reader, &mut input).await?;
+                input.shutdown().await
+            },
+            async {
+                tokio::io::copy(&mut output, &mut writer).await?;
+                writer.shutdown().await
+            }
+        )?;
+        ensure!(
+            child.wait().await?.success(),
+            "Docker management stream failed"
+        );
+        Ok(())
+    }
+
     async fn execute(&self, arguments: &[String], input: Option<Vec<u8>>) -> Result<Vec<u8>> {
         let mut command = self.command(|name| std::env::var_os(name));
         command
@@ -168,6 +229,18 @@ struct Container {
     network_settings: NetworkSettings,
 }
 
+impl Container {
+    fn has_published_ports(&self) -> bool {
+        self.network_settings.ports.as_ref().is_some_and(|ports| {
+            ports.values().any(|bindings| {
+                bindings
+                    .as_ref()
+                    .is_some_and(|bindings| !bindings.is_empty())
+            })
+        })
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "PascalCase")]
 struct ContainerConfig {
@@ -185,15 +258,7 @@ struct ContainerState {
 #[derive(Deserialize)]
 #[serde(rename_all = "PascalCase")]
 struct NetworkSettings {
-    ports: Option<HashMap<String, Option<Vec<PortBinding>>>>,
-}
-
-#[derive(Deserialize)]
-struct PortBinding {
-    #[serde(rename = "HostIp")]
-    host_ip: String,
-    #[serde(rename = "HostPort")]
-    host_port: String,
+    ports: Option<HashMap<String, Option<Vec<serde_json::Value>>>>,
 }
 
 #[derive(Deserialize)]
@@ -202,7 +267,110 @@ struct Image {
     id: String,
 }
 
-type EndpointCache = RwLock<HashMap<String, HashMap<u16, String>>>;
+struct LocalEndpoint {
+    url: String,
+    token: String,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for LocalEndpoint {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+impl LocalEndpoint {
+    fn bind(command: Arc<dyn DockerCommand>, id: String, port: u16) -> Result<Self> {
+        let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))?;
+        listener.set_nonblocking(true)?;
+        let url = format!("http://{}", listener.local_addr()?);
+        let listener = tokio::net::TcpListener::from_std(listener)?;
+        use rand_core::RngCore;
+        let mut token_bytes = [0u8; 32];
+        rand_core::OsRng.fill_bytes(&mut token_bytes);
+        let token = hex::encode(token_bytes);
+        let expected_token = token.clone();
+        let task = tokio::spawn(async move {
+            let mut connections = tokio::task::JoinSet::new();
+            let permits = Arc::new(tokio::sync::Semaphore::new(FORWARD_CONNECTION_LIMIT));
+            loop {
+                tokio::select! {
+                    accepted = listener.accept() => {
+                        let Ok((mut stream, _)) = accepted else { break; };
+                        let Ok(permit) = permits.clone().try_acquire_owned() else { continue; };
+                        let command = command.clone();
+                        let id = id.clone();
+                        let expected_token = expected_token.clone();
+                        connections.spawn(async move {
+                            let _permit = permit;
+                            match tokio::time::timeout(FORWARD_AUTH_TIMEOUT, forward_request(&mut stream, &expected_token)).await {
+                                Ok(Ok(request)) => {
+                                    let _ = tokio::time::timeout(FORWARD_TIMEOUT, command.forward(&id, port, stream, request)).await;
+                                }
+                                _ => {
+                                    let _ = stream.write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await;
+                                }
+                            }
+                        });
+                    }
+                    _ = connections.join_next(), if !connections.is_empty() => {}
+                }
+            }
+        });
+        Ok(Self { url, token, task })
+    }
+}
+
+async fn forward_request(stream: &mut tokio::net::TcpStream, token: &str) -> Result<Vec<u8>> {
+    use p256::elliptic_curve::subtle::ConstantTimeEq;
+    let mut received = Vec::new();
+    loop {
+        let mut buffer = [0u8; 1024];
+        let count = stream.read(&mut buffer).await?;
+        ensure!(count > 0, "management request ended before headers");
+        received.extend_from_slice(&buffer[..count]);
+        ensure!(
+            received.len() <= FORWARD_HEADER_LIMIT,
+            "management headers exceed limit"
+        );
+        let mut headers = [httparse::EMPTY_HEADER; 64];
+        let mut request = httparse::Request::new(&mut headers);
+        let httparse::Status::Complete(body_start) = request.parse(&received)? else {
+            continue;
+        };
+        let supplied: Vec<_> = request
+            .headers
+            .iter()
+            .filter(|header| header.name.eq_ignore_ascii_case(FORWARD_TOKEN_HEADER))
+            .collect();
+        ensure!(
+            supplied.len() == 1 && bool::from(supplied[0].value.ct_eq(token.as_bytes())),
+            "management forwarding authorization refused"
+        );
+        let mut forwarded = format!(
+            "{} {} HTTP/1.{}\r\n",
+            request.method.context("missing method")?,
+            request.path.context("missing path")?,
+            request.version.context("missing version")?
+        )
+        .into_bytes();
+        for header in request
+            .headers
+            .iter()
+            .filter(|header| !header.name.eq_ignore_ascii_case(FORWARD_TOKEN_HEADER))
+        {
+            forwarded.extend_from_slice(header.name.as_bytes());
+            forwarded.extend_from_slice(b": ");
+            forwarded.extend_from_slice(header.value);
+            forwarded.extend_from_slice(b"\r\n");
+        }
+        forwarded.extend_from_slice(b"\r\n");
+        forwarded.extend_from_slice(&received[body_start..]);
+        return Ok(forwarded);
+    }
+}
+
+type EndpointCache = RwLock<HashMap<String, HashMap<u16, LocalEndpoint>>>;
 
 pub struct DockerRuntime {
     config: DockerConfig,
@@ -275,7 +443,6 @@ impl DockerRuntime {
                 "refusing a container outside this runtime namespace"
             );
             normalize_identity(&container.id)?;
-            self.cache_endpoints(container)?;
         }
         Ok(containers)
     }
@@ -313,39 +480,41 @@ impl DockerRuntime {
     }
 
     fn cache_endpoints(&self, container: &Container) -> Result<()> {
-        let mut endpoints = HashMap::new();
-        if let Some(ports) = &container.network_settings.ports {
-            for (port, bindings) in ports {
-                let Some(port) = port
-                    .strip_suffix("/tcp")
-                    .and_then(|value| value.parse::<u16>().ok())
-                else {
-                    continue;
-                };
-                if let Some(bindings) = bindings {
-                    for binding in bindings {
-                        ensure!(
-                            binding.host_ip == "127.0.0.1",
-                            "refusing a runtime port exposed beyond localhost"
-                        );
-                        let host_port: u16 = binding
-                            .host_port
-                            .parse()
-                            .context("invalid published port")?;
-                        ensure!(host_port > 0, "Docker returned an invalid published port");
-                        endpoints.insert(port, format!("http://127.0.0.1:{host_port}"));
-                    }
-                }
-            }
-        }
-        self.endpoints
+        let mut cache = self
+            .endpoints
             .write()
-            .map_err(|_| anyhow::anyhow!("runtime endpoint cache poisoned"))?
-            .insert(container.id.clone(), endpoints);
+            .map_err(|_| anyhow::anyhow!("runtime endpoint cache poisoned"))?;
+        let published = container.has_published_ports();
+        if published || !container.state.running {
+            cache.remove(&container.id);
+            ensure!(
+                !published,
+                "refusing a runtime with published container ports"
+            );
+            return Ok(());
+        }
+        if cache.contains_key(&container.id) {
+            return Ok(());
+        }
+        let mut endpoints = HashMap::new();
+        for port in [
+            agentkeys_protocol::sandbox_env::SANDBOX_BRIDGE_PORT,
+            agentkeys_protocol::sandbox_env::SANDBOX_DAEMON_PORT,
+        ] {
+            endpoints.insert(
+                port,
+                LocalEndpoint::bind(self.command.clone(), container.id.clone(), port)?,
+            );
+        }
+        cache.insert(container.id.clone(), endpoints);
         Ok(())
     }
 
     async fn remove(&self, container: &Container) -> Result<()> {
+        ensure!(
+            !container.has_published_ports(),
+            "refusing a runtime with published container ports"
+        );
         self.command
             .execute(
                 &[
@@ -610,6 +779,7 @@ impl SandboxRuntime for DockerRuntime {
                 "container actor ownership mismatch"
             );
             if container.state.running {
+                self.cache_endpoints(container)?;
                 return Ok(EnsureOutcome {
                     sandbox_id: container.id.clone(),
                     created: false,
@@ -653,12 +823,6 @@ impl SandboxRuntime for DockerRuntime {
             "--tmpfs=/home/agent:rw,nosuid,nodev,uid=1000,gid=1000,size=512m".into(),
             "--env-file=/dev/stdin".into(),
         ];
-        for port in [
-            agentkeys_protocol::sandbox_env::SANDBOX_BRIDGE_PORT,
-            agentkeys_protocol::sandbox_env::SANDBOX_DAEMON_PORT,
-        ] {
-            arguments.extend(["--publish".into(), format!("127.0.0.1::{port}")]);
-        }
         arguments.push(image.id);
         let output = self.command.execute(&arguments, Some(input)).await?;
         let id = normalize_identity(std::str::from_utf8(&output)?.trim())?;
@@ -668,6 +832,7 @@ impl SandboxRuntime for DockerRuntime {
         let containers = self.inspect(std::slice::from_ref(&id)).await?;
         let container = containers.first().context("created container missing")?;
         ensure!(container.state.running, "created container is not running");
+        self.cache_endpoints(container)?;
         Ok(EnsureOutcome {
             sandbox_id: id.clone(),
             created: true,
@@ -678,9 +843,11 @@ impl SandboxRuntime for DockerRuntime {
 
     async fn live_for_device(&self, device_key_hash: &str) -> Result<Vec<LiveRuntime>> {
         let device = normalize_identity(device_key_hash)?;
-        Ok(self
-            .containers_for_device(&device)
-            .await?
+        let containers = self.containers_for_device(&device).await?;
+        for container in &containers {
+            self.cache_endpoints(container)?;
+        }
+        Ok(containers
             .into_iter()
             .filter(|container| container.state.running)
             .map(|container| LiveRuntime {
@@ -706,14 +873,14 @@ impl SandboxRuntime for DockerRuntime {
 
     async fn booted_image_info(&self, sandbox_id: &str) -> Result<Option<InstanceImageInfo>> {
         let id = normalize_identity(sandbox_id)?;
-        Ok(self
-            .inspect(&[id])
-            .await?
-            .first()
-            .map(|container| InstanceImageInfo {
-                image_id: container.image.clone(),
-                image_ref: container.config.image.clone(),
-            }))
+        let containers = self.inspect(&[id]).await?;
+        for container in &containers {
+            self.cache_endpoints(container)?;
+        }
+        Ok(containers.first().map(|container| InstanceImageInfo {
+            image_id: container.image.clone(),
+            image_ref: container.config.image.clone(),
+        }))
     }
 
     fn instance_endpoint(
@@ -722,7 +889,11 @@ impl SandboxRuntime for DockerRuntime {
         port: u16,
     ) -> Option<(String, Vec<(String, String)>)> {
         let endpoints = self.endpoints.read().ok()?;
-        Some((endpoints.get(sandbox_id)?.get(&port)?.clone(), Vec::new()))
+        let endpoint = endpoints.get(sandbox_id)?.get(&port)?;
+        Some((
+            endpoint.url.clone(),
+            vec![(FORWARD_TOKEN_HEADER.into(), endpoint.token.clone())],
+        ))
     }
 }
 
@@ -773,7 +944,12 @@ mod tests {
         format!("sha256:{}", hex::encode([4; 32]))
     }
 
-    fn container(namespace: &str, actor: &str, host: &str, running: bool) -> serde_json::Value {
+    fn container(
+        namespace: &str,
+        actor: &str,
+        host: Option<&str>,
+        running: bool,
+    ) -> serde_json::Value {
         json!({
             "Id": container_id(), "Image": image_id(),
             "Config": {"Image": "local:test", "Labels": {
@@ -781,13 +957,30 @@ mod tests {
             }},
             "State": {"Running": running, "Status": if running { "running" } else { "exited" }},
             "NetworkSettings": {"Ports": {
-                format!("{}/tcp", agentkeys_protocol::sandbox_env::SANDBOX_BRIDGE_PORT): [{"HostIp": host, "HostPort": "18090"}],
+                format!("{}/tcp", agentkeys_protocol::sandbox_env::SANDBOX_BRIDGE_PORT): host.map(|host| vec![json!({"HostIp": host, "HostPort": "18090"})]),
             }},
         })
     }
 
     #[async_trait]
     impl DockerCommand for FakeEngine {
+        async fn forward(
+            &self,
+            id: &str,
+            port: u16,
+            mut stream: tokio::net::TcpStream,
+            request: Vec<u8>,
+        ) -> Result<()> {
+            self.calls.lock().unwrap().push((
+                vec!["forward".into(), id.into(), port.to_string()],
+                Some(request),
+            ));
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+                .await?;
+            Ok(())
+        }
+
         async fn execute(&self, arguments: &[String], input: Option<Vec<u8>>) -> Result<Vec<u8>> {
             tokio::task::yield_now().await;
             self.calls.lock().unwrap().push((arguments.to_vec(), input));
@@ -812,7 +1005,7 @@ mod tests {
                 }
                 ("container", "create") => {
                     *self.container.lock().unwrap() =
-                        Some(container("test-runtime", &actor(), "127.0.0.1", false));
+                        Some(container("test-runtime", &actor(), None, false));
                     container_id()
                 }
                 ("container", "start") => {
@@ -859,6 +1052,64 @@ mod tests {
             locks: DelegateLocks::default(),
             endpoints: RwLock::default(),
         }
+    }
+
+    #[tokio::test]
+    async fn host_forwarding_requires_its_own_proof_and_does_not_forward_that_proof() {
+        let engine = Arc::new(FakeEngine::default());
+        let endpoint = LocalEndpoint::bind(engine.clone(), container_id(), 8080).unwrap();
+        let other = LocalEndpoint::bind(engine.clone(), container_id(), 8081).unwrap();
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(2))
+            .build()
+            .unwrap();
+        for proof in [None, Some(other.token.as_str())] {
+            let mut request = client.get(&endpoint.url);
+            if let Some(proof) = proof {
+                request = request.header(FORWARD_TOKEN_HEADER, proof);
+            }
+            assert_eq!(request.send().await.unwrap().status(), 403);
+        }
+        for headers in [
+            format!(
+                "{FORWARD_TOKEN_HEADER}: {}\r\n{FORWARD_TOKEN_HEADER}: {}\r\n",
+                endpoint.token, endpoint.token
+            ),
+            format!("x-oversized: {}\r\n", "a".repeat(FORWARD_HEADER_LIMIT)),
+        ] {
+            let address = endpoint.url.strip_prefix("http://").unwrap();
+            let mut connection = tokio::net::TcpStream::connect(address).await.unwrap();
+            connection
+                .write_all(format!("GET / HTTP/1.1\r\nHost: localhost\r\n{headers}\r\n").as_bytes())
+                .await
+                .unwrap();
+            let mut response = [0u8; 128];
+            let size = connection.read(&mut response).await.unwrap();
+            assert!(response[..size].starts_with(b"HTTP/1.1 403 Forbidden\r\n"));
+        }
+        assert!(engine.calls.lock().unwrap().is_empty());
+        let response = client
+            .post(format!("{}/probe?case=positive", endpoint.url))
+            .header(FORWARD_TOKEN_HEADER, &endpoint.token)
+            .body("synthetic-body")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        assert_eq!(response.text().await.unwrap(), "ok");
+        {
+            let calls = engine.calls.lock().unwrap();
+            assert_eq!(calls.len(), 1);
+            let forwarded = std::str::from_utf8(calls[0].1.as_ref().unwrap()).unwrap();
+            assert!(forwarded.starts_with("POST /probe?case=positive HTTP/1.1"));
+            assert!(!forwarded.contains(&endpoint.token));
+            assert!(!forwarded.contains(FORWARD_TOKEN_HEADER));
+        }
+        let url = endpoint.url.clone();
+        drop(endpoint);
+        tokio::task::yield_now().await;
+        assert!(client.get(url).send().await.is_err());
     }
 
     fn test_identity_environment() -> Vec<(String, String)> {
@@ -944,10 +1195,13 @@ mod tests {
         let input = std::str::from_utf8(input.as_ref().unwrap()).unwrap();
         assert!(input.contains("AGENTKEYS_BRIDGE_TOKEN=test-only-in-memory"));
         assert!(input.contains("AGENTKEYS_CHAIN=anvil"));
-        assert_eq!(
-            runtime.instance_mgmt_endpoint(&container_id()).unwrap().0,
-            "http://127.0.0.1:18090"
-        );
+        assert!(!arguments
+            .iter()
+            .any(|argument| argument.starts_with("--publish")));
+        let endpoint = runtime.instance_mgmt_endpoint(&container_id()).unwrap();
+        assert!(endpoint.0.starts_with("http://127.0.0.1:"));
+        assert_eq!(endpoint.1[0].0, FORWARD_TOKEN_HEADER);
+        assert_eq!(endpoint.1[0].1.len(), 64);
     }
 
     #[tokio::test]
@@ -1008,12 +1262,8 @@ mod tests {
     #[tokio::test]
     async fn foreign_actor_is_denied_without_create_or_delete() {
         let engine = Arc::new(FakeEngine::default());
-        *engine.container.lock().unwrap() = Some(container(
-            "test-runtime",
-            &hex::encode([9; 32]),
-            "127.0.0.1",
-            true,
-        ));
+        *engine.container.lock().unwrap() =
+            Some(container("test-runtime", &hex::encode([9; 32]), None, true));
         let runtime = runtime(engine.clone());
         let creates = Arc::new(AtomicUsize::new(0));
         let error = runtime
@@ -1039,8 +1289,13 @@ mod tests {
     #[tokio::test]
     async fn teardown_never_removes_foreign_namespace_or_nonlocal_port() {
         for (namespace, host, expected_error) in [
-            ("foreign", "127.0.0.1", "outside this runtime namespace"),
-            ("test-runtime", "0.0.0.0", "beyond localhost"),
+            ("foreign", None, "outside this runtime namespace"),
+            ("test-runtime", Some("0.0.0.0"), "published container ports"),
+            (
+                "test-runtime",
+                Some("127.0.0.1"),
+                "published container ports",
+            ),
         ] {
             let engine = Arc::new(FakeEngine::default());
             *engine.container.lock().unwrap() = Some(container(namespace, &actor(), host, true));
@@ -1058,8 +1313,7 @@ mod tests {
                 .all(|(arguments, _)| arguments[1] != "rm"));
         }
         let engine = Arc::new(FakeEngine::default());
-        *engine.container.lock().unwrap() =
-            Some(container("test-runtime", &actor(), "127.0.0.1", true));
+        *engine.container.lock().unwrap() = Some(container("test-runtime", &actor(), None, true));
         assert_eq!(
             runtime(engine.clone())
                 .kill_for_device(&device())
@@ -1073,8 +1327,7 @@ mod tests {
     #[tokio::test]
     async fn missing_image_preserves_the_stopped_container() {
         let engine = Arc::new(FakeEngine::default());
-        *engine.container.lock().unwrap() =
-            Some(container("test-runtime", &actor(), "127.0.0.1", false));
+        *engine.container.lock().unwrap() = Some(container("test-runtime", &actor(), None, false));
         engine.image_missing.store(true, Ordering::SeqCst);
         let result = runtime(engine.clone())
             .ensure_for_delegate_with_envs(
@@ -1157,7 +1410,7 @@ mod tests {
         ] {
             let engine = Arc::new(FakeEngine::default());
             *engine.container.lock().unwrap() =
-                Some(container("test-runtime", &actor(), "127.0.0.1", false));
+                Some(container("test-runtime", &actor(), None, false));
             let mut environment = test_identity_environment();
             environment.retain(|(name, _)| name != missing);
             let error = runtime(engine.clone())
