@@ -1,6 +1,6 @@
 The local owner CLI registers a real P-256 smart account and signs scope grants and revocations against the deployed contracts. It requires the [owned local chain](./local-chain.md) and a built public CLI. No browser or company account is needed.
 
-This implements owner registration, device/delegate binding and scope mutation. Broker login, storage access and the complete running-agent journey remain under development. A scope grant alone does not create an agent or bypass its independent device authorization.
+This implements owner registration, device/delegate binding, scope mutation and headless broker login. Complete storage/session orchestration and the running-agent journey remain under development. A scope grant alone does not create an agent or bypass its independent device authorization.
 
 ## Register an owner
 
@@ -14,6 +14,21 @@ cargo build -p agentkeys-cli
 The command generates a fresh operator identity, software passkey and owner request-signing key (K10) under the private local state directory. It deploys the counterfactual P256Account through EntryPoint and registers the actual K10 device-key hash as its master device in one passkey-signed operation. The passkey authorizes contract mutations; K10 signs protected data requests. The local deployer only pays for submitting the operation. Anvil supplies disposable development funds to the account.
 
 The result includes the operator identity, account, device-key hash and verified operation/transaction hashes. Repeating the command verifies the same on-chain binding without another transaction, including the K10, actor, owner, master tier, roles and passkey coordinates. The same identity survives a normal chain stop/start. A different contract deployment, missing original key or mismatched request key is rejected; no replacement key silently takes over an existing owner.
+
+## Log in to the local broker
+
+Start the public broker with the same generated chain profile, its own fresh signing keys and explicit private state paths. Complete service supervision is still under development; the login command connects to an already running broker.
+
+Local, from the public checkout in the same state directory used for registration:
+
+```bash
+./terrier owner login --name developer \
+  --broker-url "${LOCAL_BROKER_URL:?Set the running loopback broker URL}"
+```
+
+The CLI verifies the local chain and active owner request-key binding, checks that the broker challenge names the registered account, and signs the challenge with the existing software passkey. The broker verifies that assertion against the deployed account and K11 verifier. It issues the existing session type; there is no test issuer or authentication bypass in this flow.
+
+The session is stored as an owner-only `owners/<name>/session.json` development file. The CLI prints account, device-key hash and expiry metadata, never the bearer. A failed challenge, rejected passkey or unsafe output file leaves the previous session file unchanged. A missing key is not regenerated. The broker URL must be loopback HTTP, with proxies and redirects disabled in the client. This file-based development session does not provide production custody or a remembered browser session. Keep it outside source artifacts and private alongside the development keys.
 
 ## Grant and revoke scope
 
@@ -75,6 +90,7 @@ Local, from the public checkout after downloading contract dependencies, run the
 ```bash
 python3 scripts/tests/qualify_local_owner.py
 python3 scripts/tests/qualify_local_binding.py
+python3 scripts/tests/qualify_local_login.py
 python3 scripts/tests/qualify_local_credentials.py
 ```
 
@@ -83,3 +99,5 @@ It covers real registration, idempotence, grant/revoke, tampered-signature rejec
 The credential qualifier uses the actual worker executable, SQLite service and local contracts. It exercises owner store/fetch, delegated fetch, worker restart, malformed/missing proof and broker-signed unauthorized requests, then real scope and device revocations while owner access stays available. Its capability issuer is a test fixture; real broker session and mint integration remains open.
 
 The binding qualification uses actual contracts for device and delegate registration, slot accounting, proof/lineage rejection without chain changes, channel-only device grants, atomic unbind, existing scope revocation and restart persistence. It also verifies that public enrollment output contains no private key.
+
+The login qualification starts the actual broker against fresh contracts, checks the resulting authenticated session, rejects replayed assertions and another owner's passkey, preserves the previous session on failure, refuses missing keys and remote endpoints, and verifies login/session persistence across broker restart without chain writes. It is an explicit qualification, separate from the fast local unit tests.

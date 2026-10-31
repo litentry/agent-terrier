@@ -437,17 +437,14 @@ pub fn build_accept_response(
     Ok(assembled.into_build_response(&cfg.entry_point, cfg.chain_id))
 }
 
-/// Chain-READ config for handlers that only query state (no submit key): the
-/// passkey re-auth verb (#242) needs rpc + registry but must not fail because
-/// the sponsor submit key is absent. Same env surface as `load_accept_config`.
+/// Read-only chain coordinates from the shared profile; no submitter key required.
 pub(crate) fn load_chain_read_config() -> Result<(String, [u8; 20]), String> {
-    let rpc_url = std::env::var("AGENTKEYS_CHAIN_RPC_HTTP")
-        .map_err(|_| "env AGENTKEYS_CHAIN_RPC_HTTP not set".to_string())?;
+    let profile = crate::chain_config::profile()?;
     let registry = addr20(
-        &env_profile("SIDECAR_REGISTRY_ADDRESS")?,
-        "SIDECAR_REGISTRY_ADDRESS",
+        &crate::chain_config::contract(&profile, "SidecarRegistry")?,
+        "SidecarRegistry",
     )?;
-    Ok((rpc_url, registry))
+    Ok((profile.rpc.http, registry))
 }
 
 pub(crate) fn aerr(

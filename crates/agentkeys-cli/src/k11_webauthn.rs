@@ -1922,6 +1922,29 @@ pub fn software_webauthn_sign(
     ))
 }
 
+pub fn software_browser_assertion(
+    development: &crate::development_signing::DevelopmentSigning,
+    key_file: &str,
+    challenge: &str,
+    rp_id: &str,
+    credential_id: &[u8],
+) -> Result<agentkeys_backend_client::protocol::hosted_signer::BrowserAssertion, WebauthnError> {
+    let (authenticator_data, client_data_json, _, r, s) =
+        software_webauthn_sign(development, key_file, challenge, rp_id)?;
+    let decode =
+        |value: &str| hex::decode(value).map_err(|error| WebauthnError::Cbor(error.to_string()));
+    let signature = Signature::from_slice(&decode(&format!("{r}{s}"))?)
+        .map_err(|error| WebauthnError::SigParse(error.to_string()))?;
+    Ok(
+        agentkeys_backend_client::protocol::hosted_signer::BrowserAssertion {
+            authenticator_data: URL_SAFE_NO_PAD.encode(decode(&authenticator_data)?),
+            client_data_json: URL_SAFE_NO_PAD.encode(decode(&client_data_json)?),
+            signature: URL_SAFE_NO_PAD.encode(signature.to_der().as_bytes()),
+            credential_id: URL_SAFE_NO_PAD.encode(credential_id),
+        },
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -58,11 +58,15 @@ def device_identity(repository, state, name, operator, label, kind):
     return {"development_only":True, "enrollment_file":str(enrollment_path), "enrollment":enrollment}
 
 
-def execute(repository, state, action, name, actor=None, services=None, read_only=False, enrollment_file=None):
+def execute(repository, state, action, name, actor=None, services=None, read_only=False, enrollment_file=None, broker_url=None):
     validate_name(name)
     services = services or []
-    if action not in ("register", "grant", "revoke", "bind", "unbind"):
+    if action not in ("register", "grant", "revoke", "bind", "unbind", "login"):
         raise ValueError("Unsupported owner operation")
+    if (action == "login") != bool(broker_url):
+        raise ValueError("Only owner login requires --broker-url")
+    if action == "login" and (actor or services or read_only or enrollment_file):
+        raise ValueError("Owner login does not accept scope or binding arguments")
     if action == "register" and (actor or services or read_only):
         raise ValueError("Owner registration does not accept scope arguments")
     if action in ("grant", "revoke") and not actor:
@@ -101,8 +105,14 @@ def execute(repository, state, action, name, actor=None, services=None, read_onl
         if identity.get("profile_identity") != fingerprint or identity.get("development_only") is not True:
             raise ValueError("Owner belongs to another contract deployment; refusing key reuse")
     else:
+        if action != "register":
+            raise ValueError("Existing owner identity is missing; restore it before continuing")
         identity = {"operator_omni":"0x" + secrets.token_hex(32), "profile_identity":fingerprint, "development_only":True}
         local_state.write_json(identity_path, identity)
+    if action == "login":
+        return run_cli(repository, profile_path, ["owner-login", "--operator-omni", identity["operator_omni"],
+            "--key-file", str(directory / "passkey.pem"), "--device-key-file", str(directory / "device.key"),
+            "--broker-url", broker_url, "--session-file", str(directory / "session.json")])
     beneficiary, keystore, password_file = deployment.developer_wallet(state)
     arguments = ["prepare-owner", action, "--operator-omni", identity["operator_omni"],
                  "--key-file", str(directory / "passkey.pem"), "--device-key-file", str(directory / "device.key"),

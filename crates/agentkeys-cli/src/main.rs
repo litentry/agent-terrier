@@ -750,6 +750,10 @@ enum ChainAction {
     )]
     PrepareOwner(agentkeys_cli::local_owner::OwnerOptions),
     #[command(
+        about = "Authenticate a local owner passkey and save its session in a protected development file"
+    )]
+    OwnerLogin(agentkeys_cli::local_owner::OwnerLoginOptions),
+    #[command(
         about = "Verify a prepared owner operation from stdin against its actual chain receipt"
     )]
     VerifyOwner {
@@ -1383,6 +1387,9 @@ async fn cmd_chain(ctx: &CommandContext, action: &ChainAction) -> anyhow::Result
             let plan = agentkeys_cli::local_owner::prepare(ctx, options).await?;
             Ok(serde_json::to_string(&plan)?)
         }
+        ChainAction::OwnerLogin(options) => Ok(serde_json::to_string(
+            &agentkeys_cli::local_owner::login(ctx, options).await?,
+        )?),
         ChainAction::VerifyOwner { transaction } => {
             use std::io::Read;
             const MAX_OWNER_PLAN_BYTES: u64 = 1024 * 1024;

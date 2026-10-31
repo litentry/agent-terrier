@@ -28,10 +28,8 @@
 //! master account address. The JWT is scoped to that omni and nothing else.
 
 use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
-use serde::Deserialize;
 use serde_json::json;
 
-use crate::accept_assertion::BrowserAssertion;
 use crate::error::BrokerError;
 use crate::handlers::accept::{call_operator_master_wallet, load_chain_read_config};
 use crate::handlers::auth::passkey_start::{now_unix_i64, parse_omni_0x64, PASSKEY_NONCE_PREFIX};
@@ -39,11 +37,7 @@ use crate::jwt::issue::mint_session_jwt;
 use crate::state::SharedState;
 use crate::storage::ConsumeOutcome;
 
-#[derive(Debug, Deserialize)]
-pub struct PasskeyVerifyRequest {
-    pub challenge: String,
-    pub assertion: BrowserAssertion,
-}
+pub use agentkeys_protocol::hosted_signer::HostedPasskeyVerify as PasskeyVerifyRequest;
 
 fn parse_challenge_binding(binding: &str) -> Result<(String, [u8; 20]), BrokerError> {
     let (omni, account) = binding.split_once(':').ok_or_else(|| {
@@ -123,14 +117,7 @@ pub async fn passkey_verify(
     )
     .await?;
 
-    // 4. Mint the session JWT for the chain-verified omni — with the omni claim
-    //    in the BARE lowercase 64-hex form, byte-identical to the email-flow J1s.
-    //    `/v1/mint-oidc-jwt` copies `agentkeys.omni_account` into the AWS
-    //    principal tag, and the bucket policies interpolate it into the bare
-    //    `bots/<omni>/` S3 prefixes — a `0x`-prefixed claim tags the STS session
-    //    with a `bots/0x<omni>/` prefix that matches nothing, so every
-    //    config/memory read AccessDenied'd after a passkey re-login (real
-    //    2026-06-10 incident).
+    // Session claims use the canonical bare lowercase omni.
     let omni_bare = omni.trim_start_matches("0x").to_string();
     let account_hex = format!("0x{}", hex::encode(account));
     let ttl_seconds = std::env::var(crate::env::BROKER_SESSION_JWT_TTL_SECONDS)
@@ -165,6 +152,7 @@ pub async fn passkey_verify(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::accept_assertion::BrowserAssertion;
     use crate::accept_assertion::{decode_assertion_parts, AssertionParts};
     use crate::account_signer::{
         decode_hex_result, decode_signer_row, encode_verify_assertion_call, word_at,

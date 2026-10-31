@@ -2,6 +2,7 @@ pub mod accept_assertion;
 pub mod audit;
 pub mod auth;
 pub mod boot;
+mod chain_config;
 pub mod config;
 pub mod cors;
 pub mod docker_runtime;

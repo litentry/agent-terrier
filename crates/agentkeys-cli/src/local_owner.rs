@@ -52,6 +52,111 @@ pub struct OwnerOptions {
     pub call_gas: u128,
 }
 
+#[derive(clap::Args)]
+pub struct OwnerLoginOptions {
+    #[arg(long)]
+    pub operator_omni: String,
+    #[arg(long)]
+    pub key_file: String,
+    #[arg(long)]
+    pub device_key_file: String,
+    #[arg(long, default_value = "localhost")]
+    pub rp_id: String,
+    #[arg(long)]
+    pub broker_url: String,
+    #[arg(long)]
+    pub session_file: std::path::PathBuf,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct LocalOwnerSession {
+    pub development_only: bool,
+    pub broker_url: String,
+    pub account: String,
+    pub device_key_hash: String,
+    pub session: agentkeys_backend_client::protocol::auth::MasterSession,
+}
+
+pub async fn login(context: &CommandContext, options: &OwnerLoginOptions) -> Result<Value> {
+    use agentkeys_backend_client::protocol::hosted_signer::HostedPasskeyVerify;
+    let chain = LocalChain::connect(context).await?;
+    chain
+        .development
+        .require_local_service(&options.broker_url)?;
+    let operator = fixed::<32>(&options.operator_omni)?;
+    let registry = chain.contract("SidecarRegistry")?;
+    let registered = chain
+        .call(&registry, &operator_master_wallet_calldata(&operator))
+        .await?;
+    ensure!(
+        registered != [0; 32] && registered[..12] == [0; 12],
+        "owner has no registered account"
+    );
+    let account = hex_value(&registered[12..]);
+    let request_key = agentkeys_core::device_crypto::DeviceKey::load(&options.device_key_file)?;
+    let device_key_hash = request_key.device_key_hash()?;
+    let device = chain
+        .device(&registry, &fixed::<32>(&device_key_hash)?)
+        .await?;
+    ensure!(
+        device.is_registered()
+            && !device.revoked
+            && device.operator_omni == operator
+            && device.actor_omni == operator
+            && device.tier == TIER_MASTER
+            && device.roles & LOCAL_MASTER_ROLES == LOCAL_MASTER_ROLES,
+        "owner request key does not match the active on-chain master binding"
+    );
+    let broker = agentkeys_web_core::broker::BrokerClient::with_client(
+        chain.client.clone(),
+        &options.broker_url,
+    );
+    let challenge = broker
+        .hosted_passkey_start(&hex_value(&operator))
+        .await
+        .map_err(|_| anyhow!("local broker refused the owner login challenge"))?;
+    ensure!(
+        fixed::<20>(&challenge.account)? == registered[12..],
+        "broker login challenge names a different account"
+    );
+    let assertion = crate::k11_webauthn::software_browser_assertion(
+        &chain.development,
+        &options.key_file,
+        &challenge.challenge,
+        &options.rp_id,
+        &master_cred_id_hash(&operator),
+    )?;
+    let session = broker
+        .hosted_passkey_finish(&HostedPasskeyVerify {
+            challenge: challenge.challenge,
+            assertion,
+        })
+        .await
+        .map_err(|_| anyhow!("local broker rejected the owner passkey assertion"))?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_secs();
+    ensure!(
+        fixed::<32>(&session.omni_account)? == operator
+            && session.expires_at > now
+            && !session.session_jwt.is_empty(),
+        "broker returned an invalid owner session"
+    );
+    let receipt = json!({"development_only":true,"operator_omni":hex_value(&operator),
+        "account":account,"device_key_hash":device_key_hash,"expires_at":session.expires_at,
+        "session_file":options.session_file});
+    let record = LocalOwnerSession {
+        development_only: true,
+        broker_url: options.broker_url.clone(),
+        account,
+        device_key_hash,
+        session,
+    };
+    let encoded = zeroize::Zeroizing::new(serde_json::to_vec(&record)?);
+    agentkeys_core::protected_file::replace_atomic(&options.session_file, &encoded)?;
+    Ok(receipt)
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct OwnerPlan {
     pub development_only: bool,
