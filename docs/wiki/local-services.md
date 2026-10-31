@@ -67,7 +67,7 @@ Local, after building the binaries and preparing contract dependencies:
 ```bash
 python3 -m unittest discover -s scripts/tests
 python3 scripts/tests/qualify_local_services.py
-python3 scripts/tests/qualify_local_credentials.py
+python3 scripts/tests/qualify_local_credential_cli.py
 ```
 
 The explicit qualifier starts actual contracts and all nine service processes, registers and logs in an owner, stores/fetches a credential, and restarts the service group without replacing its keys or issuer. It checks missing-key and changed-deployment refusal, preserves an unrelated listener, injects a component startup failure, verifies cleanup and confirms the chain remains owned and running. It then restarts successfully and reads the same credential. This is separate from the fast default unit-test loop and from the remaining complete agent/model journey.
