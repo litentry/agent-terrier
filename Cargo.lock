@@ -363,6 +363,7 @@ version = "0.1.0"
 name = "agentkeys-memory-openviking"
 version = "0.1.0"
 dependencies = [
+ "agentkeys-protocol",
  "axum",
  "reqwest",
  "serde",
@@ -418,6 +419,7 @@ dependencies = [
  "serde",
  "serde_json",
  "ts-rs",
+ "url",
 ]
 
 [[package]]

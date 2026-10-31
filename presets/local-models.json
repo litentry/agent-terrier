@@ -13,6 +13,7 @@
   },
   "embedding": {
     "model": "nomic-embed-text:v1.5",
+    "dimension": 768,
     "digest": "0a109f422b47e3a30ba2b10eca18548e944e8a23073ee3f3e947efcf3c45e59f"
   }
 }

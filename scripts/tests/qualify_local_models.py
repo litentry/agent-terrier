@@ -124,6 +124,9 @@ def qualify(model_directory, binary, gate=False):
                     "--base-url",endpoint+"/v1"], env=environment, capture_output=True,text=True,timeout=600)
                 if result.returncode:
                     raise RuntimeError(result.stderr.strip())
+                capabilities = json.loads(result.stdout)
+                if capabilities["embedding_dimensions"] != recipe["embedding"]["dimension"]:
+                    raise ValueError("Observed embedding dimension differs from the pinned recipe")
                 probe_seconds = time.monotonic()-probe_started
                 relay_report = None
                 relay_seconds = None
@@ -139,6 +142,8 @@ def qualify(model_directory, binary, gate=False):
                     if len(reports) != 1:
                         raise RuntimeError("Missing relay capability report")
                     relay_report = reports[0]
+                    if relay_report["embedding_dimensions"] != recipe["embedding"]["dimension"]:
+                        raise ValueError("Relay embedding dimension differs from the pinned recipe")
                     relay_seconds = round(time.monotonic()-relay_started,3)
                 return {
                     "qualification":"local-model-capabilities", "external_network_denied":True,
@@ -149,7 +154,7 @@ def qualify(model_directory, binary, gate=False):
                     "model_bytes":sum(installed[recipe[key]["model"]]["size"] for key in ("chat","embedding")),
                     "runner_startup_seconds":round(startup_seconds,3),
                     "probe_seconds":round(probe_seconds,3),
-                    "peak_runner_process_rss_kib":peak_rss[0], "capabilities":json.loads(result.stdout),
+                    "peak_runner_process_rss_kib":peak_rss[0], "capabilities":capabilities,
                     "authenticated_relay":relay_report,
                     "relay_probe_seconds":relay_seconds,
                 }

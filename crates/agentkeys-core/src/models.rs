@@ -6,59 +6,21 @@ use serde_json::Value;
 
 pub mod qualification;
 
-pub fn local_recipe() -> &'static Value {
-    static RECIPE: std::sync::OnceLock<Value> = std::sync::OnceLock::new();
-    RECIPE.get_or_init(|| {
-        serde_json::from_str(include_str!("../../../presets/local-models.json"))
-            .expect("checked-in model recipe")
-    })
-}
+pub use agentkeys_protocol::model_config::{
+    default_base_url, default_chat_model, default_embedding_model, local_recipe,
+};
 
-pub fn default_base_url() -> &'static str {
-    local_recipe()["base_url"].as_str().expect("model endpoint")
-}
-pub fn default_chat_model() -> &'static str {
-    local_recipe()["chat"]["model"]
-        .as_str()
-        .expect("chat model")
-}
-pub fn default_embedding_model() -> &'static str {
-    local_recipe()["embedding"]["model"]
-        .as_str()
-        .expect("embedding model")
-}
 pub const CHAT_PATH: &str = "/chat/completions";
 pub const EMBEDDINGS_PATH: &str = "/embeddings";
 pub const MODEL_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 pub const MAX_MODEL_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 
 pub fn base_url(value: &str) -> Result<Url> {
-    let url = Url::parse(value).context("invalid model endpoint URL")?;
-    ensure!(
-        matches!(url.scheme(), "http" | "https")
-            && url.host_str().is_some()
-            && url.username().is_empty()
-            && url.password().is_none()
-            && url.query().is_none()
-            && url.fragment().is_none(),
-        "model endpoint must be HTTP(S), without embedded credentials, query or fragment"
-    );
-    Ok(url)
+    agentkeys_protocol::model_config::base_url(value).map_err(anyhow::Error::msg)
 }
 
 pub fn require_local_endpoint(value: &str) -> Result<()> {
-    let url = base_url(value)?;
-    let host = url.host_str().unwrap_or_default();
-    let local = host == "localhost"
-        || host
-            .trim_matches(['[', ']'])
-            .parse::<std::net::IpAddr>()
-            .is_ok_and(|address| address.is_loopback());
-    ensure!(
-        url.scheme() == "http" && local,
-        "local model qualification requires a loopback HTTP endpoint"
-    );
-    Ok(())
+    agentkeys_protocol::model_config::require_local_endpoint(value).map_err(anyhow::Error::msg)
 }
 
 pub struct ModelClient {
