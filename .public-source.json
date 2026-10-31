@@ -15,7 +15,9 @@
     "NOTICE",
     "README.md",
     "rust-toolchain.toml",
-    "terrier"
+    "terrier",
+    "packages/package.json",
+    "packages/package-lock.json"
   ],
   "directories": [
     ".github",
@@ -26,6 +28,7 @@
     "docs",
     "e2e/fixtures",
     "packages/agentkeys-dsh",
+    "packages/agent-terrier-runtime",
     "presets",
     "provisioner-scripts",
     "scripts"

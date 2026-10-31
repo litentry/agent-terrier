@@ -8,6 +8,7 @@
   "exports": {
     ".": "./lib/index.js",
     "./guard": "./lib/guard.js",
+    "./grants": "./lib/grants.js",
     "./answerer": "./lib/answerer.js",
     "./package.json": "./package.json",
     "./credentials": "./lib/credentials.js",
@@ -19,7 +20,8 @@
     "./actions": "./lib/actions.js",
     "./daemon-client": "./lib/daemon-client.js",
     "./presets": "./lib/presets.js",
-    "./sessions": "./lib/sessions.js"
+    "./sessions": "./lib/sessions.js",
+    "./runtime-config": "./lib/generated/model-runtime.js"
   },
   "files": [
     "lib/",
