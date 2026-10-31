@@ -11,6 +11,7 @@ pub mod inbox_curate;
 pub mod k11;
 pub mod k11_intent;
 pub mod k11_webauthn;
+pub mod local_data;
 pub mod local_owner;
 pub mod speech;
 

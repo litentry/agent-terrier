@@ -89,6 +89,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    #[command(about = "Use protected development owner state with local services")]
+    Local {
+        #[command(subcommand)]
+        action: LocalAction,
+    },
     #[command(about = "Qualify a local model server using actual inference")]
     Models {
         #[command(subcommand)]
@@ -1366,6 +1371,11 @@ enum AgentAction {
     },
 }
 
+#[derive(Subcommand)]
+enum LocalAction {
+    Credential(agentkeys_cli::local_data::CredentialOptions),
+}
+
 async fn cmd_chain(ctx: &CommandContext, action: &ChainAction) -> anyhow::Result<String> {
     use agentkeys_core::chain_profile::ChainProfile;
     match action {
@@ -1853,6 +1863,11 @@ async fn main() {
         },
         Commands::Chain { action } => cmd_chain(&ctx, action).await,
         Commands::Models { action } => cmd_models(action).await,
+        Commands::Local {
+            action: LocalAction::Credential(options),
+        } => agentkeys_cli::local_data::credential(&ctx, options)
+            .await
+            .and_then(|result| serde_json::to_string(&result).map_err(Into::into)),
         Commands::K11 { action } => cmd_k11(&ctx, action).await,
         Commands::Memory { action } => match action {
             MemoryAction::CanonicalGet {

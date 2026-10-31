@@ -91,8 +91,18 @@ impl BackendClient {
         audit_url: Option<String>,
         cred_url: Option<String>,
     ) -> Self {
+        Self::with_client(Client::new(), broker_url, memory_url, audit_url, cred_url)
+    }
+
+    pub fn with_client(
+        client: Client,
+        broker_url: Option<String>,
+        memory_url: Option<String>,
+        audit_url: Option<String>,
+        cred_url: Option<String>,
+    ) -> Self {
         Self {
-            client: Client::new(),
+            client,
             broker_url,
             memory_url,
             audit_url,

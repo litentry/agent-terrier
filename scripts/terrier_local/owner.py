@@ -33,6 +33,17 @@ def validate_name(name):
         raise ValueError("Name must be lowercase letters, digits or hyphens, starting with a letter")
 
 
+def read_identity(directory, fingerprint):
+    identity = local_state.read_json(directory / "identity.json")
+    if (not isinstance(identity, dict) or identity.get("profile_identity") != fingerprint
+            or identity.get("development_only") is not True):
+        raise ValueError("Owner belongs to another contract deployment; refusing key reuse")
+    operator = identity.get("operator_omni")
+    if not isinstance(operator, str) or not re.fullmatch(r"0x[0-9a-fA-F]{64}", operator):
+        raise ValueError("Invalid local owner identity")
+    return identity
+
+
 def device_identity(repository, state, name, operator, label, kind):
     validate_name(name)
     validate_name(label)
@@ -91,9 +102,7 @@ def execute(repository, state, action, name, actor=None, services=None, read_onl
     local_state.private_directory(directory)
     identity_path = directory / "identity.json"
     if identity_path.exists() or identity_path.is_symlink():
-        identity = local_state.read_json(identity_path)
-        if identity.get("profile_identity") != fingerprint or identity.get("development_only") is not True:
-            raise ValueError("Owner belongs to another contract deployment; refusing key reuse")
+        identity = read_identity(directory, fingerprint)
     else:
         if action != "register":
             raise ValueError("Existing owner identity is missing; restore it before continuing")
