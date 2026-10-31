@@ -19,6 +19,7 @@ agentkeys-types = { workspace = true }
 # pop_sig verify) + HDKD child_omni derivation. One source of truth across
 # daemon/CLI/broker.
 agentkeys-core = { workspace = true }
+zeroize = { workspace = true }
 # #369 — the shared DelegationPath wire type echoed into the minted cap-token
 # (one owner; the worker deserializes the SAME type).
 agentkeys-protocol = { workspace = true }

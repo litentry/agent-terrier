@@ -12,6 +12,7 @@ pub mod gate_admin;
 pub mod handlers;
 pub mod identity;
 pub mod jwt;
+mod key_file;
 pub mod lease_sweeper;
 pub mod login_access;
 pub mod metrics;
