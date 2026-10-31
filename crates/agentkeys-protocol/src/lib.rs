@@ -1,36 +1,9 @@
-//! The broker/worker wire protocol — the **single owner** of every request
-//! and response shape the cap-mint + worker chain serializes (issue #203).
-//!
-//! Pure serde, **no transport** (no reqwest/tokio/aws), so it compiles to
-//! `wasm32`: the native client `agentkeys-backend-client` re-exports it as
-//! `::protocol`, and the browser host `agentkeys-web-core` (wasm) depends on
-//! it directly. That split is the parity-ladder rung-3 move for the wire
-//! shapes — the browser and the native client share ONE definition and cannot
-//! drift (they used to: `ttl_seconds` was a required `u64` in backend-client
-//! but `Option<u64>` in web-core's own copy, and web-core's copy was missing
-//! the #76 K10 cap-PoP fields entirely). web-core must NOT depend on
-//! `agentkeys-backend-client` instead: that crate pulls `aws-sdk-sts` +
-//! `tokio` + native `reqwest` via the provisioner and breaks the wasm build
-//! (the `wasm32` CI gate in `e2e-ci.yml` enforces this).
-//!
-//! Before the one-owner discipline the same JSON was hand-typed in three
-//! places (the MCP backend, the daemon `ui_bridge`, and bash `jq -n` bodies in
-//! the harness), which is the structural cause of the drift bugs #200 fixed
-//! (`evm_address` vs `{address,chain_id}`, bare-vs-`0x` omni, per-namespace
-//! field shapes). Re-typing one of these in a second place is now either a
-//! compile error (Rust callers share these types) or a fixture mismatch (the
-//! harness gate diffs bash bodies against `agentkeys-backend-client`'s
-//! `fixtures` module).
-//!
-//! Naming follows arch.md's canonical-names rule: the field names here MUST
-//! match what `agentkeys_broker_server::handlers::cap` and the
-//! `agentkeys_worker_*` handlers deserialize. We mirror by hand (not a shared
-//! struct dep) because the broker/worker are heavy binaries — but the mirror
-//! is now in ONE place, exercised end-to-end in the MCP server's
-//! `tests/three_acts.rs` and pinned by the backend-client fixtures.
+//! Transport-free shared wire contracts for native and browser clients, brokers and workers.
+//! Capability schemas live in `capability`; enforcement remains independent at each service.
 
 pub mod auth;
 pub mod browser_origins;
+pub mod capability;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -142,41 +115,36 @@ impl CapMintOp {
     }
 
     pub fn data_class(self) -> &'static str {
+        self.data_class_kind().as_str()
+    }
+
+    pub fn data_class_kind(self) -> capability::DataClass {
+        use capability::DataClass;
         match self {
-            Self::CredStore | Self::CredFetch => "credentials",
+            Self::CredStore | Self::CredFetch => DataClass::Credentials,
             Self::MemoryPut | Self::MemoryGet | Self::MemoryCanonicalGet | Self::MemoryAppend => {
-                "memory"
+                DataClass::Memory
             }
-            Self::ConfigStore | Self::ConfigFetch => "config",
-            Self::ChannelPublish | Self::ChannelSubscribe => "channel",
-            Self::SpeechUse => "speech",
+            Self::ConfigStore | Self::ConfigFetch => DataClass::Config,
+            Self::ChannelPublish | Self::ChannelSubscribe => DataClass::Channel,
+            Self::SpeechUse => DataClass::Speech,
         }
     }
 
-    /// The signed-cap `CapOp` snake_case string this endpoint mints — the value
-    /// that lands in `CapPayload.op` and must match the K10 cap-PoP preimage
-    /// (issue #76). Store-class endpoints → `"store"`, fetch-class → `"fetch"`.
-    /// Callers building the cap-PoP signature MUST use this so the worker's
-    /// recomputed preimage agrees byte-for-byte.
     pub fn op_str(self) -> &'static str {
+        self.cap_op().as_str()
+    }
+
+    pub fn cap_op(self) -> capability::CapOp {
+        use capability::CapOp;
         match self {
-            Self::CredStore | Self::MemoryPut | Self::ConfigStore => "store",
-            Self::CredFetch | Self::MemoryGet | Self::ConfigFetch => "fetch",
-            // #295 P1 — must match agentkeys_worker_creds::verify::CapOp::CanonicalFetch
-            // (and the broker's) so the K10 cap-PoP preimage agrees byte-for-byte.
-            Self::MemoryCanonicalGet => "canonical_fetch",
-            // #339 P2 — must match agentkeys_worker_creds::verify::CapOp::Append
-            // (and the broker's) so the K10 cap-PoP preimage agrees byte-for-byte.
-            Self::MemoryAppend => "append",
-            // #406 — must match agentkeys_worker_creds::verify::CapOp::ChannelPublish/
-            // ChannelSubscribe (and the broker's) so the K10 cap-PoP preimage agrees
-            // byte-for-byte. Direction is the signed op — a publish cap and a subscribe
-            // cap recover to DIFFERENT preimages even for the same channel.
-            Self::ChannelPublish => "channel_publish",
-            Self::ChannelSubscribe => "channel_subscribe",
-            // #441 — must match the broker's CapOp::SpeechUse and the worker
-            // mirror so the K10 cap-PoP preimage agrees byte-for-byte.
-            Self::SpeechUse => "speech_use",
+            Self::CredStore | Self::MemoryPut | Self::ConfigStore => CapOp::Store,
+            Self::CredFetch | Self::MemoryGet | Self::ConfigFetch => CapOp::Fetch,
+            Self::MemoryCanonicalGet => CapOp::CanonicalFetch,
+            Self::MemoryAppend => CapOp::Append,
+            Self::ChannelPublish => CapOp::ChannelPublish,
+            Self::ChannelSubscribe => CapOp::ChannelSubscribe,
+            Self::SpeechUse => CapOp::SpeechUse,
         }
     }
 }
@@ -236,21 +204,19 @@ pub struct DelegationPath {
 /// `agentkeys-backend-client`) from an injected `DeviceKey`, NOT hand-set by
 /// callers.
 ///
-/// `ttl_seconds` is `Option` + `skip_serializing_if` to mirror the broker's
-/// `#[serde(default = "default_ttl_seconds")]`: `None` omits the field so the
-/// broker applies its default (300s, clamped 60..1800); native callers coming
-/// from [`CapMintRequest`] always send `Some(..)` (wire-identical to before).
-/// This is the SINGLE on-wire definition, so the browser and the native client
-/// can no longer drift on it — previously each crate had its own copy and they
-/// diverged on this very field (the bug class #203 closed for the chain, now
-/// extended to the browser).
+/// Missing TTL selects the shared broker default; an explicit null is invalid.
+/// Native and browser clients serialize this type; the broker deserializes it directly.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BrokerCapRequest {
     pub operator_omni: String,
     pub actor_omni: String,
     pub service: String,
     pub device_key_hash: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "capability::deserialize_optional_ttl"
+    )]
     pub ttl_seconds: Option<u64>,
     // The K10 cap-PoP is OPTIONAL on the wire (issue #76 staged rollout): a caller
     // that holds the actor's K10 signs (the broker validates + the worker
@@ -273,9 +239,8 @@ pub struct BrokerCapRequest {
     pub delegation_path: Option<DelegationPath>,
 }
 
-/// Opaque cap-token blob — the broker signs it and the worker verifies the
-/// signature; this side never inspects the inside, so a JSON `Value` is the
-/// right type.
+/// Opaque client transport view. The signed schema is [`capability::CapToken`];
+/// forwarding clients do not deserialize or interpret its authority fields.
 pub type CapToken = Value;
 
 // ── memory worker (`/v1/memory/{put,get}`) ──────────────────────────────────

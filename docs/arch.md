@@ -40,6 +40,8 @@ The card schema has one owner in `agentkeys-protocol::card`. Its TypeScript outp
 
 Independent checks at broker, worker and storage boundaries remain necessary even when they share types and pure helpers.
 
+Signed capability operations, data classes, payloads and token envelopes have one owner in `agentkeys-protocol::capability`; broker and worker modules re-export those types. Native/browser cap requests and the broker receiver share `BrokerCapRequest`. A missing TTL uses the shared default; an explicit null remains invalid. Forwarding clients retain an opaque JSON transport alias, with no second token schema. Frozen payload-byte tests protect signature/audit compatibility; optional proof fields serialize using the issuer's omitted-field form while readers also accept legacy nulls. Moving the types does not move or bypass independent proof, signature, freshness, chain-binding and scope checks.
+
 ERC-4337 receipt interpretation is owned by `agentkeys-core::user_operation_receipt`. Both bundler reporting and broker finalization check the exact operation event, sender, paymaster, nonce and receipt identity. A mined outer transaction alone is insufficient: a failed inner operation reports failure, while missing or malformed evidence is an error. The broker independently fetches the chain receipt before triggering lifecycle side effects.
 
 ## Migration gates

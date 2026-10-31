@@ -51,205 +51,9 @@ use agentkeys_protocol::DelegationPath;
 use crate::jwt::verify::verify_session_jwt;
 use crate::state::SharedState;
 
-/// Cap operation discriminator (matches CredentialAudit.OP_* on chain
-/// and `agentkeys-worker-creds`'s mirror enum byte-for-byte).
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum CapOp {
-    Store,
-    Fetch,
-    /// Delegated READ of the master's CANONICAL memory (master-hub #295 P1
-    /// distribution). Mirror of `agentkeys_worker_creds::verify::CapOp`. A
-    /// distinct SIGNED op (not just a route) because an own-read and a
-    /// canonical-read carry identical omnis (operator = master, actor =
-    /// delegate) — only the resolved prefix differs. `operator != actor` makes
-    /// `mint_cap`'s scope check consult the on-chain `knowledge:<ns>` grant (the
-    /// master-self skip is bypassed). `as_u8` = 4 audits via the tier-1 worker
-    /// (reuses `AuditOpKind::MemoryGet`), NOT the on-chain `CredentialAudit.OP_*`
-    /// path, so no chain-enum change is needed.
-    CanonicalFetch,
-    /// Delegated APPEND to the master's absorption INBOX (master-hub #339 P2
-    /// "push"). Mirror of `agentkeys_worker_creds::verify::CapOp::Append`. A
-    /// distinct SIGNED op so an own-memory `Store` cap can never be redeemed as
-    /// an inbox append. Like `CanonicalFetch` the DELEGATE mints it
-    /// (`session == actor`); `operator != actor` makes `mint_cap`'s scope check
-    /// consult the on-chain `proposal:<ns>` grant (distinct from the `knowledge:<ns>`
-    /// read grant). `as_u8` = 5 audits via the tier-1 worker
-    /// (`AuditOpKind::MemoryInboxAppend`), NOT the on-chain `CredentialAudit.OP_*`
-    /// path, so no chain-enum change is needed.
-    Append,
-    Teardown,
-    /// Compute-gate op for the classifier-service worker (#178 §15.6, #207
-    /// items 2-3): a COMPILE or TAG call, NOT an S3 touch. `/v1/cap/classify`
-    /// mints this; storage workers reject it via `check_op`. `as_u8` = 3 is a
-    /// fresh code — the classifier audits via the tier-1 audit worker, NOT the
-    /// on-chain `CredentialAudit.OP_*` path, so no chain-enum change is needed.
-    Classify,
-    /// #406 channels — PUBLISH into a channel feed. Distinct SIGNED op from
-    /// `ChannelSubscribe` (direction isolation, D2). `as_u8` = 6 audits via the
-    /// tier-1 audit worker (`AuditOpKind::ChannelPublish`), NOT the on-chain path.
-    ChannelPublish,
-    /// #406 channels — SUBSCRIBE (consume) from a channel feed. `as_u8` = 7.
-    ChannelSubscribe,
-    /// #441 speech — USE the stack's speech plane (ASR/TTS) via the broker
-    /// STS relay. Like `Classify` this is a compute-gate op, NOT an S3 touch:
-    /// `/v1/cap/speech` mints it and `/v1/cap/speech-sts` redeems it for
-    /// short-TTL scoped AWS creds (Transcribe streaming + Polly only).
-    /// Storage workers reject it via `check_op`/`check_data_class`. `as_u8`
-    /// = 8 audits via the tier-1 audit worker, NOT the on-chain
-    /// `CredentialAudit.OP_*` path, so no chain-enum change is needed.
-    SpeechUse,
-}
-
-impl CapOp {
-    pub fn as_u8(self) -> u8 {
-        match self {
-            CapOp::Store => 0,
-            CapOp::Fetch => 1,
-            CapOp::Teardown => 2,
-            CapOp::Classify => 3,
-            CapOp::CanonicalFetch => 4,
-            CapOp::Append => 5,
-            CapOp::ChannelPublish => 6,
-            CapOp::ChannelSubscribe => 7,
-            CapOp::SpeechUse => 8,
-        }
-    }
-
-    /// snake_case string used in the K10 cap-PoP preimage (issue #76). MUST
-    /// match `agentkeys_backend_client::CapMintOp::op_str` (client) and the
-    /// worker's `CapOp::as_str`, or the recomputed preimage won't agree.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            CapOp::Store => "store",
-            CapOp::Fetch => "fetch",
-            CapOp::CanonicalFetch => "canonical_fetch",
-            CapOp::Append => "append",
-            CapOp::Teardown => "teardown",
-            CapOp::Classify => "classify",
-            CapOp::ChannelPublish => "channel_publish",
-            CapOp::ChannelSubscribe => "channel_subscribe",
-            CapOp::SpeechUse => "speech_use",
-        }
-    }
-}
-
-/// Data class the cap-token is bound to. Mirror of
-/// `agentkeys_worker_creds::verify::DataClass`. The broker mints with
-/// the right variant for each endpoint (`/v1/cap/cred-*` → Credentials,
-/// `/v1/cap/memory-*` → Memory) and signs it into the payload; workers
-/// reject caps whose data_class doesn't match their bucket. Issue #90
-/// followup — codified in AGENTS.md.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum DataClass {
-    Credentials,
-    Memory,
-    /// Policy / memory-types taxonomy (#178 §7). Master-only; its own bucket +
-    /// role per §17.2. `/v1/cap/config-*` mints this; cred + memory workers
-    /// reject a Config cap via `verify::check_data_class`.
-    Config,
-    /// #406 channels data class (`docs/spec/agent-channel-decoupling.md` D7).
-    /// Its own `$CHANNEL_BUCKET` + IAM role (arch.md §17.2); the cred/memory/
-    /// config workers reject a Channel cap via `verify::check_data_class`, and
-    /// the channel worker rejects every non-Channel cap.
-    Channel,
-    /// #441 speech compute plane. NOT a storage class — no bucket, no worker;
-    /// the only redeemer is the broker's own `/v1/cap/speech-sts`. Storage
-    /// workers reject a Speech cap via `verify::check_data_class` like any
-    /// other class mismatch.
-    Speech,
-}
-
-impl DataClass {
-    /// snake_case string used in the K10 cap-PoP preimage (issue #76). MUST
-    /// match `agentkeys_backend_client::CapMintOp::data_class` (client) and the
-    /// worker's `DataClass::as_str`.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            DataClass::Credentials => "credentials",
-            DataClass::Memory => "memory",
-            DataClass::Config => "config",
-            DataClass::Channel => "channel",
-            DataClass::Speech => "speech",
-        }
-    }
-}
-
-/// Cap payload — the signed-over portion of a cap-token. The worker
-/// verifies `Sha256(json(payload))` against `broker_sig` using the
-/// broker's session-keypair public key before honoring the cap.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CapPayload {
-    pub operator_omni: String,
-    pub actor_omni: String,
-    pub service: String,
-    pub op: CapOp,
-    /// Data class binding (issue #90 followup). REQUIRED; workers reject
-    /// caps whose data_class doesn't match their bucket.
-    pub data_class: DataClass,
-    pub device_key_hash: String,
-    pub k3_epoch: u64,
-    pub issued_at: u64,
-    pub expires_at: u64,
-    pub nonce: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CapToken {
-    pub payload: CapPayload,
-    pub broker_sig: String,
-    /// K10 cap-mint proof-of-possession (issue #76), carried alongside
-    /// `broker_sig` (NOT inside `payload`, so `broker_sig` is unchanged). The
-    /// worker recomputes `cap_pop_payload` from `payload` + `client_nonce`/
-    /// `client_ts` and asserts `keccak(ecrecover(client_sig)) ==
-    /// payload.device_key_hash`. `client_sig` integrity-protects the nonce/ts
-    /// (altering them breaks the recovered address), so they need not be in the
-    /// broker-signed payload. OPTIONAL (issue #76 staged rollout): omitted on the
-    /// wire when the cap carries no PoP, so a no-PoP cap is byte-identical to the
-    /// pre-#76 shape.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub client_sig: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub client_nonce: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub client_ts: Option<u64>,
-    /// Device→sandbox delegation (issue #369) — echoed VERBATIM from the request
-    /// when the cap-PoP was signed by a sandbox's ephemeral key. The broker does
-    /// NOT verify it (it stays untrusted — the whole #76/#369 posture); the worker
-    /// re-verifies it independently. Omitted on the wire when absent.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub delegation_path: Option<DelegationPath>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct CapRequest {
-    pub operator_omni: String,
-    pub actor_omni: String,
-    pub service: String,
-    pub device_key_hash: String,
-    #[serde(default = "default_ttl_seconds")]
-    pub ttl_seconds: u64,
-    /// K10 cap-mint proof-of-possession (issue #76) — OPTIONAL. When present, an
-    /// EIP-191 sig by the caller's K10 over `device_crypto::cap_pop_payload(...)`,
-    /// validated here + re-verified by the worker (a compromised broker can't
-    /// forge it). When absent, the cap carries no PoP; the worker accepts it
-    /// unless `AGENTKEYS_WORKER_REQUIRE_CAP_POP=1`.
-    #[serde(default)]
-    pub client_sig: Option<String>,
-    #[serde(default)]
-    pub client_nonce: Option<String>,
-    #[serde(default)]
-    pub client_ts: Option<u64>,
-    /// Device→sandbox delegation (issue #369) — present when `client_sig` is a
-    /// delegated sandbox-key signature; echoed into the cap-token for the worker.
-    #[serde(default)]
-    pub delegation_path: Option<DelegationPath>,
-}
-
-fn default_ttl_seconds() -> u64 {
-    300 // 5 min default; workers reject anything past expires_at.
-}
+use agentkeys_protocol::capability::default_ttl_seconds;
+pub use agentkeys_protocol::capability::{CapOp, CapPayload, CapToken, DataClass};
+pub use agentkeys_protocol::BrokerCapRequest as CapRequest;
 
 #[derive(Debug, Serialize)]
 pub struct CapErrorBody {
@@ -536,7 +340,7 @@ pub async fn cap_classify(
         actor_omni: req.actor_omni,
         service: req.service,
         device_key_hash: req.device_key_hash,
-        ttl_seconds: req.ttl_seconds,
+        ttl_seconds: Some(req.ttl_seconds),
         client_sig: req.client_sig,
         client_nonce: req.client_nonce,
         client_ts: req.client_ts,
@@ -572,7 +376,7 @@ pub async fn cap_speech(
         actor_omni: req.actor_omni,
         service: req.service,
         device_key_hash: req.device_key_hash,
-        ttl_seconds: req.ttl_seconds,
+        ttl_seconds: Some(req.ttl_seconds),
         client_sig: req.client_sig,
         client_nonce: req.client_nonce,
         client_ts: req.client_ts,
@@ -680,7 +484,10 @@ async fn mint_cap(
             "cap_capability_service_not_mintable",
         ));
     }
-    let ttl = req.ttl_seconds.clamp(60, 1800);
+    let ttl = req
+        .ttl_seconds
+        .unwrap_or_else(default_ttl_seconds)
+        .clamp(60, 1800);
 
     // 0. Session JWT auth — caller must hold the operator session.
     let bearer = extract_bearer(&headers)?;
@@ -1432,7 +1239,7 @@ mod tests {
             actor_omni: format!("0x{}", "b".repeat(64)),
             service: "knowledge:travel".into(),
             device_key_hash: dkh.to_string(),
-            ttl_seconds: 300,
+            ttl_seconds: Some(300),
             client_sig: Some(client_sig),
             client_nonce: Some(client_nonce),
             client_ts: Some(client_ts),
@@ -1587,7 +1394,7 @@ mod tests {
             actor_omni: format!("0x{}", "b".repeat(64)),
             service: "knowledge:travel".into(),
             device_key_hash: format!("0x{}", "c".repeat(64)),
-            ttl_seconds: 300,
+            ttl_seconds: Some(300),
             client_sig: None,
             client_nonce: None,
             client_ts: None,
