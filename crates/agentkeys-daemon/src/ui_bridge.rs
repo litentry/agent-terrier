@@ -10211,11 +10211,7 @@ async fn memory_get_object_real(
     if !get_resp.status().is_success() {
         let status = get_resp.status();
         let body = get_resp.text().await.unwrap_or_default();
-        if status == reqwest::StatusCode::NOT_FOUND
-            && serde_json::from_str::<serde_json::Value>(&body)
-                .ok()
-                .is_some_and(|value| value["reason"] == "s3_no_such_key")
-        {
+        if agentkeys_protocol::object_store::worker_object_missing(status.as_u16(), &body) {
             return Ok(None);
         }
         return Err(format!("worker object get {status}: {body}"));
@@ -10627,17 +10623,7 @@ pub(crate) async fn config_fetch_doc(
         .map_err(|e| format!("config get transport: {e}"))?;
     if resp.status() == reqwest::StatusCode::NOT_FOUND {
         let body = resp.text().await.map_err(|error| error.to_string())?;
-        if serde_json::from_str::<serde_json::Value>(&body)
-            .ok()
-            .and_then(|value| {
-                value
-                    .get("reason")
-                    .and_then(|reason| reason.as_str())
-                    .map(str::to_owned)
-            })
-            .as_deref()
-            == Some("s3_no_such_key")
-        {
+        if agentkeys_protocol::object_store::worker_object_missing(404, &body) {
             return Ok(None);
         }
         return Err(format!("config get unexpected 404: {body}"));

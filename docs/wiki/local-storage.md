@@ -1,4 +1,4 @@
-The local object service is a qualified storage component. Integration with the product workers, broker sessions and complete local application remains open in [#5](https://github.com/litentry/agent-terrier/issues/5).
+The local object service is a qualified storage component. The credential worker uses it for encrypted store/fetch/list/teardown operations. Integration with the other workers, product clients, broker sessions and complete local application remains open in [#5](https://github.com/litentry/agent-terrier/issues/5).
 
 ## Ownership and boundaries
 
@@ -19,9 +19,21 @@ Run locally from the public repository root:
 ```sh
 cargo test -p agentkeys-local-store
 cargo test -p agentkeys-protocol object_store
+cargo test -p agentkeys-core object_store
+cargo test -p agentkeys-worker-creds --test local_storage
 ```
 
 These tests use controlled chain responses and real signatures. They pair valid access with wrong-actor, wrong-class, wrong-operation, missing/forged proof, expiry, binding, scope, epoch and revocation denials. Denials assert the exact error, no object-service storage operation and unchanged stored data. Additional tests cover concurrent updates, append-only behavior, reopen persistence and unsafe file rejection.
+
+## Credential worker integration
+
+The credential worker invokes `agentkeys-core::object_store::ObjectClient` through the `ObjectStore` interface. The HTTP adapter sends the signed capability on every request, has no ambient cloud credentials, rejects redirects and bounds responses. It verifies returned content revisions and validates list scope, ordering and cursor progress. The worker independently verifies authority before contacting storage; the object service repeats verification before using its database.
+
+The worker binary requires `--development`, a generated `--profile`, a broker public-key file, an explicit loopback `--storage-url`, and `--development-kek-file`. That encryption key must be freshly generated, 32 bytes encoded as hex, and stored in an owner-only file. It is an explicitly development-only software encryption key. Symlinks, hard links and readable-by-others key files are refused by the shared protected-file reader. The binary listens only on loopback. Run `cargo run -p agentkeys-worker-creds -- --help` locally from the public checkout for its flags. Automatic creation and supervision of these component inputs remains part of the local lifecycle work.
+
+The encrypted v2 development flow and client-encrypted v3 envelope flow keep their existing wire format. The response field `s3_key` is a compatibility name for an object key; the credential worker no longer uses S3. Owner-only listing follows pagination, and teardown propagates storage failures rather than reporting partial deletion as success. The existing audit emitter remains in use; audit-service qualification is separate from storage qualification.
+
+The worker integration test runs the actual worker router, cryptography, HTTP adapter and SQLite service with controlled chain responses. It proves encrypted store/read, delegated fetch, owner listing/deletion, rejection before storage access, independent storage denial and deletion-error reporting. It does not establish real broker enrollment or a complete product journey. Other workers still use their previous storage path until migrated.
 
 ## Explicit real-chain qualification
 
@@ -34,4 +46,4 @@ python3 scripts/tests/qualify_local_storage.py
 
 The qualifier creates disposable identities, deploys the real contracts, enrolls an actor and launches the object-service binary. It checks authorized write/read, wrong actor/class/proof/expiry, broker-signed but chain-unauthorized requests, persistence after killing and restarting the service, and denial after actual scope and device revocations. Generated keys, profiles and databases stay in private temporary directories and are removed by the fixture.
 
-The capability issuer is a test fixture, deliberately able to sign unauthorized requests. This proves independent storage enforcement. It does not qualify broker login or capability minting; those must pass through the real broker when the workers and clients are connected. The latest local run completed this storage qualification in 12.262 seconds on macOS with a warm build cache. A cold build or first download adds time.
+The capability issuer is a test fixture, deliberately able to sign unauthorized requests. This proves independent storage enforcement. It does not qualify broker login or capability minting; those must pass through the real broker when the workers and clients are connected. The latest local run completed this storage qualification in 27.049 seconds on macOS, including the affected test-binary rebuild. An earlier run with warmed binaries took 12.262 seconds. A cold build or first download adds time.

@@ -3,7 +3,7 @@ license.workspace = true
 name = "agentkeys-worker-creds"
 version = "0.1.0"
 edition = "2021"
-description = "Credentials-service worker (arch.md §15.1) — cap verify + AES-256-GCM envelope + S3 PUT/GET"
+description = "Scoped credential worker with independent chain verification and encrypted local storage"
 
 [[bin]]
 name = "agentkeys-worker-creds"
@@ -33,6 +33,7 @@ sha2 = "0.10"
 sha3 = "0.10"
 hex = "0.4"
 base64 = "0.22"
+zeroize = "1"
 rand_core = { version = "0.6", features = ["std"] }
 # AES-256-GCM envelope (per arch.md §15 + §17).
 aes-gcm = "0.10"
@@ -44,6 +45,11 @@ aws-sdk-s3 = "1"
 clap = { version = "4", features = ["derive", "env"] }
 
 [dev-dependencies]
+agentkeys-local-store = { path = "../agentkeys-local-store" }
+async-trait = { workspace = true }
+tempfile = "3"
+rusqlite = { version = "0.31", features = ["bundled"] }
+p256 = { version = "0.13", features = ["pkcs8", "pem", "ecdsa"] }
 tower = { version = "0.5", features = ["util"] }
 tokio = { workspace = true }
 # In-process audit worker for the #229 durable-audit integration test.

@@ -2142,26 +2142,23 @@ pub struct CredListResp {
 
 // ── cred worker (`/v1/cred/fetch`) — #216 agent-side vaulted-key fetch ────────
 
-/// Cred-worker `/v1/cred/fetch` request body. Mirrors
-/// `agentkeys_worker_creds::handlers::FetchRequest` — just the signed cap; the
-/// credential `service` rides INSIDE the cap payload (it can't be spoofed at the
-/// body level). The worker S3-GETs `bots/<actor>/credentials/<service>.enc`,
-/// decrypts (K3 KEK), and returns the plaintext.
+/// Canonical credential fetch request shared by the worker and its clients.
+/// The capability carries the credential service and selects the operator's vault.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CredFetchBody {
-    pub cap: CapToken,
+pub struct CredFetchBody<T = CapToken> {
+    pub cap: T,
 }
 
 /// EXACTLY ONE of `envelope_b64` / `plaintext_b64` is set (the #372 config
 /// recipe applied to cred): v3 blobs come back as the raw envelope for
 /// CLIENT-side decrypt under the signer-derived KEK (the worker holds no key
 /// that opens them); legacy v2 blobs come back worker-decrypted.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CredFetchResp {
     pub ok: bool,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plaintext_b64: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub envelope_b64: Option<String>,
     /// Durable-audit receipt (#229): the `AuditEnvelope` hash the worker
     /// emitted for this op (`null`/absent on pre-#229 workers or when the
@@ -2170,22 +2167,21 @@ pub struct CredFetchResp {
     pub audit_envelope_hash: Option<String>,
 }
 
-/// Cred-worker `/v1/cred/store` request body. Mirrors
-/// `agentkeys_worker_creds::handlers::StoreRequest` — the signed cap (the
-/// credential `service` rides INSIDE the cap payload) plus EXACTLY ONE of:
+/// Canonical `/v1/cred/store` request body used by the worker and its clients.
+/// The capability carries the credential service, alongside exactly one of:
 /// `plaintext_b64` (legacy — the worker encrypts under its static stage-1 K3
 /// KEK) or `envelope_b64` (a client-encrypted v3 envelope the worker stores
 /// VERBATIM, #372-recipe — nothing reaches the worker in plaintext).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CredStoreBody {
-    pub cap: CapToken,
+pub struct CredStoreBody<T = CapToken> {
+    pub cap: T,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plaintext_b64: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub envelope_b64: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CredStoreResp {
     pub ok: bool,
     pub s3_key: String,

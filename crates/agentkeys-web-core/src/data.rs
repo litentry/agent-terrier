@@ -42,9 +42,7 @@ pub enum DataError {
 
 impl DataError {
     pub fn is_missing(&self) -> bool {
-        matches!(self, Self::Http { status: 404, body } if serde_json::from_str::<serde_json::Value>(body)
-            .ok().and_then(|value| value.get("reason").and_then(|value| value.as_str()).map(str::to_owned))
-            .is_some_and(|detail| detail == "s3_no_such_key"))
+        matches!(self, Self::Http { status, body } if agentkeys_protocol::object_store::worker_object_missing(*status, body))
     }
     pub fn is_conflict(&self) -> bool {
         matches!(
@@ -1261,6 +1259,11 @@ mod tests {
 
     #[test]
     fn only_a_confirmed_missing_object_is_absent() {
+        assert!(DataError::Http {
+            status: 404,
+            body: r#"{"reason":"object_not_found"}"#.into()
+        }
+        .is_missing());
         assert!(DataError::Http {
             status: 404,
             body: r#"{"reason":"s3_no_such_key"}"#.into()
