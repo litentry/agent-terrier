@@ -1,5 +1,4 @@
 // KNOWN BROKEN — DOM drift on openrouter signup page.
-// Tracked: https://github.com/litentry/agentKeys/issues/83 (label: provision-fix)
 // Symptom: `agentkeys provision openrouter` exits with
 //   `trip_wire_fired ... kind:"SelectorTimeout" step:"signup_flow"`.
 // Root cause: openrouter changed the signup-page DOM since selectors below

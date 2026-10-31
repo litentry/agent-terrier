@@ -1,116 +1,28 @@
-<p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/brand/agentkeys-logo-dark-512.png">
-    <source media="(prefers-color-scheme: light)" srcset="docs/assets/brand/agentkeys-logo-light-512.png">
-    <img src="docs/assets/brand/agentkeys-logo-light-512.png" width="140" alt="AgentKeys logo">
-  </picture>
-</p>
+# Agent Terrier
 
-# AgentKeys
+Agent Terrier is an open-source agent platform with on-chain authorization, a shared Rust core, a command-line client and a web console.
 
-Credential broker for AI agents. A master (human) delegates scoped, revocable access to third-party service credentials (OpenRouter, OpenAI, etc.) to agent sandboxes — without ever handing the agent the raw keys.
+The standalone local development environment is being built in [epic #1](https://github.com/litentry/agent-terrier/issues/1). This revision is the source-boundary foundation; a complete localhost quickstart is not yet available.
 
-Status: pre-v0. Stage 5 in progress (see `e2e/progress.json`).
+## Development
 
-Architecture, language choices, trust boundaries: [`docs/arch.md`](docs/arch.md).
+Run these commands locally from the repository root:
 
----
-
-## 👤 For humans
-
-### What it does
-
-- **Master CLI** (`agentkeys`) — runs on your laptop; owns a session key in the OS keychain; approves pair/recover/scope-change requests.
-- **Sandbox daemon** (`agentkeys-daemon`) — runs inside the agent sandbox; brokers credential reads over MCP + a Unix socket; never exposes raw keys to the agent.
-- **Provisioner** (`agentkeys-provisioner` + `provisioner-scripts`) — Rust orchestrator drives TypeScript/Playwright scrapers to sign up for services and hand the resulting API key back through the trust boundary.
-- **Mock backend** (`agentkeys-mock-server`) — v0-only; mirrors the Heima parachain API so we can build end-to-end before the chain integration lands.
-
-### Workspace layout
-
-```
-crates/
-  agentkeys-types/          shared types (Identity, Session, Scope, ...)
-  agentkeys-core/            CredentialBackend trait, RPC client, crypto
-  agentkeys-cli/             master CLI binary
-  agentkeys-daemon/          sandbox daemon binary
-  agentkeys-provisioner/     provisioner orchestrator
-  agentkeys-mock-server/     v0-only mock backend (axum + SQLite)
-provisioner-scripts/         TypeScript + Playwright scrapers (npm)
-docs/                        specs, stage plans, execution runbook
-e2e/                     the e2e suite (suite.sh + suite-N-* phases) + standalone proofs
+```sh
+python3 scripts/check-public.py
+python3 -m unittest discover -s scripts/tests
+cargo metadata --no-deps --format-version 1
+cargo fmt --all -- --check
 ```
 
-~80% Rust, 100% of the security-critical path in Rust. TypeScript is confined to browser automation and (post-MVP) the Web GUI frontend.
+The console and browser display share the checked-in `design-system/` package and a generated browser client. Install `wasm-pack` and the `wasm32-unknown-unknown` Rust target first. Run locally from the repository root; the initial Rust build is cached for subsequent runs:
 
-### Build & test
-
-```
-cargo build
-cargo test
-npm test --prefix provisioner-scripts
+```sh
+npm --prefix apps/parent-control install --ignore-scripts
+python3 scripts/build-browser-core.py
+npm --prefix apps/parent-control test
 ```
 
-Per-crate tests:
+The component suite runs without a browser. Use `--release` when building the browser client for distribution. Both build modes remove personal source paths from the binary; run the privacy check again after generating artifacts.
 
-```
-cargo test -p agentkeys-types
-cargo test -p agentkeys-core
-cargo test -p agentkeys-mock-server
-cargo test -p agentkeys-cli
-cargo test -p agentkeys-daemon
-cargo test -p agentkeys-provisioner
-```
-
-### First-machine setup
-
-Fresh laptop? Start with [`docs/dev-setup.md`](docs/dev-setup.md) — it walks you through rustup, jj, Node, AWS CLI, browser, and runs the workspace smoke tests.
-
-### Inner-loop dev
-
-Iterating on the broker, signer, mock-server, or operator-side scripts? [`docs/spec/broker-and-operator-dev-guide.md`](docs/spec/broker-and-operator-dev-guide.md) covers the local edit-build-test loop: which process to run on which port, how to point harness scripts at `localhost`, how to use `e2e/suite-{1,2,3}-*.sh` for resumable step-by-step testing.
-
-### License
-
-Dual-licensed under **MIT OR Apache-2.0**, at your choice.
-
----
-
-## 🤖 For AI coding agents
-
-**You must read these before making any change.** They override defaults from your training data and cover the project-specific guardrails.
-
-| Read | Why |
-|---|---|
-| [`AGENTS.md`](AGENTS.md) | Project-specific rules: docs layout, /create-pr workflow in worktrees, terminology-source-of-truth, branch push policy, idempotent-remote-setup invariants, runbook-fix-fold-back policy. **Read first, every session.** |
-| [`docs/arch.md`](docs/arch.md) | Single source of truth for component inventory (K1–K11), trust boundaries, HDKD actor tree, per-actor binding ceremonies. When the per-doc detail outgrows arch.md, link outward — never duplicate. |
-| [`docs/archived/development-stages-v2-2026-04.md`](docs/archived/development-stages-v2-2026-04.md) | The 8-stage build plan (archived; superseded by the milestone roadmap below). Each stage had an `archived/harness/stage-N-done.sh` gate (archived with the plan). |
-| `docs/plan/execution-plan.md` (operator-internal; not in the OSS mirror) | Orchestration runbook (ralph, team, ultraqa workflows). |
-| [`docs/spec/broker-and-operator-dev-guide.md`](docs/spec/broker-and-operator-dev-guide.md) | Inner edit-build-test loop for broker + operator-side code. Use this before suggesting changes to the broker's run-time behavior. |
-
-### Hard rules (from AGENTS.md)
-
-These are non-negotiable. Violating them produces broken PRs / corrupted state.
-
-- **Use `jj` (Jujutsu), never raw `git`.** Common mappings in AGENTS.md. The one exception: inside a Claude Code `.claude/worktrees/<name>/` worktree, the initial commit must use `git` (jj can't colocate in a git-worktree); then `cd` to the main repo and push via `jj git push`. Never include `Co-Authored-By:` lines in those commits.
-- **Branch `evm` pushes immediately.** On `evm`, push after every `jj describe` — the remote broker host pulls from `origin/evm` to redeploy. "I'll push at the end" silently breaks deploys.
-- **Diagnose before edit.** Reproduce the failure locally first; isolate the layer (shell / client / doc / broker code / network). If the cause is local to the operator's shell, respond with the one-line fix — don't edit the repo.
-- **Land the fix everywhere.** Once a local repro proves a fix is correct, land it the same turn — search the repo for every affected file, commit, push to `origin/evm`. Don't stop at "verified locally" or "fixed one file."
-- **Runbook fix fold-back.** When an operator hits a runbook failure, two things land in the same turn: (1) the targeted fix, (2) a revision to the runbook so the next operator doesn't hit the same trap.
-- **No hardcoded values.** Use env var + default, CLI flag + default, or a config file. If you must hardcode temporarily, log it in [`hardcoded.md`](hardcoded.md) with file:line + reason + what would unblock dynamic.
-- **Idempotent remote setup.** Every script that mutates remote state (AWS / Heima / CI / VM / DNS) must exit 0 on re-run without re-applying. Pre-check with `get-*` before mutating; log `ok | skip <reason> | fail <reason>`.
-- **Plan completion is all-or-nothing.** When implementing a plan, every numbered step must be done — or the PR summary's "What did NOT land" section must explicitly list what was skipped and why.
-- **Terminology source of truth.** Never invent a new name for a concept arch.md already names. If you find divergence, fix it in the same commit or document the alias in arch.md's "Canonical names" section.
-
-### Per-session protocol
-
-1. `jj log --limit 10 && cat e2e/progress.json && bash e2e/init.sh $(jq -r .current_stage e2e/progress.json)`
-2. Read the milestone scope for the current milestone in `docs/plan/milestones-roadmap.md` (the v1/v2 stage framing is archived at `docs/archived/development-stages-v2-2026-04.md`).
-3. Pick the HIGHEST-PRIORITY incomplete deliverable from `e2e/features.json`.
-4. Implement ONE deliverable, run `cargo test -p <crate>`, `jj describe`, update `e2e/features.json`, `jj new`.
-
-### Single entry points
-
-Don't reach for ad-hoc `systemctl`, `scp`, or `forge script` — these are wrapped:
-
-- **Remote broker host** (binary upgrades, systemd, nginx, env tweaks): `bash scripts/operator/setup-broker-host.sh`
-- **Heima chain bring-up** (deploy + verify the shared contract SET): `bash scripts/operator/setup-heima.sh`. Master/agent binding is per-user onboarding via the parent-control app (#435); add `--verify` to also register a throwaway software master + demo agent for smoke.
+See [architecture and ownership](docs/arch.md) and [contributing](CONTRIBUTING.md). Never use production wallet keys or credentials in development examples.

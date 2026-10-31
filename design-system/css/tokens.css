@@ -1,0 +1,154 @@
+/* ============================================================================
+   Agent Terrier · 小荔管家 — design tokens
+   Source of truth: design-system/tokens.json.
+   All values are CSS custom properties so they can be themed at runtime.
+
+   THEMES = switchable "color sets", each a trio of primary / secondary /
+   background. Set on any ancestor via [data-theme="meadow|terracotta|forest|github"].
+   Everything else (ink, paper neutrals, permission semantics, category identity
+   colors, type, radii, elevation) is shared across the three brand themes; the
+   `github` theme (the parent-control console's neutral surface) additionally
+   overrides fonts, paper, text, permission semantics and radii — all emitted by
+   scripts/generate-tokens.mjs from tokens.json.
+   ============================================================================ */
+
+:root {
+  /* ── Fonts ─────────────────────────────────────────────────────────────── */
+  /* TWO SEPARATE font sets — never one stack for both languages. The English
+     (Latin) set is the default; a Chinese surface (lang="zh" / data-lang="zh",
+     see the switch at the bottom of this file) swaps the WHOLE set to the
+     Chinese fonts. No Latin-font-with-CJK-fallback mixing. */
+  --ds-font-display: 'Bricolage Grotesque', sans-serif;   /* EN · display */
+  --ds-font-body: 'Hanken Grotesk', sans-serif;           /* EN · body */
+  --ds-font-display-cn: 'Noto Serif SC', serif;           /* 中文 · display */
+  --ds-font-body-cn: 'Noto Sans SC', sans-serif;          /* 中文 · body */
+  --ds-font-cn: var(--ds-font-body-cn);                   /* back-compat alias */
+  --ds-font-mono: ui-monospace, Menlo, monospace;
+
+  /* ── Ink & dark surfaces (shared) ──────────────────────────────────────── */
+  --ds-ink: #16130f;          /* section / masthead backgrounds */
+  --ds-ink-frame: #15130f;    /* phone device frame */
+  --ds-ink-card: #211d17;     /* card on an ink surface */
+  --ds-ink-text: #29251f;     /* darkest text / avatar */
+
+  /* ── Paper & neutrals (shared light surfaces) ──────────────────────────── */
+  --ds-card: #ffffff;
+  --ds-bar: #fbf7f0;
+  --ds-tile: #ede6d6;
+  --ds-field: #e9e1d1;
+  --ds-border: #ece3d3;       /* hairline card border */
+  --ds-border-strong: #e8dfd0;
+  --ds-border-dashed: #cfc4b0;
+  --ds-border-secondary: #d9cdb8; /* secondary button outline */
+
+  /* ── Text (shared) ─────────────────────────────────────────────────────── */
+  --ds-text: #29251f;
+  --ds-text-muted: #6f6757;
+  --ds-text-faint: #9a9180;
+  --ds-text-on-ink: #ede6d6;
+  --ds-paper-sun: #fcfff0;    /* light text on ink buttons */
+
+  /* ── Semantic · permission states (shared) ─────────────────────────────── */
+  --ds-allow: #2f7d5b;
+  --ds-ask: #b07a1e;
+  --ds-off: #9a9087;
+  --ds-blocked: #b4472e;
+  --ds-ask-tint: #f6ebd6;
+  --ds-off-tint: #f0ece3;
+
+  /* ── Permission category identity (shared, set-independent) ────────────── */
+  --ds-cat-personal: #3e7d5b;
+  --ds-cat-family: #4f86c6;
+  --ds-cat-work: #8a6fb0;
+  --ds-cat-travel: #2ba39b;
+  --ds-cat-spending: #c2622f;
+  --ds-cat-email: #b0843a;
+  --ds-cat-smarthome: #6e8b3d;
+
+  /* ── Radii (shared) ────────────────────────────────────────────────────── */
+  --ds-r-tile: 8px;
+  --ds-r-field: 11px;
+  --ds-r-card: 14px;
+  --ds-r-panel: 18px;
+  --ds-r-hero: 24px;
+  --ds-r-pill: 999px;
+
+  /* ── Elevation (shared) ────────────────────────────────────────────────── */
+  --ds-shadow-panel: 0 30px 60px -45px rgba(40, 30, 15, 0.4);
+  --ds-shadow-device: 0 40px 80px -30px rgba(0, 0, 0, 0.6);
+}
+
+/* ── Themes (color sets) ──────────────────────────────────────────────────────
+   The block between the @ds-generated markers is WRITTEN by the curator
+   (design-system/scripts/generate-tokens.mjs, from tokens.json — edit theme
+   colors there or via the gallery's /curator, then regenerate). Don't hand-edit
+   between the markers; the default :root trio tracks the `default` theme. */
+/* @ds-generated:themes */
+:root {
+  --ds-primary: #cebd09;
+  --ds-secondary: #7da83e;
+  --ds-background: #fcfff0;
+  --ds-on-primary: #1c1a08;
+}
+[data-theme='meadow'] {
+  --ds-primary: #cebd09;
+  --ds-secondary: #7da83e;
+  --ds-background: #fcfff0;
+  --ds-on-primary: #1c1a08;
+}
+[data-theme='terracotta'] {
+  --ds-primary: #c2622f;
+  --ds-secondary: #3e6fb0;
+  --ds-background: #f5efe4;
+  --ds-on-primary: #ffffff;
+}
+[data-theme='forest'] {
+  --ds-primary: #3e7d5b;
+  --ds-secondary: #c2843a;
+  --ds-background: #f1f1e7;
+  --ds-on-primary: #ffffff;
+}
+[data-theme='github'] {
+  --ds-primary: #0969da;
+  --ds-secondary: #1f883d;
+  --ds-background: #ffffff;
+  --ds-on-primary: #ffffff;
+  --ds-font-display: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif, 'Apple Color Emoji', 'Segoe UI Emoji';
+  --ds-font-body: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif, 'Apple Color Emoji', 'Segoe UI Emoji';
+  --ds-card: #ffffff;
+  --ds-bar: #f6f8fa;
+  --ds-tile: #eaeef2;
+  --ds-field: #f6f8fa;
+  --ds-border: #d0d7de;
+  --ds-border-strong: #d0d7de;
+  --ds-border-dashed: #d0d7de;
+  --ds-border-secondary: #d0d7de;
+  --ds-text: #1f2328;
+  --ds-text-muted: #59636e;
+  --ds-text-faint: #818b98;
+  --ds-allow: #1a7f37;
+  --ds-ask: #9a6700;
+  --ds-off: #59636e;
+  --ds-blocked: #cf222e;
+  --ds-ask-tint: #fff8c5;
+  --ds-off-tint: #f6f8fa;
+  --ds-r-tile: 6px;
+  --ds-r-field: 6px;
+  --ds-r-card: 6px;
+  --ds-r-panel: 6px;
+  --ds-r-hero: 12px;
+  --ds-r-pill: 999px;
+}
+/* @ds-generated:end */
+
+/* ── Language → font-set switch ───────────────────────────────────────────────
+   Mark a surface as Chinese with lang="zh" (preferred — semantic) or
+   data-lang="zh", and the whole subtree swaps to the Chinese set. Because the
+   font tokens are remapped here and CSS custom properties inherit, every
+   descendant that reads var(--ds-font-display/body) picks up the Chinese fonts —
+   no per-glyph fallback, no shared stack. English surfaces keep the Latin set. */
+[lang='zh'],
+[data-lang='zh'] {
+  --ds-font-display: var(--ds-font-display-cn);
+  --ds-font-body: var(--ds-font-body-cn);
+}

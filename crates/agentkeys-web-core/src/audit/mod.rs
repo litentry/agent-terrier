@@ -8,8 +8,7 @@
 //!   no contract redeploy when a new op_kind lands.
 //! - The off-chain worker (`agentkeys-worker-audit`) holds the full envelope,
 //!   addressed by hash.
-//! - The explorer ([`litentry/subscan-essentials`](https://github.com/litentry/subscan-essentials/issues/12))
-//!   reads the chain events, fetches envelopes by hash, and renders a uniform
+//! - An explorer reads chain events, fetches envelopes by hash, and renders a uniform
 //!   timeline across all op_kinds.
 //!
 //! ## Non-break design

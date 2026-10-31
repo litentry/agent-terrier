@@ -1,96 +1,27 @@
-/target
+/target/
+**/node_modules/
+**/.next/
+**/dist/
+**/__pycache__/
+**/*.tsbuildinfo
 *.swp
 *.swo
 .DS_Store
-.omc
-.obsidian
-/docs/test-screenshots/
-.gstack/
-AWSCLIV2.pkg
-
-# agentkeys-volcano-probe runtime outputs (TTS audio + the pairing-QR PNG written to CWD)
-volcano-tts.mp3
-volcano-tts-ws.wav
-volcano-tui.mp3
-pairing-qr.png
-
-# Claude Code per-workspace runtime state (lock files, scheduled-task index,
-# personal settings.local.json). Never check these in.
+.omc/
 .claude/
-
-# Local developer secrets. PER-STACK, sourced by dev.sh right after the stack's
-# operator-workstation*.env (so it overrides any ambient ~/.zshenv value): the
-# sibling `<env file minus .env>.secrets.env`. Template:
-# scripts/operator-workstation.secrets.env.example.
-scripts/operator-workstation*.secrets.env
-# Legacy name — kept ignored so an old laptop copy can never be committed. It
-# was never sourced by anything (and its advertised .env.example never existed):
-# use the per-stack file above.
-agentkeys-secrets.env
-# WeChat gateway bot credentials from `--login-write` (the doc's laptop example
-# writes ./weixin-secrets.env at the repo root — never commit the bot token).
-weixin-secrets.env
-*weixin-secrets*.env
-# Local contact registry (holds family openids / PII — the doc's laptop example
-# writes ./weixin-contacts.json). The master authors it; never commit it.
-weixin-contacts.json
-*weixin-contact*.json
-
-# xiaozhi MCP-endpoint URL — contains a bearer JWT, never commit.
-# Used by scripts/run-mcp-local.sh as an optional convenience cache so
-# you don't have to paste the URL every time.
-/mcp-xiaozhi-endpoint
-
-# Operator-supplied mnemonic file(s) for the chain deployer (referenced
-# by HEIMA_DEPLOYER_MNEMONIC_FILE in scripts/operator/chain/heima-bring-up.sh).
-# Never committed — the mnemonic IS the key.
-/test-hei
-/test-hei.*
-/.heima-mnemonic
-/*-mnemonic
-
-# Node deps for scripts/heima-paseo-sudo.mjs (installed via
-# `npm install --prefix scripts` by scripts/heima-paseo-bring-up.sh on
-# first run). scripts/package.json + scripts/package-lock.json are
-# checked in; scripts/node_modules/ is not.
-scripts/node_modules/
-
-# Stage 6 runbook one-shot JSON artifacts. AGENTS.md mandates the
-# `jq -n --arg` → `$(...)` pattern piped directly into the AWS CLI call
-# (no file on disk). If any of these reappear, someone reverted to the
-# heredoc anti-pattern — delete and fix the runbook usage.
-/bucket-policy*.json
-/daemon-user-inline.json
-/dns-change.json
-/probe*.mjs
-/probe*.js
-
-# tsx double-nested cwd artefact — scrapers launched from the wrong
-# working dir land here. Harmless but noisy; ignore unconditionally.
-provisioner-scripts/provisioner-scripts/
-
-# agentkeys-workflow-collection: per-run recordings (~50MB each, binary
-# trace.zips don't delta-compress). Keep locally; commit only curated
-# reference recordings via explicit negations below.
-provisioner-scripts/recordings/*/
-!provisioner-scripts/recordings/openrouter-signup-reference/
-!provisioner-scripts/recordings/brave-search-signup-reference/
-!provisioner-scripts/recordings/elevenlabs-signup-reference/
-!provisioner-scripts/recordings/.gitkeep
-
-# Front-end / client apps (see AGENTS.md "Client"). These dirs are front-end
-# only; their external deps, lockfiles, and TanStack-generated route trees are
-# regenerable from package.json + source — never committed. (Each app's own
-# .gitignore already covers node_modules / dist / .tanstack / .output;
-# design-system/ is a plain lib with no .gitignore, so list its deps here.)
-design-system/node_modules/
-design-system/package-lock.json
-/apps/website/package-lock.json
-/apps/mobile-mock/package-lock.json
-/apps/design-system/package-lock.json
-/apps/website/src/routeTree.gen.ts
-/apps/mobile-mock/src/routeTree.gen.ts
-/apps/design-system/src/routeTree.gen.ts
-/apps/device-display/src/routeTree.gen.ts
+.codex/worktrees/
+.env
+.env.*
+!.env.example
+*.secrets.env
+*.pem
+*.key
+*.p12
+*.keystore
+*.sqlite
+*.sqlite3
+*.log
+/coverage/
+/test-results/
+/playwright-report/
 packages/agentkeys-dsh/lib/
-packages/agentkeys-dsh/node_modules/

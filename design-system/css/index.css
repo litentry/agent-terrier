@@ -1,0 +1,6 @@
+/* Agent Terrier · 小荔管家 design system — single entry point.
+   Import this for the full kit:  @import '@agentkeys/design-system/css';
+   Or cherry-pick tokens.css / components.css individually. */
+@import './fonts.css';
+@import './tokens.css';
+@import './components.css';

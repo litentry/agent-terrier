@@ -1286,23 +1286,23 @@ pub async fn cmd_scope(
 fn format_provision_error(err: &ProvisionError) -> String {
     match err {
         ProvisionError::InProgress { active_service } => format!(
-            "Problem: Another provision is running for {}.\nCause: Provisioner serializes calls per daemon.\nFix: Wait and retry.\nDocs: https://github.com/litentry/agentKeys/blob/main/docs/archived/development-stages-v2-2026-04.md",
+            "Problem: Another provision is running for {}.\nCause: Provisioner serializes calls per daemon.\nFix: Wait and retry.\nDocs: https://github.com/litentry/agent-terrier/blob/main/CONTRIBUTING.md",
             active_service
         ),
         ProvisionError::Tripwire { kind, step, .. } => format!(
-            "Problem: A script step timed out at '{}'.\nCause: The target site's DOM may have changed (tripwire: {:?}).\nFix: Open an issue at https://github.com/litentry/agentKeys/issues with the logs.\nDocs: https://github.com/litentry/agentKeys/blob/main/docs/archived/development-stages-v2-2026-04.md",
+            "Problem: A script step timed out at '{}'.\nCause: The target site's DOM may have changed (tripwire: {:?}).\nFix: Open an issue at https://github.com/litentry/agent-terrier/issues with the logs.\nDocs: https://github.com/litentry/agent-terrier/blob/main/CONTRIBUTING.md",
             step, kind
         ),
         ProvisionError::StoreFailed { obtained_key_masked, .. } => format!(
-            "Problem: Credential provisioned but storage failed.\nCause: Backend store_credential returned an error.\nFix: Manually store the key with `agentkeys store <service> <key>`. Masked key for reference: {}.\nDocs: https://github.com/litentry/agentKeys/blob/main/docs/archived/development-stages-v2-2026-04.md",
+            "Problem: Credential provisioned but storage failed.\nCause: Backend store_credential returned an error.\nFix: Manually store the key with `agentkeys store <service> <key>`. Masked key for reference: {}.\nDocs: https://github.com/litentry/agent-terrier/blob/main/CONTRIBUTING.md",
             obtained_key_masked
         ),
         ProvisionError::VerificationFailed { service, reason } => format!(
-            "Problem: Key verification failed for {}.\nCause: {}.\nFix: Re-run with --force to attempt a fresh provision.\nDocs: https://github.com/litentry/agentKeys/blob/main/docs/archived/development-stages-v2-2026-04.md",
+            "Problem: Key verification failed for {}.\nCause: {}.\nFix: Re-run with --force to attempt a fresh provision.\nDocs: https://github.com/litentry/agent-terrier/blob/main/CONTRIBUTING.md",
             service, reason
         ),
         other => format!(
-            "Problem: Provision failed.\nCause: {}.\nFix: Check logs and retry.\nDocs: https://github.com/litentry/agentKeys/blob/main/docs/archived/development-stages-v2-2026-04.md",
+            "Problem: Provision failed.\nCause: {}.\nFix: Check logs and retry.\nDocs: https://github.com/litentry/agent-terrier/blob/main/CONTRIBUTING.md",
             other
         ),
     }
@@ -1344,7 +1344,7 @@ pub async fn cmd_provision(
         ],
         other => {
             return Err(anyhow!(
-                "Problem: Service '{}' not supported.\nCause: Only 'openrouter' is supported in Stage 5a.\nFix: Use a supported service name.\nDocs: https://github.com/litentry/agentKeys/blob/main/docs/archived/development-stages-v2-2026-04.md",
+                "Problem: Service '{}' not supported.\nCause: Only 'openrouter' is supported in Stage 5a.\nFix: Use a supported service name.\nDocs: https://github.com/litentry/agent-terrier/blob/main/CONTRIBUTING.md",
                 other
             ));
         }
@@ -1361,7 +1361,7 @@ pub async fn cmd_provision(
         Ok(env) => env,
         Err(e) => {
             return Err(anyhow!(
-                "Problem: Could not fetch AWS credentials from broker.\nCause: {}.\nFix: Verify --broker-url / AGENTKEYS_BROKER_URL is reachable, your session token is current, and the broker's /readyz endpoint returns 200.\nDocs: https://github.com/litentry/agentKeys/blob/main/docs/operator-runbook-stage7.md",
+                "Problem: Could not fetch AWS credentials from broker.\nCause: {}.\nFix: Verify --broker-url / AGENTKEYS_BROKER_URL is reachable, your session token is current, and the broker's /readyz endpoint returns 200.\nDocs: https://github.com/litentry/agent-terrier/blob/main/CONTRIBUTING.md",
                 e
             ));
         }

@@ -1,0 +1,56 @@
+[
+  {
+    "path": "crates/agentkeys-web-core/src/persona.rs",
+    "rule": "private-key",
+    "line_sha256": "069dc3ffa399f5db8cec9697efd361f5340f751b330651a3fe95d3ff69a6a477",
+    "reason": "Synthetic negative test for secret detection; alphabetic fake access key or header with non-key body."
+  },
+  {
+    "path": "crates/agentkeys-web-core/src/persona.rs",
+    "rule": "cloud-access-key",
+    "line_sha256": "c4c94e9cacb1df0bb080a213b83678b27110be6979252bf59a1a22208214e9a1",
+    "reason": "Synthetic negative test for secret detection; alphabetic fake access key or header with non-key body."
+  },
+  {
+    "path": "crates/agentkeys-provisioner/src/orchestrator.rs",
+    "rule": "credential-literal",
+    "line_sha256": "353ff886c69352b24de295b4d4a58f5c1c6e47fe2db2df62c3fe1e6ab399cda2",
+    "reason": "Local test script emits a manufactured API-key sentinel; never used with an external account."
+  },
+  {
+    "path": "crates/agentkeys-memory-openviking/src/lib.rs",
+    "rule": "personal-path",
+    "line_sha256": "115eeb6d8292b06379dbef4d6c200807d4113a59dff522286aec84ac29947793",
+    "reason": "Unit-test container home directory, not a personal workstation path."
+  },
+  {
+    "path": "crates/agentkeys-daemon/src/proxy.rs",
+    "rule": "personal-path",
+    "line_sha256": "d99668cd3a61f04c7ba1780eaaa8cb7ea3faf5251c1c8860c24019598e26a6e4",
+    "reason": "Unit-test synthetic home directory, not a personal workstation path."
+  },
+  {
+    "path": "crates/agentkeys-cli/tests/cli_tests.rs",
+    "rule": "credential-literal",
+    "line_sha256": "7286086c471b21fa522c32cdc8683d146464168e01cec96870b93793acef1d58",
+    "reason": "Local test script emits a manufactured API-key sentinel; never used with an external account."
+  },
+  {
+    "path": "crates/agentkeys-cli/tests/cli_tests.rs",
+    "rule": "credential-literal",
+    "line_sha256": "e5bd45dfdc05ed30d8fb4c2b144cdd9cdd3d08e0ddb6c36fff302fe2d17691fb",
+    "reason": "Local test script emits a manufactured API-key sentinel; never used with an external account."
+  },
+  {
+    "path": "crates/agentkeys-broker-server/src/jwt/session.rs",
+    "rule": "private-key",
+    "line_sha256": "a169b2b2c3010a09f9efa803575522c9acda598e2c66fa1be857abb49e29ed4c",
+    "reason": "Malformed-key negative test; base64 body is the word nonsense, not a signing key."
+  },
+  {
+    "path": "crates/agentkeys-broker-server/src/jwt/session.rs",
+    "rule": "private-key",
+    "line_sha256": "f9ace9e275eb9c41f0e92ee4cb627392e0dbfae08bf83fa580f5f4b310b43734",
+    "reason": "Malformed-key negative test; base64 body is the word nonsense, not a signing key."
+  }
+]

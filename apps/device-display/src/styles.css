@@ -1,7 +1,5 @@
 @import "tailwindcss";
-/* design-system color-set tokens (fonts load via <link> in __root.tsx) */
-@import "@agentkeys/design-system/css/tokens.css";
-@import "@agentkeys/design-system/app.css";
+@import "@agentkeys/design-system/css";
 
 * {
   box-sizing: border-box;
