@@ -70,6 +70,7 @@ struct Fixture {
     chain: Arc<Mutex<ChainState>>,
     storage: Arc<ObservedStore>,
     worker: Router,
+    data_class: DataClass,
     tasks: Vec<tokio::task::JoinHandle<()>>,
 }
 
@@ -83,6 +84,14 @@ impl Drop for Fixture {
 
 impl Fixture {
     async fn new() -> Self {
+        Self::new_for(DataClass::Credentials, handlers::build_router, true).await
+    }
+
+    async fn new_for(
+        data_class: DataClass,
+        router: fn(Arc<WorkerState>) -> Router,
+        development_encryption: bool,
+    ) -> Self {
         use std::os::unix::fs::PermissionsExt;
         let directory = tempfile::tempdir().unwrap();
         std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -156,9 +165,7 @@ impl Fixture {
             .canonicalize()
             .unwrap()
             .join("credentials.db");
-        let store = Arc::new(
-            LocalStore::open(&database, DataClass::Credentials, authority.clone()).unwrap(),
-        );
+        let store = Arc::new(LocalStore::open(&database, data_class, authority.clone()).unwrap());
         let (storage_url, storage_task) = serve(agentkeys_local_store::router(store)).await;
         let storage = Arc::new(ObservedStore {
             http: HttpObjectStore::new(&storage_url).unwrap(),
@@ -175,7 +182,7 @@ impl Fixture {
             authority,
             storage_url,
             chain_profile: "anvil".into(),
-            development_kek: hex::encode(key).into(),
+            development_kek: development_encryption.then(|| hex::encode(key).into()),
             browser_origins: String::new(),
         };
         let state = WorkerState {
@@ -191,19 +198,23 @@ impl Fixture {
             agent,
             chain,
             storage,
-            worker: handlers::build_router(Arc::new(state)),
+            worker: router(Arc::new(state)),
+            data_class,
             tasks: vec![rpc_task, storage_task],
         }
     }
 
     fn cap(&self, owner: bool, op: CapOp) -> CapToken {
-        cap_for(
+        let mut cap = cap_for(
             &self.signer,
             if owner { &self.owner } else { &self.agent },
             &"11".repeat(32),
             &if owner { "11" } else { "22" }.repeat(32),
             op,
-        )
+        );
+        cap.payload.data_class = self.data_class;
+        self.sign(&mut cap, owner);
+        cap
     }
 
     fn sign(&self, cap: &mut CapToken, owner: bool) {
@@ -224,6 +235,14 @@ impl Fixture {
         if plaintext {
             body["plaintext_b64"] = STANDARD.encode(PLAINTEXT).into();
         }
+        self.call_body(route, body).await
+    }
+
+    async fn call_body(
+        &self,
+        route: &str,
+        body: serde_json::Value,
+    ) -> (StatusCode, serde_json::Value) {
         let response = self
             .worker
             .clone()
@@ -263,7 +282,13 @@ impl Fixture {
     async fn denied(&self, route: &str, cap: CapToken, reason: &str) {
         let before = self.snapshot();
         let calls = self.storage.calls.load(Ordering::SeqCst);
-        let (status, body) = self.call(route, cap, route.ends_with("/store")).await;
+        let (status, body) = self
+            .call(
+                route,
+                cap,
+                route.ends_with("/store") || route.ends_with("/put"),
+            )
+            .await;
         assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
         assert_eq!(body["reason"], reason);
         assert!(body.get("plaintext_b64").is_none());
@@ -485,6 +510,208 @@ async fn real_sqlite_http_worker_flow_and_authority_denials() {
     assert_eq!(body["reason"], "object_not_found");
 }
 
+#[tokio::test]
+async fn configuration_is_owner_only_and_competing_updates_are_atomic() {
+    let fixture = Fixture::new_for(
+        DataClass::Config,
+        agentkeys_worker_config::handlers::build_router,
+        true,
+    )
+    .await;
+    let (status, body) = fixture
+        .call("/v1/config/put", fixture.cap(true, CapOp::Store), true)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body) = fixture
+        .call("/v1/config/get", fixture.cap(true, CapOp::Fetch), false)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        STANDARD
+            .decode(body["plaintext_b64"].as_str().unwrap())
+            .unwrap(),
+        PLAINTEXT
+    );
+    let original_revision = body["revision"].clone();
+    let stored = fixture.snapshot();
+    assert!(!stored[0]
+        .1
+        .windows(PLAINTEXT.len())
+        .any(|bytes| bytes == PLAINTEXT));
+    for (route, op) in [
+        ("/v1/config/get", CapOp::Fetch),
+        ("/v1/config/put", CapOp::Store),
+        ("/v1/config/teardown", CapOp::Teardown),
+    ] {
+        fixture
+            .denied(route, fixture.cap(false, op), "config_not_master_self")
+            .await;
+    }
+    let mut missing = fixture.cap(true, CapOp::Fetch);
+    missing.client_sig = None;
+    fixture
+        .denied("/v1/config/get", missing, "cap_pop_invalid")
+        .await;
+    let mut wrong_class = fixture.cap(true, CapOp::Fetch);
+    wrong_class.payload.data_class = DataClass::Credentials;
+    fixture.sign(&mut wrong_class, true);
+    fixture
+        .denied("/v1/config/get", wrong_class, "cap_data_class_mismatch")
+        .await;
+    let mut wrong_actor = fixture.cap(true, CapOp::Fetch);
+    wrong_actor.payload.actor_omni = "33".repeat(32);
+    fixture.sign(&mut wrong_actor, true);
+    fixture
+        .denied("/v1/config/get", wrong_actor, "device_binding_mismatch")
+        .await;
+    fixture.chain.lock().unwrap().epoch = 2;
+    fixture
+        .denied(
+            "/v1/config/get",
+            fixture.cap(true, CapOp::Fetch),
+            "k3_epoch_mismatch",
+        )
+        .await;
+    fixture.chain.lock().unwrap().epoch = 1;
+    fixture.chain.lock().unwrap().revoked = true;
+    fixture
+        .denied(
+            "/v1/config/get",
+            fixture.cap(true, CapOp::Fetch),
+            "device_inactive",
+        )
+        .await;
+    fixture.chain.lock().unwrap().revoked = false;
+    let client = ObjectClient::new(fixture.storage.clone());
+    assert!(matches!(
+        client
+            .get(&fixture.cap(false, CapOp::Fetch), &stored[0].0)
+            .await,
+        Err(ObjectError::Denied)
+    ));
+    assert_eq!(fixture.snapshot(), stored);
+
+    let first = serde_json::json!({"cap":fixture.cap(true, CapOp::Store), "plaintext_b64":STANDARD.encode(b"first"), "expected_revision":original_revision});
+    let second = serde_json::json!({"cap":fixture.cap(true, CapOp::Store), "plaintext_b64":STANDARD.encode(b"second"), "expected_revision":original_revision});
+    let (first, second) = tokio::join!(
+        fixture.call_body("/v1/config/put", first),
+        fixture.call_body("/v1/config/put", second)
+    );
+    let statuses = [first.0, second.0];
+    assert_eq!(
+        statuses
+            .iter()
+            .filter(|status| **status == StatusCode::OK)
+            .count(),
+        1
+    );
+    assert_eq!(
+        statuses
+            .iter()
+            .filter(|status| **status == StatusCode::CONFLICT)
+            .count(),
+        1
+    );
+    let loser = if first.0 == StatusCode::CONFLICT {
+        &first.1
+    } else {
+        &second.1
+    };
+    assert_eq!(loser["reason"], "stale_base");
+    let winner = if first.0 == StatusCode::OK {
+        b"first".as_slice()
+    } else {
+        b"second".as_slice()
+    };
+    let (status, fetched) = fixture
+        .call("/v1/config/get", fixture.cap(true, CapOp::Fetch), false)
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        STANDARD
+            .decode(fetched["plaintext_b64"].as_str().unwrap())
+            .unwrap(),
+        winner
+    );
+    let current = fixture.snapshot();
+    let (status, body) = fixture.call_body("/v1/config/put", serde_json::json!({"cap":fixture.cap(true, CapOp::Store), "plaintext_b64":STANDARD.encode(PLAINTEXT), "expected_revision":""})).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(body["reason"], "stale_base");
+    assert_eq!(fixture.snapshot(), current);
+    fixture.storage.fail_delete.store(1, Ordering::SeqCst);
+    let (status, body) = fixture
+        .call(
+            "/v1/config/teardown",
+            fixture.cap(true, CapOp::Teardown),
+            false,
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert_eq!(body["reason"], "storage_unavailable");
+    assert_eq!(fixture.snapshot(), current);
+    fixture.storage.fail_delete.store(0, Ordering::SeqCst);
+    let (status, body) = fixture
+        .call(
+            "/v1/config/teardown",
+            fixture.cap(true, CapOp::Teardown),
+            false,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["keys_deleted"], 1);
+    assert!(fixture.snapshot().is_empty());
+    let (status, body) = fixture
+        .call("/v1/config/get", fixture.cap(true, CapOp::Fetch), false)
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["reason"], "object_not_found");
+}
+
+#[tokio::test]
+async fn configuration_without_development_key_only_accepts_client_encrypted_objects() {
+    let fixture = Fixture::new_for(
+        DataClass::Config,
+        agentkeys_worker_config::handlers::build_router,
+        false,
+    )
+    .await;
+    let mut key = [0; 32];
+    rand_core::RngCore::fill_bytes(&mut rand_core::OsRng, &mut key);
+    let encrypted = agentkeys_core::envelope_v3::encrypt_v3(
+        &key,
+        PLAINTEXT,
+        &agentkeys_core::envelope_v3::aad_v3(&"11".repeat(32), SERVICE),
+    )
+    .unwrap();
+    let (status, body) = fixture.call_body("/v1/config/put", serde_json::json!({"cap":fixture.cap(true, CapOp::Store), "envelope_b64":STANDARD.encode(&encrypted), "expected_revision":""})).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body) = fixture
+        .call("/v1/config/get", fixture.cap(true, CapOp::Fetch), false)
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body["plaintext_b64"].is_null());
+    assert_eq!(
+        STANDARD
+            .decode(body["envelope_b64"].as_str().unwrap())
+            .unwrap(),
+        encrypted
+    );
+    fixture
+        .denied(
+            "/v1/config/put",
+            fixture.cap(true, CapOp::Store),
+            "plaintext_put_disabled",
+        )
+        .await;
+    let stored = fixture.snapshot();
+    let calls = fixture.storage.calls.load(Ordering::SeqCst);
+    let (status, body) = fixture.call_body("/v1/config/put", serde_json::json!({"cap":fixture.cap(true, CapOp::Store), "envelope_b64":STANDARD.encode([3u8]), "expected_revision":""})).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["reason"], "envelope_truncated");
+    assert_eq!(fixture.storage.calls.load(Ordering::SeqCst), calls);
+    assert_eq!(fixture.snapshot(), stored);
+}
+
 struct WorkerProcess {
     child: tokio::process::Child,
     url: String,
@@ -499,22 +726,25 @@ impl WorkerProcess {
     ) -> Self {
         use std::{process::Stdio, time::Duration};
         use tokio::io::AsyncBufReadExt;
-        let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_agentkeys-worker-creds"))
-            .env_clear()
-            .arg("--development")
-            .arg("--profile")
-            .arg(profile)
-            .arg("--broker-public-key")
-            .arg(public_key)
-            .arg("--storage-url")
-            .arg(storage_url)
-            .arg("--development-kek-file")
-            .arg(encryption_key)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()
-            .unwrap();
+        let mut child = tokio::process::Command::new(
+            std::env::var("AGENT_TERRIER_QUALIFICATION_WORKER")
+                .unwrap_or_else(|_| env!("CARGO_BIN_EXE_agentkeys-worker-creds").into()),
+        )
+        .env_clear()
+        .arg("--development")
+        .arg("--profile")
+        .arg(profile)
+        .arg("--broker-public-key")
+        .arg(public_key)
+        .arg("--storage-url")
+        .arg(storage_url)
+        .arg("--development-kek-file")
+        .arg(encryption_key)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
         let mut output = tokio::io::BufReader::new(child.stdout.take().unwrap());
         let mut line = String::new();
         tokio::time::timeout(Duration::from_secs(10), output.read_line(&mut line))
@@ -561,6 +791,16 @@ impl WorkerProcess {
 #[tokio::test]
 #[ignore = "requires the explicit real-chain credential qualification fixture"]
 async fn real_chain_credential_worker() {
+    qualify_real_worker(DataClass::Credentials).await;
+}
+
+#[tokio::test]
+#[ignore = "requires the explicit real-chain configuration qualification fixture"]
+async fn real_chain_config_worker() {
+    qualify_real_worker(DataClass::Config).await;
+}
+
+async fn qualify_real_worker(data_class: DataClass) {
     use agentkeys_core::{chain_profile::ChainProfile, protected_file};
     use rand_core::RngCore;
     use std::path::PathBuf;
@@ -600,11 +840,11 @@ async fn real_chain_credential_worker() {
     }
     let profile = ChainProfile::load_from_file(&profile_path).unwrap();
     profile.require_local_development(true, None).unwrap();
-    let database = directory.join("credentials.db");
+    let database = directory.join(format!("{}.db", data_class.as_str()));
     let store = Arc::new(
         LocalStore::open(
             &database,
-            DataClass::Credentials,
+            data_class,
             AuthorityConfig::from_profile(&profile, public).unwrap(),
         )
         .unwrap(),
@@ -617,8 +857,19 @@ async fn real_chain_credential_worker() {
         &encryption_key_file,
     )
     .await;
-    let owner_cap = |op| cap_for(&signer, &owner, &operator, &operator, op);
-    let agent_cap = |op| cap_for(&signer, &agent, &operator, &enrollment.actor_omni, op);
+    let cap = |key: &DeviceKey, actor: &str, op| {
+        let mut cap = cap_for(&signer, key, &operator, actor, op);
+        cap.payload.data_class = data_class;
+        sign_cap(&signer, key, &mut cap);
+        cap
+    };
+    let owner_cap = |op| cap(&owner, &operator, op);
+    let agent_cap = |op| cap(&agent, &enrollment.actor_omni, op);
+    let (put_route, get_route) = if data_class == DataClass::Config {
+        ("/v1/config/put", "/v1/config/get")
+    } else {
+        ("/v1/cred/store", "/v1/cred/fetch")
+    };
     let snapshot = || {
         let connection = rusqlite::Connection::open_with_flags(
             &database,
@@ -637,20 +888,21 @@ async fn real_chain_credential_worker() {
             .unwrap()
     };
     if phase == "active" {
-        let (status, body) = worker
-            .call("/v1/cred/store", owner_cap(CapOp::Store), true)
-            .await;
+        let (status, body) = worker.call(put_route, owner_cap(CapOp::Store), true).await;
         assert_eq!(status, StatusCode::OK, "{body}");
-        let (status, body) = worker
-            .call("/v1/cred/fetch", agent_cap(CapOp::Fetch), false)
-            .await;
-        assert_eq!(status, StatusCode::OK, "{body}");
-        assert_eq!(
-            STANDARD
-                .decode(body["plaintext_b64"].as_str().unwrap())
-                .unwrap(),
-            PLAINTEXT
-        );
+        let (status, body) = worker.call(get_route, agent_cap(CapOp::Fetch), false).await;
+        if data_class == DataClass::Config {
+            assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+            assert_eq!(body["reason"], "config_not_master_self");
+        } else {
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(
+                STANDARD
+                    .decode(body["plaintext_b64"].as_str().unwrap())
+                    .unwrap(),
+                PLAINTEXT
+            );
+        }
         let before = snapshot();
         assert_eq!(before.len(), 1);
         assert!(!before[0]
@@ -679,7 +931,7 @@ async fn real_chain_credential_worker() {
                     sign_cap(&signer, &agent, &mut cap);
                 }
             }
-            let (status, body) = worker.call("/v1/cred/fetch", cap, false).await;
+            let (status, body) = worker.call(get_route, cap, false).await;
             assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
             assert_eq!(body["reason"], reason);
             assert!(body.get("plaintext_b64").is_none());
@@ -695,9 +947,7 @@ async fn real_chain_credential_worker() {
         .await;
     } else {
         let before = snapshot();
-        let (status, body) = worker
-            .call("/v1/cred/fetch", agent_cap(CapOp::Fetch), false)
-            .await;
+        let (status, body) = worker.call(get_route, agent_cap(CapOp::Fetch), false).await;
         assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
         assert_eq!(
             body["reason"],
@@ -710,9 +960,7 @@ async fn real_chain_credential_worker() {
         assert!(body.get("plaintext_b64").is_none());
         assert_eq!(snapshot(), before);
     }
-    let (status, body) = worker
-        .call("/v1/cred/fetch", owner_cap(CapOp::Fetch), false)
-        .await;
+    let (status, body) = worker.call(get_route, owner_cap(CapOp::Fetch), false).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(
         STANDARD
