@@ -100,6 +100,7 @@ pub async fn provision_delegate_envs(
                 envs: agentkeys_protocol::model_runtime::relay_environment(
                     &cfg.turn_url,
                     key.secret,
+                    &cfg.model_id,
                 ),
                 status: "provisioned".into(),
                 error: None,

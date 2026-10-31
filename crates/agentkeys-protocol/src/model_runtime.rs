@@ -4,11 +4,12 @@ pub const MODEL_ID: &str = "AGENTKEYS_MODEL_ID";
 pub const SPEECH_URL: &str = "AGENTKEYS_GATE_SPEECH_URL";
 pub const ENVIRONMENT_NAMES: [&str; 4] = [BASE_URL, API_KEY, MODEL_ID, SPEECH_URL];
 
-pub fn relay_environment(base_url: &str, api_key: String) -> Vec<(String, String)> {
+pub fn relay_environment(base_url: &str, api_key: String, model_id: &str) -> Vec<(String, String)> {
     let base_url = base_url.trim_end_matches('/');
     vec![
         (BASE_URL.into(), base_url.into()),
         (API_KEY.into(), api_key),
+        (MODEL_ID.into(), model_id.into()),
         (SPEECH_URL.into(), relay_origin(base_url).into()),
     ]
 }
@@ -69,10 +70,13 @@ mod tests {
 
     #[test]
     fn runtime_pair_is_explicit_and_errors_never_echo_credentials() {
-        let values: BTreeMap<_, _> =
-            relay_environment("http://localhost:8077/v1/", "synthetic-key".into())
-                .into_iter()
-                .collect();
+        let values: BTreeMap<_, _> = relay_environment(
+            "http://localhost:8077/v1/",
+            "synthetic-key".into(),
+            "fixture-model",
+        )
+        .into_iter()
+        .collect();
         assert!(validate_environment(|name| values.get(name).map(String::as_str)).is_ok());
         for name in [BASE_URL, API_KEY] {
             let mut invalid = values.clone();

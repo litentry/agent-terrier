@@ -79,6 +79,9 @@ async fn main() -> anyhow::Result<()> {
         Some(Command::Keygen { purpose, out }) => return run_keygen(purpose, out),
         None => {}
     }
+    agentkeys_broker_server::gate_admin::load_gate_admin_config()
+        .transpose()
+        .map_err(anyhow::Error::msg)?;
 
     let config = BrokerConfig::from_env()?;
 

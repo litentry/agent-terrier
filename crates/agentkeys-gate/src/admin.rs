@@ -1,55 +1,16 @@
-//! #427 — the admin provisioning surface the BROKER drives at spawn/archive
-//! (epic #425 decision 6): `POST /v1/admin/keys` mints a per-delegate relay
-//! key (upsert; the secret is returned ONCE), `POST /v1/admin/keys/:id/disable`
-//! deprovisions it (turns refuse; usage history stays for rollups). Both are
-//! gated by the SAME operator admin bearer that guards the all-users usage
-//! view (`AGENTKEYS_GATE_ADMIN_TOKEN`) — its first mutating use, which is why
-//! every mutation write-throughs to the 0600 keys file (durability) and the
-//! gate remains custody + metering (provisioning changes WHO is metered,
-//! never what a caller may do).
-//!
-//! The request/response shapes are pinned by the serde tests below — the
-//! broker-side client (`agentkeys-broker-server/src/gate_admin.rs`) mirrors
-//! them (#203 one-owner posture at the field level).
+//! Authenticated relay-key provisioning and revocation.
 
 use std::sync::Arc;
 
+pub use agentkeys_protocol::model_relay::{DisableKeyResponse, ProvisionKeyRequest};
 use axum::extract::{Path, State};
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use serde::{Deserialize, Serialize};
 
 use crate::auth;
 use crate::error::GateError;
 use crate::relay::Relay;
-
-/// `POST /v1/admin/keys` body.
-#[derive(Debug, Clone, Deserialize)]
-pub struct ProvisionKeyRequest {
-    /// Stable key id — the broker uses the delegate's `device_key_hash`.
-    pub key_id: String,
-    /// The OWNING user omni — the budget/rollup accumulation root.
-    pub user_omni: String,
-    /// The delegate actor omni (per-delegate attribution dimension).
-    #[serde(default)]
-    pub delegate_omni: Option<String>,
-    pub device_id: String,
-    #[serde(default)]
-    pub label: String,
-    /// Per-delegate token ceiling UNDER the user budget (the tier default the
-    /// broker passes; unset = only the user-level budget applies).
-    #[serde(default)]
-    pub budget_tokens: Option<u64>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct DisableKeyResponse {
-    pub key_id: String,
-    /// `true` = a live key was disabled; `false` = unknown/already disabled
-    /// (idempotent).
-    pub disabled: bool,
-}
 
 fn auth_header(headers: &HeaderMap) -> Option<&str> {
     headers
@@ -116,7 +77,7 @@ pub async fn disable_key(
 mod tests {
     use super::*;
 
-    /// Pin the wire shape the broker's `gate_admin.rs` client mirrors.
+    /// The broker and relay use this same wire contract.
     #[test]
     fn provision_request_shape_is_pinned() {
         let req: ProvisionKeyRequest = serde_json::from_value(serde_json::json!({

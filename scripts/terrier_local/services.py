@@ -29,8 +29,9 @@ WORKERS = {
 BROKER_BINARY = "agentkeys-broker-server"
 STORE_BINARY = "agentkeys-local-store"
 SIGNER_BINARY = "agentkeys-local-signer"
-BINARIES = (BROKER_BINARY, STORE_BINARY, SIGNER_BINARY, *WORKERS.values())
-MANIFEST_VERSION = 2
+RELAY_BINARY = "agentkeys-gate"
+BINARIES = (BROKER_BINARY, STORE_BINARY, SIGNER_BINARY, RELAY_BINARY, *WORKERS.values())
+MANIFEST_VERSION = 3
 
 
 def binary_directory(repository, configured=None):
@@ -61,7 +62,7 @@ def prepare(repository, state, binaries, port):
     manifest_path = directory / "manifest.json"
     if manifest_path.exists() or manifest_path.is_symlink():
         manifest = local_state.read_json(manifest_path)
-        if (not isinstance(manifest, dict) or manifest.get("version") not in (1, MANIFEST_VERSION) or manifest.get("development_only") is not True
+        if (not isinstance(manifest, dict) or manifest.get("version") not in (1, 2, MANIFEST_VERSION) or manifest.get("development_only") is not True
                 or manifest.get("profile_identity") != fingerprint
                 or type(manifest.get("initialized")) is not bool
                 or type(manifest.get("broker_port")) is not int
@@ -108,10 +109,21 @@ def prepare(repository, state, binaries, port):
     signer_secret = signer_directory / "master.key"
     if signer_secret.exists() or signer_secret.is_symlink():
         os.close(local_state.open_private(signer_secret))
-    elif manifest["initialized"] and manifest["version"] == MANIFEST_VERSION:
+    elif manifest["initialized"] and manifest["version"] >= 2:
         raise ValueError("An existing development signer key is missing; restore the original key")
     else:
         local_state.write_private(signer_secret, secrets.token_hex(32).encode())
+    relay_directory = local_state.private_directory(directory / "relay")
+    for name in ("admin.key", "keys.json"):
+        path = relay_directory / name
+        if path.exists() or path.is_symlink():
+            os.close(local_state.open_private(path))
+        elif manifest["initialized"] and manifest["version"] >= 3:
+            raise ValueError("Existing model relay state is missing; restore the original file")
+        elif name == "admin.key":
+            local_state.write_private(path, secrets.token_hex(32).encode())
+        else:
+            local_state.write_json(path, {})
     manifest["version"] = MANIFEST_VERSION
     manifest["initialized"] = True
     local_state.write_json(manifest_path, manifest)
@@ -245,7 +257,15 @@ def serve(repository, state, configured):
         signal.signal(signal.SIGTERM, interrupted)
         signal.signal(signal.SIGINT, interrupted)
         try:
+            relay_directory = directory / "relay"
+            components["model_relay"] = launch(binaries / RELAY_BINARY,
+                ["--listen", "127.0.0.1:0", "--require-local-upstream",
+                 "--admin-token-file", relay_directory / "admin.key", "--keys-file", relay_directory / "keys.json"],
+                contracts.tool_environment(), directory / "model-relay.log", children)
             environment = broker_environment(broker_directory, profile_path, manifest["broker_port"])
+            environment.update(AGENTKEYS_GATE_ADMIN_URL=components["model_relay"][1],
+                AGENTKEYS_GATE_ADMIN_TOKEN_FILE=str(relay_directory / "admin.key"),
+                AGENTKEYS_GATE_TURN_URL=components["model_relay"][1] + "/v1")
             components["broker"] = launch(binaries / BROKER_BINARY,
                 broker_arguments(broker_directory, manifest["broker_port"]),
                 environment, directory / "broker.log", children)
@@ -267,7 +287,7 @@ def serve(repository, state, configured):
                     contracts.tool_environment(), directory / f"{data_class}.log", children)
 
             def snapshot():
-                services = {name:{"url":endpoint, "healthy":process.poll() is None and healthy(endpoint, name == "broker")}
+                services = {name:{"url":endpoint, "healthy":process.poll() is None and healthy(endpoint, name in ("broker", "model_relay"))}
                             for name, (process, endpoint) in components.items()}
                 running_chain = chain.status(state)
                 profile = local_state.read_json(profile_path)
@@ -327,7 +347,8 @@ def serve(repository, state, configured):
 def logs(state):
     paths = [state / "services-supervisor.log"]
     directory = state / "services"
-    paths.extend([directory / "broker.log", directory / "signer.log", *[directory / f"{name}{suffix}.log" for name in WORKERS for suffix in ("", "-store")]])
+    paths.extend([directory / "broker.log", directory / "signer.log", directory / "model-relay.log",
+                  *[directory / f"{name}{suffix}.log" for name in WORKERS for suffix in ("", "-store")]])
     for path in paths:
         if path.exists() or path.is_symlink():
             with os.fdopen(local_state.open_private(path)) as source:

@@ -6,6 +6,7 @@ pub mod browser_origins;
 pub mod capability;
 pub mod chain_abi;
 pub mod model_config;
+pub mod model_relay;
 pub mod model_runtime;
 pub mod object_store;
 pub mod runtime_layout;

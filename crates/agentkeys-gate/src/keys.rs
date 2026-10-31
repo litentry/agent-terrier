@@ -88,13 +88,7 @@ pub struct KeyStore {
     persistence_failed: AtomicBool,
 }
 
-/// The provision result — the secret is returned ONCE (the caller injects it
-/// into the sandbox env and drops it; the file keeps it for restarts, 0600).
-#[derive(serde::Serialize)]
-pub struct ProvisionedKey {
-    pub key_id: String,
-    pub secret: String,
-}
+pub use agentkeys_protocol::model_relay::ProvisionedKey;
 
 impl KeyStore {
     /// Seed from the boot config: its keys-file key set + the write-through

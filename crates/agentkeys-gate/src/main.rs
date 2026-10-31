@@ -63,6 +63,10 @@ async fn main() -> anyhow::Result<()> {
     let app = server::router(relay);
 
     let listener = tokio::net::TcpListener::bind(&listen).await?;
+    println!(
+        "{}",
+        serde_json::json!({"listen": listener.local_addr()?.to_string(), "ready": true, "surface": "model-relay"})
+    );
     tracing::info!(addr = %listen, "agentkeys-gate listening (OpenAI-compatible egress relay)");
     axum::serve(listener, app).await?;
 

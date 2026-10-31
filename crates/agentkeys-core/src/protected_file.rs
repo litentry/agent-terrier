@@ -61,6 +61,22 @@ pub fn read_text(path: &str) -> Result<Zeroizing<String>> {
     Ok(contents)
 }
 
+pub fn read_token(path: &std::path::Path) -> Result<Zeroizing<String>> {
+    let contents = read_text(
+        path.to_str()
+            .ok_or_else(|| anyhow::anyhow!("credential path must be UTF-8"))?,
+    )?;
+    let token = contents.trim();
+    ensure!(
+        !token.is_empty()
+            && !token
+                .bytes()
+                .any(|byte| byte.is_ascii_control() || byte.is_ascii_whitespace()),
+        "credential file must contain one nonempty token"
+    );
+    Ok(Zeroizing::new(token.to_owned()))
+}
+
 pub fn write(path: &str, contents: &[u8], create_new: bool) -> Result<()> {
     ensure!(
         contents.len() as u64 <= MAX_SECRET_FILE_BYTES,
