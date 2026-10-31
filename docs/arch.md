@@ -49,6 +49,8 @@ ERC-4337 receipt interpretation is owned by `agentkeys-core::user_operation_rece
 
 ## Migration gates
 
+`scripts/terrier_local/test_lanes.py` owns CLI test selection and timing. GitHub's source check calls the same entry point. The [test lane table](wiki/test-lanes.md) distinguishes available local/PR checks from pending scheduled and complete release qualification; incomplete or ignored-only runs cannot become passes.
+
 Public source checks reject captured deployment image inventories as well as secrets, private domains and excluded assets. This is a source/artifact gate; historical publication review remains part of release acceptance. Identity derivation has one configurable namespace and preserves the existing default vectors; no deployment-specific namespace constant is required.
 
 The source tree still contains runtime-specific integrations that must be replaced by neutral interfaces before local release. That work is tracked by [#3](https://github.com/litentry/agent-terrier/issues/3); real local chain/signing, storage, Docker and models follow in [#4](https://github.com/litentry/agent-terrier/issues/4), [#5](https://github.com/litentry/agent-terrier/issues/5), [#6](https://github.com/litentry/agent-terrier/issues/6) and [#7](https://github.com/litentry/agent-terrier/issues/7).

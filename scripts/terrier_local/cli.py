@@ -4,12 +4,18 @@ from pathlib import Path
 import subprocess
 import sys
 
-from . import chain, contracts, data, deployment, local_state, models, owner, services
+from . import chain, contracts, data, deployment, local_state, models, owner, services, test_lanes
 
 
 def main():
     parser = argparse.ArgumentParser(description="Agent Terrier local development tools")
     commands = parser.add_subparsers(dest="command", required=True)
+    test_parser = commands.add_parser("test", help="Run measured source, core or focused test lanes")
+    test_parser.add_argument("lane", choices=["source", "core", "focused"])
+    test_parser.add_argument("--component", action="append", default=[], choices=test_lanes.COMPONENTS)
+    test_parser.add_argument("--online", action="store_true", help="Explicitly fetch Cargo dependencies before Rust tests")
+    test_parser.add_argument("--report", type=Path, help="New JSON report path outside the checkout")
+    test_parser.add_argument("--plan", action="store_true", help="Print selection without running tools")
     model_parser = commands.add_parser("models", help="Qualify actual local model capabilities")
     model_parser.add_argument("action", choices=["config", "probe"])
     model_parser.add_argument("--base-url")
@@ -55,6 +61,11 @@ def main():
     arguments = parser.parse_args()
     repository = Path(__file__).resolve().parents[2]
     try:
+        if arguments.command == "test":
+            report, exit_code = test_lanes.run(repository, arguments.lane, arguments.component,
+                arguments.online, arguments.report, arguments.plan)
+            print(json.dumps(report, indent=2))
+            return exit_code
         if arguments.command == "contracts":
             return contracts.run(repository, arguments.action, arguments.offline, arguments.match_test)
         if arguments.command == "models":

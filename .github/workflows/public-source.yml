@@ -11,11 +11,8 @@ jobs:
     timeout-minutes: 3
     steps:
       - uses: actions/checkout@v4
-      - name: Validate public contents
-        run: python3 scripts/check-public.py
-      - name: Test publication checks
-        run: python3 -m unittest discover -s scripts/tests
-      - name: Test local web server isolation
-        run: node --test scripts/tests/web-ssr-server.test.mjs
-      - name: Check workspace dependency closure
-        run: cargo metadata --locked --no-deps --format-version 1 > /dev/null
+      - name: Run the canonical source lane
+        run: python3 terrier test source --report "${RUNNER_TEMP}/source-lane.json"
+      - name: Summarize timings
+        if: always()
+        run: python3 scripts/test-timing-summary.py "${RUNNER_TEMP}/source-lane.json" >> "${GITHUB_STEP_SUMMARY}"
