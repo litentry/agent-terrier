@@ -118,9 +118,11 @@ use k256::ecdsa::SigningKey;
 // base fee (the userOp couldn't pay actual gas). 40 gwei clears base + priority AND
 // keeps the max prefund (sum of gas limits × maxFee ≈ 0.15 HEI) under the paymaster's
 // 0.2 HEI EntryPoint deposit. (A future hardening reads the live base fee + buffers.)
-const DEF_VERIFICATION_GAS_LIMIT: u128 = 1_500_000;
-const DEF_CALL_GAS_LIMIT: u128 = 2_000_000;
-const DEF_PRE_VERIFICATION_GAS: u128 = 100_000;
+use agentkeys_core::erc4337::{
+    DEFAULT_CALL_GAS_LIMIT as DEF_CALL_GAS_LIMIT,
+    DEFAULT_PRE_VERIFICATION_GAS as DEF_PRE_VERIFICATION_GAS,
+    DEFAULT_VERIFICATION_GAS_LIMIT as DEF_VERIFICATION_GAS_LIMIT,
+};
 const DEF_MAX_PRIORITY_FEE: u128 = 1_000_000_000;
 const DEF_MAX_FEE: u128 = 40_000_000_000;
 const DEF_PAYMASTER_VERIFICATION_GAS: u128 = 200_000;
@@ -525,8 +527,16 @@ pub(crate) async fn call_operator_master_wallet(
     registry: &[u8; 20],
     operator_omni: &str,
 ) -> Result<[u8; 20], String> {
-    let arg = format!("{:0>64}", norm_omni(operator_omni));
-    let data = format!("0x{}{}", selector("operatorMasterWallet(bytes32)"), arg);
+    let operator: [u8; 32] = hex::decode(norm_omni(operator_omni))
+        .map_err(|_| "invalid operator identity")?
+        .try_into()
+        .map_err(|_| "operator identity must be 32 bytes")?;
+    let data = format!(
+        "0x{}",
+        hex::encode(agentkeys_core::erc4337::operator_master_wallet_calldata(
+            &operator
+        ))
+    );
     let raw = eth_call(http, rpc, registry, &data).await?;
     let hexs = raw.trim_start_matches("0x");
     if hexs.len() < 64 {
@@ -542,13 +552,9 @@ pub(crate) async fn call_entrypoint_nonce(
     entry_point: &[u8; 20],
     account: &[u8; 20],
 ) -> Result<[u8; 32], String> {
-    let sender = format!("{:0>64}", hex::encode(account));
-    let key = "0".repeat(64);
     let data = format!(
-        "0x{}{}{}",
-        selector("getNonce(address,uint192)"),
-        sender,
-        key
+        "0x{}",
+        hex::encode(agentkeys_core::erc4337::entrypoint_nonce_calldata(account))
     );
     let raw = eth_call(http, rpc, entry_point, &data).await?;
     let b = hex::decode(raw.trim_start_matches("0x")).map_err(|e| format!("nonce hex: {e}"))?;
