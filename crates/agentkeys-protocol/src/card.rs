@@ -23,7 +23,7 @@ pub const CARD_CONTENT_TYPE: &str = "application/vnd.agentkeys.card+json";
 
 /// One headline number (eaten vs target, outings today, …).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, ts_rs::TS)]
-#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+#[ts(export, export_to = "../../../design-system/generated/")]
 pub struct CardMetric {
     pub label: String,
     #[serde(default)]
@@ -40,7 +40,7 @@ pub struct CardMetric {
 
 /// One line of a section.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
-#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+#[ts(export, export_to = "../../../design-system/generated/")]
 pub struct CardItem {
     pub text: String,
     #[serde(default)]
@@ -58,7 +58,7 @@ pub struct CardItem {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
-#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+#[ts(export, export_to = "../../../design-system/generated/")]
 pub struct CardSection {
     pub title: String,
     #[serde(default)]
@@ -70,7 +70,7 @@ pub struct CardSection {
 /// An alert's severity — renderer maps to a color, never to a behavior.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "lowercase")]
-#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+#[ts(export, export_to = "../../../design-system/generated/")]
 pub enum CardAlertLevel {
     #[default]
     Info,
@@ -79,7 +79,7 @@ pub enum CardAlertLevel {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
-#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+#[ts(export, export_to = "../../../design-system/generated/")]
 pub struct CardAlert {
     #[serde(default)]
     pub level: CardAlertLevel,
@@ -91,7 +91,7 @@ pub struct CardAlert {
 /// A tappable action. Tapping publishes a `command` event whose body is a
 /// [`CardCommand`] — the renderer never interprets `command`/`args`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
-#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+#[ts(export, export_to = "../../../design-system/generated/")]
 pub struct CardAction {
     /// Stable within the card (`dinner.swap`).
     pub id: String,
@@ -107,7 +107,7 @@ pub struct CardAction {
 
 /// The card document — published as the `doc` event body (UTF-8 JSON).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ts_rs::TS)]
-#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+#[ts(export, export_to = "../../../design-system/generated/")]
 pub struct CardDocument {
     /// Schema version — [`CARD_SCHEMA`].
     pub card: u32,
@@ -205,7 +205,7 @@ pub fn parse_card(body: &[u8]) -> Result<CardDocument, String> {
 
 /// The `command` event body a renderer publishes when an action is tapped.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
-#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+#[ts(export, export_to = "../../../design-system/generated/")]
 pub struct CardCommand {
     /// Schema version — [`CARD_SCHEMA`].
     pub card: u32,
