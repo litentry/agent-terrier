@@ -11,10 +11,10 @@ use agentkeys_core::audit::{
 
 use crate::audit::{cap_hash, keccak_hex, zero_hash};
 use crate::envelope;
-use crate::errors::{err_400, err_403, err_500, err_502, ApiError};
+use crate::errors::{err_403, err_500, ApiError};
 use crate::state::SharedWorkerState;
-use crate::verify::{self, CapOp, CapPayload, CapToken, DataClass};
-use agentkeys_core::object_store::ObjectError;
+use crate::storage_worker::storage_error;
+use crate::verify::{CapOp, CapPayload, CapToken, DataClass};
 
 pub fn build_router(state: SharedWorkerState) -> Router {
     let browser_origins = &state.config.browser_origins;
@@ -100,17 +100,8 @@ pub type StoreRequest = agentkeys_protocol::CredStoreBody<CapToken>;
 pub type FetchRequest = agentkeys_protocol::CredFetchBody<CapToken>;
 pub use agentkeys_protocol::{CredFetchResp as FetchResponse, CredStoreResp as StoreResponse};
 
-#[derive(Debug, Deserialize)]
-pub struct TeardownRequest {
-    pub cap: CapToken,
-}
-
-#[derive(Debug, Serialize)]
-pub struct TeardownResponse {
-    pub ok: bool,
-    pub keys_deleted: usize,
-    pub audit_envelope_hash: Option<String>,
-}
+pub type TeardownRequest = agentkeys_protocol::WorkerTeardownBody<CapToken>;
+pub use agentkeys_protocol::WorkerTeardownResp as TeardownResponse;
 
 async fn cred_store(
     State(state): State<SharedWorkerState>,
@@ -155,7 +146,12 @@ async fn cred_store_inner(
     state: &SharedWorkerState,
     req: &StoreRequest,
 ) -> Result<(String, Vec<u8>), ApiError> {
-    let env_bytes = resolve_store_bytes(req, &state.config.development_kek)?;
+    let env_bytes = crate::storage_worker::store_bytes(
+        &req.cap,
+        req.plaintext_b64.as_deref(),
+        req.envelope_b64.as_deref(),
+        state.config.development_kek.as_deref().map(String::as_str),
+    )?;
 
     let key = object_key(&req.cap.payload.actor_omni, &req.cap.payload.service);
     state
@@ -166,50 +162,14 @@ async fn cred_store_inner(
     Ok((key, env_bytes))
 }
 
-fn resolve_store_bytes(req: &StoreRequest, kek_hex_stage1: &str) -> Result<Vec<u8>, ApiError> {
-    use base64::{engine::general_purpose::STANDARD, Engine as _};
-    match (&req.envelope_b64, &req.plaintext_b64) {
-        (Some(_), Some(_)) => Err(err_400(
-            "exactly one of envelope_b64 / plaintext_b64 (both given)",
-            "store_mode_ambiguous",
-        )),
-        (None, None) => Err(err_400(
-            "exactly one of envelope_b64 / plaintext_b64 (neither given)",
-            "store_mode_missing",
-        )),
-        (Some(env_b64), None) => {
-            let bytes = STANDARD
-                .decode(env_b64)
-                .map_err(|e| err_400(e.to_string(), "envelope_b64_decode"))?;
-            match envelope::version(&bytes) {
-                Some(envelope::ENVELOPE_VERSION_V3) => Ok(bytes),
-                Some(v) => Err(err_400(
-                    format!("envelope_b64 must be a v3 envelope (got version 0x{v:02x})"),
-                    "envelope_not_v3",
-                )),
-                None => Err(err_400(
-                    format!(
-                        "envelope_b64 too short to be an envelope ({} bytes)",
-                        bytes.len()
-                    ),
-                    "envelope_truncated",
-                )),
-            }
-        }
-        (None, Some(pt_b64)) => {
-            let plaintext = STANDARD
-                .decode(pt_b64)
-                .map_err(|e| err_400(e.to_string(), "plaintext_b64_decode"))?;
-            let aad = envelope::aad(
-                &req.cap.payload.operator_omni,
-                &req.cap.payload.actor_omni,
-                &req.cap.payload.service,
-                req.cap.payload.k3_epoch,
-            );
-            envelope::encrypt(kek_hex_stage1, &plaintext, &aad)
-                .map_err(|e| err_500(e.to_string(), "envelope_encrypt"))
-        }
-    }
+#[cfg(test)]
+fn resolve_store_bytes(req: &StoreRequest, key: &str) -> Result<Vec<u8>, ApiError> {
+    crate::storage_worker::store_bytes(
+        &req.cap,
+        req.plaintext_b64.as_deref(),
+        req.envelope_b64.as_deref(),
+        Some(key),
+    )
 }
 
 async fn cred_fetch(
@@ -275,9 +235,23 @@ async fn cred_fetch_inner(
         &req.cap.payload.service,
         req.cap.payload.k3_epoch,
     );
-    envelope::decrypt(&state.config.development_kek, &body, &aad)
-        .map(CredFetched::Plaintext)
-        .map_err(|e| err_500(e.to_string(), "envelope_decrypt"))
+    envelope::decrypt(
+        state
+            .config
+            .development_kek
+            .as_deref()
+            .map(String::as_str)
+            .ok_or_else(|| {
+                err_500(
+                    "stored object requires its original development encryption key",
+                    "development_kek_missing",
+                )
+            })?,
+        &body,
+        &aad,
+    )
+    .map(CredFetched::Plaintext)
+    .map_err(|e| err_500(e.to_string(), "envelope_decrypt"))
 }
 
 fn fetch_vault_owner(payload: &CapPayload) -> &str {
@@ -327,28 +301,7 @@ async fn cred_teardown_inner(
     req: &TeardownRequest,
 ) -> Result<usize, ApiError> {
     let prefix = object_prefix(&req.cap.payload.actor_omni);
-    let mut deleted = 0;
-    let mut cursor = None;
-    loop {
-        let page = state
-            .storage
-            .list(&req.cap, &prefix, cursor.as_deref())
-            .await
-            .map_err(storage_error)?;
-        for key in &page.keys {
-            state
-                .storage
-                .delete(&req.cap, key, None)
-                .await
-                .map_err(storage_error)?;
-            deleted += 1;
-        }
-        cursor = page.next;
-        if cursor.is_none() {
-            break;
-        }
-    }
-    Ok(deleted)
+    crate::storage_worker::delete_prefix(state, &req.cap, &prefix).await
 }
 
 async fn verify_cap(
@@ -356,72 +309,7 @@ async fn verify_cap(
     cap: &CapToken,
     expected_op: CapOp,
 ) -> Result<(), ApiError> {
-    verify::verify_signature(&state.config.authority.broker_public_key, cap)
-        .map_err(|e| err_403(e.to_string(), "broker_sig_invalid"))?;
-    verify::enforce_client_pop(cap).map_err(|e| err_403(e.to_string(), "cap_pop_invalid"))?;
-    verify::check_op(cap, expected_op).map_err(|e| err_403(e.to_string(), "cap_op_mismatch"))?;
-    verify::check_data_class(cap, DataClass::Credentials)
-        .map_err(|e| err_403(e.to_string(), "cap_data_class_mismatch"))?;
-    verify::check_freshness(cap).map_err(|e| err_403(e.to_string(), "cap_freshness_failed"))?;
-    verify::check_chain_device(
-        &state.http,
-        &state.config.authority.rpc_url,
-        &state.config.authority.registry,
-        cap,
-    )
-    .await
-    .map_err(|e| match e {
-        verify::VerifyError::DeviceInactive => err_403(e.to_string(), "device_inactive"),
-        verify::VerifyError::DeviceMismatch { .. } => {
-            err_403(e.to_string(), "device_binding_mismatch")
-        }
-        verify::VerifyError::DeviceRoleMissing { .. } => {
-            err_403(e.to_string(), "device_role_missing")
-        }
-        _ => err_502(e.to_string(), "chain_rpc"),
-    })?;
-    verify::check_chain_scope(
-        &state.http,
-        &state.config.authority.rpc_url,
-        &state.config.authority.scope,
-        cap,
-    )
-    .await
-    .map_err(|e| match e {
-        verify::VerifyError::NotInScope => err_403(e.to_string(), "service_not_in_scope"),
-        _ => err_502(e.to_string(), "chain_rpc"),
-    })?;
-    verify::check_chain_k3_epoch(
-        &state.http,
-        &state.config.authority.rpc_url,
-        &state.config.authority.epoch,
-        cap,
-    )
-    .await
-    .map_err(|e| match e {
-        verify::VerifyError::K3Mismatch { .. } => err_403(e.to_string(), "k3_epoch_mismatch"),
-        _ => err_502(e.to_string(), "chain_rpc"),
-    })?;
-    Ok(())
-}
-
-fn storage_error(error: ObjectError) -> ApiError {
-    use crate::errors::{err_404, err_409};
-    match error {
-        ObjectError::Denied => err_403(error.to_string(), "storage_denied"),
-        ObjectError::NotFound => err_404(
-            error.to_string(),
-            agentkeys_protocol::object_store::OBJECT_NOT_FOUND,
-        ),
-        ObjectError::Conflict => err_409(
-            error.to_string(),
-            agentkeys_protocol::object_store::OBJECT_REVISION_CONFLICT,
-        ),
-        ObjectError::InvalidRequest => err_400(error.to_string(), "object_request_invalid"),
-        ObjectError::Unavailable | ObjectError::InvalidResponse => {
-            err_502(error.to_string(), "storage_unavailable")
-        }
-    }
+    crate::storage_worker::verify_cap(state, cap, expected_op, DataClass::Credentials).await
 }
 
 fn object_key(actor_omni: &str, service: &str) -> String {

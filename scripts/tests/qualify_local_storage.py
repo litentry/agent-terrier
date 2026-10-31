@@ -15,7 +15,7 @@ from terrier_local import contracts
 class LocalStorageFixture(LocalOwnerFixture):
     device = qualify_local_binding.LocalBindingTests.device
 
-    def qualify(self, package, target, test_name, service, database):
+    def qualify(self, package, target, test_name, service, database, worker_package=None):
         build = subprocess.run(["cargo", "test", "--offline", "-p", package,
             "--test", target, "--no-run", "--message-format=json"],
             cwd=REPOSITORY, env=contracts.tool_environment(), capture_output=True, text=True, timeout=900)
@@ -24,6 +24,16 @@ class LocalStorageFixture(LocalOwnerFixture):
         binaries = [item["executable"] for item in artifacts if item.get("reason") == "compiler-artifact"
                     and item.get("target", {}).get("name") == target and item.get("executable")]
         self.assertEqual(len(binaries), 1)
+        worker_binary = None
+        if worker_package:
+            build = subprocess.run(["cargo", "build", "--offline", "-p", worker_package, "--message-format=json"],
+                cwd=REPOSITORY, env=contracts.tool_environment(), capture_output=True, text=True, timeout=900)
+            self.assertEqual(build.returncode, 0, build.stderr)
+            artifacts = [json.loads(line) for line in build.stdout.splitlines() if line.startswith("{")]
+            workers = [item["executable"] for item in artifacts if item.get("reason") == "compiler-artifact"
+                       and item.get("target", {}).get("name") == worker_package and item.get("executable")]
+            self.assertEqual(len(workers), 1)
+            worker_binary = workers[0]
         with tempfile.TemporaryDirectory(prefix="terrier-storage-", dir="/tmp") as temporary:
             root = Path(temporary).resolve()
             state = root / "state"
@@ -46,6 +56,9 @@ class LocalStorageFixture(LocalOwnerFixture):
                     "AGENT_TERRIER_QUALIFICATION_ENROLLMENT": enrollment_file,
                     "AGENT_TERRIER_QUALIFICATION_OPERATOR": owner["operator_omni"],
                 })
+
+                if worker_binary:
+                    environment["AGENT_TERRIER_QUALIFICATION_WORKER"] = worker_binary
 
                 def qualify(phase):
                     environment["AGENT_TERRIER_QUALIFICATION_PHASE"] = phase

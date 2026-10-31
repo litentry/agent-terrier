@@ -45,6 +45,7 @@ aws-sdk-s3 = "1"
 clap = { version = "4", features = ["derive", "env"] }
 
 [dev-dependencies]
+agentkeys-worker-config = { path = "../agentkeys-worker-config" }
 agentkeys-local-store = { path = "../agentkeys-local-store" }
 async-trait = { workspace = true }
 tempfile = "3"

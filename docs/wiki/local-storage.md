@@ -1,4 +1,4 @@
-The local object service is a qualified storage component. The credential worker uses it for encrypted store/fetch/list/teardown operations. Integration with the other workers, product clients, broker sessions and complete local application remains open in [#5](https://github.com/litentry/agent-terrier/issues/5).
+The local object service is a qualified storage component. The credential and configuration workers use it for encrypted data operations. Integration with the other workers, product clients, broker sessions and complete local application remains open in [#5](https://github.com/litentry/agent-terrier/issues/5).
 
 ## Ownership and boundaries
 
@@ -29,7 +29,7 @@ These tests use controlled chain responses and real signatures. They pair valid 
 
 The credential worker invokes `agentkeys-core::object_store::ObjectClient` through the `ObjectStore` interface. The HTTP adapter sends the signed capability on every request, has no ambient cloud credentials, rejects redirects and bounds responses. It verifies returned content revisions and validates list scope, ordering and cursor progress. The worker independently verifies authority before contacting storage; the object service repeats verification before using its database.
 
-The worker binary requires `--development`, a generated `--profile`, a broker public-key file, an explicit loopback `--storage-url`, and `--development-kek-file`. That encryption key must be freshly generated, 32 bytes encoded as hex, and stored in an owner-only file. It is an explicitly development-only software encryption key. Symlinks, hard links and readable-by-others key files are refused by the shared protected-file reader. The binary listens only on loopback. Run `cargo run -p agentkeys-worker-creds -- --help` locally from the public checkout for its flags. Automatic creation and supervision of these component inputs remains part of the local lifecycle work.
+The worker binary requires `--development`, a generated `--profile`, a broker public-key file and an explicit loopback `--storage-url`. For plaintext development writes, pass `--development-kek-file`; without it, writes must contain a client-encrypted v3 envelope. That encryption key must be freshly generated, 32 bytes encoded as hex, and stored in an owner-only file. It is an explicitly development-only software encryption key. Symlinks, hard links and readable-by-others key files are refused by the shared protected-file reader. The binary listens only on loopback. Run `cargo run -p agentkeys-worker-creds -- --help` locally from the public checkout for its flags. Automatic creation and supervision of these component inputs remains part of the local lifecycle work.
 
 The encrypted v2 development flow and client-encrypted v3 envelope flow keep their existing wire format. The response field `s3_key` is a compatibility name for an object key; the credential worker no longer uses S3. Owner-only listing follows pagination, and teardown propagates storage failures rather than reporting partial deletion as success. The existing audit emitter remains in use; audit-service qualification is separate from storage qualification.
 
@@ -38,6 +38,25 @@ The worker integration test runs the actual worker router, cryptography, HTTP ad
 After building the public CLI and preparing contract dependencies, run `python3 scripts/tests/qualify_local_credentials.py` locally from the public checkout for the explicit real-contract credential qualification. It uses the actual credential-worker executable and newly enrolled owner/delegate request keys, verifies encrypted storage and readback, restarts the worker, and applies real scope and device revocations. Owner access remains available after the delegate is revoked. The issuer remains a deliberately untrusted fixture; this does not claim real broker login or mint acceptance.
 
 ## Explicit real-chain qualification
+
+### Configuration worker
+
+Configuration and credential workers share the same local startup options: `--development`, `--profile`, `--broker-public-key`, `--storage-url`, optional `--browser-origins`, and loopback `--listen`. Use a separate storage service/database bound to the `config` data class. The configuration worker has no cloud storage credentials or fallback.
+
+Without `--development-kek-file`, the workers accept only client-encrypted v3 writes and return those envelopes unchanged. Supplying a protected file containing a fresh random 32-byte hex key enables development-only plaintext writes encrypted by the worker. Preserve that key with the private runtime state to read those records after restart. Existing encrypted records are never silently re-keyed. This explicit option replaces the configuration worker's former environment-based encryption switches.
+
+Configuration is owner-only for put, get and teardown. A valid delegate grant does not confer access. Reads return an opaque revision; send that exact value as `expected_revision` to update the value you read, or an empty string for create-only. A competing update returns HTTP 409 `stale_base`; reload before saving. Teardown reports storage failures instead of counting failed deletes as success.
+
+Run locally from the public checkout:
+
+```bash
+cargo test -p agentkeys-worker-creds --test local_storage
+python3 scripts/tests/qualify_local_config.py
+```
+
+The shared Rust integration target belongs to `agentkeys-worker-creds` and covers both workers. It checks real SQLite writes, owner-only denial before storage access, independent storage denial, concurrent revision conflicts, ciphertext-only storage, v3 passthrough without a worker key, and deletion failures. The explicit qualifier runs the configuration executable against real local contracts, then restarts it and revokes the delegate's grant and device while retaining owner access. Its issuer is a fixture; broker login/mint and the complete application remain separate acceptance work.
+
+### Object service
 
 Install the pinned Rust toolchain and Foundry, prepare the contract cache with `terrier contracts setup`, and build the CLI. Run locally from the public repository root:
 

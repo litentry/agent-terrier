@@ -344,11 +344,10 @@ pub struct MemoryGetResp {
 ///   per-actor KEK, `agentkeys-core::kek`) the worker stores VERBATIM; the
 ///   worker never sees plaintext or any key that opens it.
 /// - `plaintext_b64` — the legacy stage-1 path: the worker encrypts under its
-///   static env KEK. Deprecated; rejected once the worker runs
-///   `AGENTKEYS_CONFIG_REQUIRE_V3=1`.
+///   explicitly supplied development key. Rejected when no key is configured.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ConfigPutBody {
-    pub cap: CapToken,
+pub struct ConfigPutBody<T = CapToken> {
+    pub cap: T,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plaintext_b64: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -361,19 +360,19 @@ pub struct ConfigPutBody {
 /// Config-worker `/v1/config/get` request body. Mirrors
 /// `agentkeys_worker_config::handlers::GetRequest`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ConfigGetBody {
-    pub cap: CapToken,
+pub struct ConfigGetBody<T = CapToken> {
+    pub cap: T,
 }
 
 /// EXACTLY ONE of `envelope_b64` / `plaintext_b64` is set (#372 item 2):
 /// v3 blobs come back as the raw envelope for CLIENT-side decrypt under the
 /// signer-derived KEK; legacy v2 blobs come back worker-decrypted.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConfigGetResp {
     pub ok: bool,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plaintext_b64: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub envelope_b64: Option<String>,
     /// Durable-audit receipt (#229): the `AuditEnvelope` hash the worker
     /// emitted for this op (`null`/absent on pre-#229 workers or when the
@@ -382,6 +381,20 @@ pub struct ConfigGetResp {
     pub audit_envelope_hash: Option<String>,
     #[serde(default)]
     pub revision: Option<String>,
+}
+
+pub type ConfigPutResp = CredStoreResp;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkerTeardownBody<T = CapToken> {
+    pub cap: T,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkerTeardownResp {
+    pub ok: bool,
+    pub keys_deleted: usize,
+    pub audit_envelope_hash: Option<String>,
 }
 
 // ── channel worker (`/v1/channel/{publish,poll,teardown}`) — #406 channels ───
