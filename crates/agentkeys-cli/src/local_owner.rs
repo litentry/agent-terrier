@@ -166,6 +166,8 @@ pub struct OwnerPlan {
     pub already_registered: bool,
     pub build: Option<BuildAcceptUserOpResponse>,
     pub transaction_data: Option<String>,
+    #[serde(default)]
+    pub rpc_user_op: Option<RpcUserOp>,
 }
 
 struct LocalChain {
@@ -461,6 +463,7 @@ pub async fn prepare(context: &CommandContext, options: &OwnerOptions) -> Result
         already_registered: registered == predicted,
         build: None,
         transaction_data: None,
+        rpc_user_op: None,
     };
     if options.action == OwnerAction::Register && plan.already_registered {
         return Ok(plan);
@@ -626,6 +629,7 @@ pub async fn prepare(context: &CommandContext, options: &OwnerOptions) -> Result
         std::slice::from_ref(&operation),
         &beneficiary,
     )));
+    plan.rpc_user_op = Some(RpcUserOp::from_packed(&operation));
     plan.build = Some(BuildAcceptUserOpResponse {
         user_op: wire_user_op_from_packed(&operation),
         user_op_hash: hash,

@@ -38,7 +38,7 @@ class LocalServicesQualification(LocalOwnerFixture):
                 self.services(state, "doctor", success=False)
                 running = self.services(state, "start")
                 self.assertTrue(running["ready"])
-                self.assertEqual(len(running["services"]), 11)
+                self.assertEqual(len(running["services"]), 12)
                 self.assertEqual(self.services(state, "start"), running)
                 self.assertTrue(self.services(state, "doctor")["ready"])
                 broker = running["services"]["broker"]["url"]
@@ -115,7 +115,7 @@ class LocalServicesQualification(LocalOwnerFixture):
                     local_state.write_json(profile_path, profile)
                 self.assertTrue(self.services(state, "doctor")["ready"])
                 manifest = local_state.read_json(state / "services/manifest.json")
-                keys = [state / "services/broker/oidc.json", state / "services/broker/session.json", state / "services/signer/master.key", admin_key, registry,
+                keys = [state / "services/broker/oidc.json", state / "services/broker/session.json", state / "services/signer/master.key", state / "services/bundler/submitter.key", admin_key, registry,
                         *[state / "services" / name / "development.key" for name in services.WORKERS]]
                 preserved = {path:path.read_bytes() for path in keys}
                 self.assertTrue(self.services(state, "stop")["state_preserved"])
@@ -156,6 +156,13 @@ class LocalServicesQualification(LocalOwnerFixture):
                 self.assertIn("signer key is missing", refused.stderr)
                 self.assertFalse(signer_key.exists())
                 local_state.write_private(signer_key, original)
+                bundler_key = state / "services/bundler/submitter.key"
+                original = bundler_key.read_bytes()
+                bundler_key.unlink()
+                refused = self.services(state, "start", success=False)
+                self.assertIn("submitter key is missing", refused.stderr)
+                self.assertFalse(bundler_key.exists())
+                local_state.write_private(bundler_key, original)
                 changed = dict(manifest, profile_identity="another-deployment")
                 local_state.write_json(state / "services/manifest.json", changed)
                 refused = self.services(state, "start", success=False)
@@ -202,7 +209,7 @@ class LocalServicesQualification(LocalOwnerFixture):
                     self.assertEqual(path.stat().st_mode & 0o777, 0o600)
                 logs = b"".join(path.read_bytes() for path in (state / "services").glob("*.log"))
                 self.assertTrue(session.encode() not in logs and synthetic.encode() not in logs, "service logs exposed credentials")
-                self.assertTrue(signer_key.read_bytes() not in logs, "service logs exposed signing material")
+                self.assertTrue(signer_key.read_bytes() not in logs and bundler_key.read_bytes().removeprefix(b"0x") not in logs, "service logs exposed signing material")
                 self.assertTrue(admin_token.encode() not in logs and relay_token.encode() not in logs,
                                 "service logs exposed relay credentials")
             finally:

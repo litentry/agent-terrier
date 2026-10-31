@@ -67,7 +67,7 @@ pub enum BundlerBoot {
 /// process env in [`BundlerBoot::from_env`]; tests construct this struct
 /// with explicit values instead — process env is global, so `set_var` in
 /// one test leaks into parallel siblings (the #258/#259 deflake class).
-#[derive(Debug, Default, Clone)]
+#[derive(Default, Clone)]
 pub struct BundlerBootValues {
     /// `AGENTKEYS_CHAIN_RPC_HTTP`.
     pub rpc_url: Option<String>,
@@ -80,6 +80,7 @@ pub struct BundlerBootValues {
     /// `AGENTKEYS_BUNDLER_SIGNER_KEY` (falls back to
     /// `BROKER_SPONSOR_SIGNER_KEY` — today the same funded EOA submits).
     pub signer_key: Option<String>,
+    pub signer_key_file: Option<String>,
     /// `AGENTKEYS_HANDLEOPS_GAS_LIMIT` (default 4000000).
     pub handleops_gas_limit: Option<String>,
     /// `AGENTKEYS_BUNDLER_GAS_PRICE` (optional, wei).
@@ -95,7 +96,7 @@ impl BundlerBootValues {
         Self::from_lookup(|key| std::env::var(key).ok())
     }
 
-    fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Result<Self> {
+    pub fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Result<Self> {
         let (profile, _) = agentkeys_core::chain_profile::ChainProfile::resolve(
             None,
             lookup("AGENTKEYS_CHAIN").as_deref(),
@@ -120,6 +121,7 @@ impl BundlerBootValues {
             }),
             signer_key: lookup("AGENTKEYS_BUNDLER_SIGNER_KEY")
                 .or_else(|| lookup("BROKER_SPONSOR_SIGNER_KEY")),
+            signer_key_file: lookup("AGENTKEYS_BUNDLER_SIGNER_KEY_FILE"),
             handleops_gas_limit: lookup("AGENTKEYS_HANDLEOPS_GAS_LIMIT"),
             gas_price: lookup("AGENTKEYS_BUNDLER_GAS_PRICE"),
             gas_floor_wei: lookup("AGENTKEYS_BUNDLER_GAS_FLOOR_WEI")
@@ -168,19 +170,13 @@ impl BundlerBoot {
                 None
             }
         };
-        let signer = match values.signer_key.filter(|s| !s.trim().is_empty()) {
-            Some(key_hex) => Some(
-                SigningKey::from_slice(
-                    &hex::decode(key_hex.trim().trim_start_matches("0x"))
-                        .map_err(|e| anyhow!("bundler signer key hex: {e}"))?,
-                )
-                .map_err(|e| anyhow!("bundler signer key invalid: {e}"))?,
-            ),
-            None => {
-                missing.push("AGENTKEYS_BUNDLER_SIGNER_KEY (or BROKER_SPONSOR_SIGNER_KEY)".into());
-                None
-            }
+        let signer = match (values.signer_key, values.signer_key_file) {
+            (Some(value), None) if value.trim().is_empty() => None,
+            (inline, file) => agentkeys_core::secp256k1_key::from_sources(inline, file)?,
         };
+        if signer.is_none() {
+            missing.push("AGENTKEYS_BUNDLER_SIGNER_KEY_FILE or AGENTKEYS_BUNDLER_SIGNER_KEY (or BROKER_SPONSOR_SIGNER_KEY)".into());
+        }
         let (Some(entry_point), Some(signer)) = (entry_point, signer) else {
             return Ok(Self::Degraded { chain_id, missing });
         };
@@ -311,7 +307,7 @@ async fn submitter_gas_verdict(state: &BundlerState, cfg: &BundlerConfig) -> Gas
 fn out_of_gas_message(addr: &[u8; 20], balance_wei: u128, floor_wei: u128) -> String {
     format!(
         "bundler submitter 0x{} is OUT OF GAS: {} < {} (the chain's funding floor) — \
-         top it up from the deploy wallet; the fleet WALLETS board shows this row red",
+         fund the configured transaction submitter before retrying",
         hex::encode(addr),
         wei_to_units(balance_wei),
         wei_to_units(floor_wei),
