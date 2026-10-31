@@ -1,6 +1,4 @@
-//! The one upstream the relay fronts — an OpenAI-compatible server (Ark). The
-//! relay holds the vendor key; callers never see it. No retry, no fallback, no
-//! caching (arch.md §22d discipline).
+//! Model transport shared with the local CLI, without retries or fallback.
 
 use serde_json::Value;
 
@@ -8,7 +6,7 @@ use crate::config::UpstreamConfig;
 use crate::error::{GateError, GateResult};
 
 /// The upstream paths the relay calls — also the `route` its refusal logs name.
-pub const CHAT_PATH: &str = "/chat/completions";
+pub use agentkeys_core::models::CHAT_PATH;
 
 /// How long one provider's `/v1/models` may take inside the models report
 /// (the contact gate gives the whole report 3 s).
@@ -18,22 +16,18 @@ pub fn embeddings_path(multimodal: bool) -> &'static str {
     if multimodal {
         "/embeddings/multimodal"
     } else {
-        "/embeddings"
+        agentkeys_core::models::EMBEDDINGS_PATH
     }
 }
 
 pub struct UpstreamClient {
-    client: reqwest::Client,
-    base_url: String,
-    api_key: String,
+    client: agentkeys_core::models::ModelClient,
 }
 
 impl UpstreamClient {
     pub fn new(cfg: &UpstreamConfig) -> Self {
         Self {
-            client: reqwest::Client::new(),
-            base_url: cfg.base_url.clone(),
-            api_key: cfg.api_key.clone(),
+            client: agentkeys_core::models::ModelClient::new(&cfg.base_url, Some(&cfg.api_key)),
         }
     }
 
@@ -41,31 +35,19 @@ impl UpstreamClient {
     /// raw response — the caller owns status triage and (for streams) the tee.
     pub async fn chat(&self, body: &Value) -> GateResult<reqwest::Response> {
         self.client
-            .post(format!("{}{CHAT_PATH}", self.base_url))
-            .bearer_auth(&self.api_key)
-            .json(body)
-            .send()
+            .chat(body)
             .await
             .map_err(|e| GateError::Upstream(format!("upstream transport: {e}")))
     }
 
-    /// POST the embeddings body (#572). Same custody as chat: the vendor key
-    /// is attached here, never held by the caller (the in-sandbox OpenViking
-    /// engine sends its `gk_` relay key to the gate instead). `multimodal`
-    /// selects Ark's `/embeddings/multimodal` twin (#639 — the surface the
-    /// doubao-embedding-vision endpoint serves and OpenViking 0.4.16 calls;
-    /// the text `/embeddings` API is refused by that model family, measured
-    /// 2026-08-26).
+    /// The optional multimodal route is forwarded only when explicitly requested.
     pub async fn embeddings(
         &self,
         body: &Value,
         multimodal: bool,
     ) -> GateResult<reqwest::Response> {
         self.client
-            .post(format!("{}{}", self.base_url, embeddings_path(multimodal)))
-            .bearer_auth(&self.api_key)
-            .json(body)
-            .send()
+            .request(embeddings_path(multimodal), Some(body))
             .await
             .map_err(|e| GateError::Upstream(format!("upstream transport: {e}")))
     }
@@ -139,9 +121,7 @@ impl UpstreamClient {
     /// GET /models passthrough (OpenAI clients often list models at boot).
     pub async fn models(&self) -> GateResult<reqwest::Response> {
         self.client
-            .get(format!("{}/models", self.base_url))
-            .bearer_auth(&self.api_key)
-            .send()
+            .models()
             .await
             .map_err(|e| GateError::Upstream(format!("upstream transport: {e}")))
     }
