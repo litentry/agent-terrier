@@ -284,7 +284,10 @@ impl LocalStore {
                     )
                     .optional()
                     .map_err(|_| failed("storage_read_failed"))?;
-                let expected = if request.cap.payload.op == CapOp::Append {
+                let expected = if matches!(
+                    request.cap.payload.op,
+                    CapOp::Append | CapOp::ChannelPublish
+                ) {
                     Some("")
                 } else {
                     request.expected_revision.as_deref()

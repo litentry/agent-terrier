@@ -124,24 +124,25 @@ pub fn authorize_key(
                 CapOp::ChannelPublish => ("channel-pub:", action == ObjectAction::Put),
                 _ => ("channel-sub:", read),
             };
-            let channel = service
+            let channel = payload
+                .service
                 .strip_prefix(service_prefix)
                 .ok_or("storage_service_invalid")?;
-            let valid_channel = !channel.is_empty()
-                && channel.len() <= 48
-                && !channel.starts_with('-')
-                && !channel.ends_with('-')
-                && channel
-                    .bytes()
-                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-');
-            valid_channel
+            crate::console::valid_channel_id(channel)
                 && action_allowed
-                && key.starts_with(&format!("{operator_prefix}{channel}/"))
+                && channel_key_matches(&operator_prefix, channel, key)
         }
-        (
-            DataClass::Credentials | DataClass::Config | DataClass::Memory | DataClass::Channel,
-            CapOp::Teardown,
-        ) => {
+        (DataClass::Channel, CapOp::Teardown) => {
+            let channel = payload
+                .service
+                .strip_prefix("channel-pub:")
+                .ok_or("storage_service_invalid")?;
+            owner
+                && crate::console::valid_channel_id(channel)
+                && matches!(action, ObjectAction::Delete | ObjectAction::List)
+                && channel_key_matches(&operator_prefix, channel, key)
+        }
+        (DataClass::Credentials | DataClass::Config | DataClass::Memory, CapOp::Teardown) => {
             owner
                 && matches!(action, ObjectAction::Delete | ObjectAction::List)
                 && if payload.data_class == DataClass::Memory && service == "inbox" {
@@ -157,6 +158,11 @@ pub fn authorize_key(
     } else {
         Err("storage_scope_denied")
     }
+}
+
+fn channel_key_matches(prefix: &str, channel: &str, key: &str) -> bool {
+    key.starts_with(&format!("{prefix}{channel}/"))
+        || key.starts_with(&format!("{prefix}{channel}.blob/"))
 }
 
 fn omni(value: &str) -> Result<String, &'static str> {

@@ -70,6 +70,7 @@ pub enum CapMintOp {
     /// so a publish cap can NEVER be redeemed at the subscribe endpoint (D2 — the
     /// direction-denial isolation gate).
     ChannelPublish,
+    ChannelTeardown,
     /// #406 channels phase 1 — SUBSCRIBE (consume) events from a channel feed.
     /// Mints `CapOp::ChannelSubscribe`/`DataClass::Channel` at `/v1/cap/channel-sub`;
     /// `op_str` is `"channel_subscribe"`. Distinct on-chain grant (`channel-sub:<id>`)
@@ -96,6 +97,7 @@ impl CapMintOp {
             "config_store" => Some(Self::ConfigStore),
             "config_fetch" => Some(Self::ConfigFetch),
             "channel_publish" => Some(Self::ChannelPublish),
+            "channel_teardown" => Some(Self::ChannelTeardown),
             "channel_subscribe" => Some(Self::ChannelSubscribe),
             "speech_use" => Some(Self::SpeechUse),
             _ => None,
@@ -114,6 +116,7 @@ impl CapMintOp {
             Self::ConfigStore => "/v1/cap/config-store",
             Self::ConfigFetch => "/v1/cap/config-fetch",
             Self::ChannelPublish => "/v1/cap/channel-pub",
+            Self::ChannelTeardown => "/v1/cap/channel-teardown",
             Self::ChannelSubscribe => "/v1/cap/channel-sub",
             Self::SpeechUse => "/v1/cap/speech",
         }
@@ -133,7 +136,9 @@ impl CapMintOp {
             | Self::MemoryAppend
             | Self::MemoryInboxDelete => DataClass::Memory,
             Self::ConfigStore | Self::ConfigFetch => DataClass::Config,
-            Self::ChannelPublish | Self::ChannelSubscribe => DataClass::Channel,
+            Self::ChannelPublish | Self::ChannelSubscribe | Self::ChannelTeardown => {
+                DataClass::Channel
+            }
             Self::SpeechUse => DataClass::Speech,
         }
     }
@@ -149,7 +154,7 @@ impl CapMintOp {
             Self::CredFetch | Self::MemoryGet | Self::ConfigFetch => CapOp::Fetch,
             Self::MemoryCanonicalGet => CapOp::CanonicalFetch,
             Self::MemoryAppend => CapOp::Append,
-            Self::MemoryInboxDelete => CapOp::Teardown,
+            Self::MemoryInboxDelete | Self::ChannelTeardown => CapOp::Teardown,
             Self::ChannelPublish => CapOp::ChannelPublish,
             Self::ChannelSubscribe => CapOp::ChannelSubscribe,
             Self::SpeechUse => CapOp::SpeechUse,
@@ -406,12 +411,9 @@ pub struct WorkerTeardownResp {
 // ── channel worker (`/v1/channel/{publish,poll,teardown}`) — #406 channels ───
 //
 // The `channel` data class (`docs/spec/agent-channel-decoupling.md` D7): a
-// durable, envelope-encrypted feed under the per-data-class `$CHANNEL_BUCKET`,
-// with the NRT decision (§14.12) — the channel worker is the ONLY write path,
-// so it completes held consumer long-polls in-process the instant an event
-// lands (write-through wakeup). S3/TOS is the durable record, never the
-// notification path. Feed-backed (async) kinds only; `session`-kind channels
-// are direct-transport and carry no feed.
+// durable, encrypted feed with independent publish/subscribe capabilities.
+// The worker notifies waiting local readers after an event is stored.
+// Session channels use direct transport and carry no durable feed.
 
 /// The transport shape of a channel (#408 §4/D1). **Feed-backed** channels are
 /// async + durable (camera → doorkeeper, weixin, UI feeds): the channel worker's
@@ -720,8 +722,8 @@ pub struct ChannelStsCreds {
 /// `kind`/`direction`/`body`/`correlation` are the producer's declared content;
 /// `producer` is NEVER accepted from the body (worker-stamped from the cap).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ChannelPublishBody {
-    pub cap: CapToken,
+pub struct ChannelPublishBody<T = CapToken> {
+    pub cap: T,
     pub kind: ChannelEventKind,
     #[serde(default = "channel_direction_in")]
     pub direction: ChannelDirection,
@@ -763,10 +765,10 @@ pub struct ChannelPublishBody {
 /// under the same publish cap, returning the `body_ref` a later
 /// `/v1/channel/publish` names. Kept out of the feed's own prefix so the poll
 /// listing never sees it. Bytes ride base64 (JSON body; the worker caps the
-/// decoded size at `AGENTKEYS_CHANNEL_BLOB_MAX_BYTES`).
+/// decoded size at the configured blob limit).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ChannelBlobPutBody {
-    pub cap: CapToken,
+pub struct ChannelBlobPutBody<T = CapToken> {
+    pub cap: T,
     pub content_type: String,
     pub bytes_b64: String,
 }
@@ -786,8 +788,8 @@ pub struct ChannelBlobPutResp {
 /// `body_ref` under the feed's SUBSCRIBE cap (the ref's channel must match the
 /// cap's).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ChannelBlobGetBody {
-    pub cap: CapToken,
+pub struct ChannelBlobGetBody<T = CapToken> {
+    pub cap: T,
     pub body_ref: String,
 }
 
@@ -822,8 +824,8 @@ pub struct ChannelPublishResp {
 /// pending, the worker HOLDS the request up to `wait_seconds`, completing it the
 /// instant a matching publish lands (write-through wakeup), else returns empty.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ChannelPollBody {
-    pub cap: CapToken,
+pub struct ChannelPollBody<T = CapToken> {
+    pub cap: T,
     /// Cursor: return events strictly after this feed key. Empty = from start.
     #[serde(default)]
     pub after: String,
@@ -854,17 +856,25 @@ pub struct ChannelPollResp {
 /// Channel-worker `POST /v1/channel/teardown` — GC a channel's whole feed
 /// (master-self / owner-scoped). Mirrors the config/memory teardown shape.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ChannelTeardownBody {
-    pub cap: CapToken,
+pub struct ChannelTeardownBody<T = CapToken> {
+    pub cap: T,
     pub channel_id: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChannelTeardownResp {
     pub ok: bool,
     pub keys_deleted: usize,
     #[serde(default)]
     pub audit_envelope_hash: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChannelWakeRequest {
+    pub owner_omni: String,
+    pub channel_id: String,
+    #[serde(default)]
+    pub event_ts_ms: Option<u64>,
 }
 
 // ── gateway + contacts (#407 phase 2) — the WeChat gateway PEP ────────────────

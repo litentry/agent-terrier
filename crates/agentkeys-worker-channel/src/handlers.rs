@@ -1,11 +1,3 @@
-//! Channel worker HTTP surface — #406 / `docs/spec/agent-channel-decoupling.md`.
-//!
-//! `/v1/channel/{publish,poll,teardown}` at the `channel/` S3 prefix per
-//! arch.md §17.2 per-data-class buckets. The novel bit vs the config/memory
-//! workers is the NRT worker-held long-poll (§14.12): a `poll` with no pending
-//! event `await`s an in-process wakeup that a `publish` fires the instant the
-//! event lands durably in S3.
-
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -15,60 +7,23 @@ use axum::{
     Json, Router,
 };
 use base64::{engine::general_purpose::STANDARD, Engine as _};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use agentkeys_core::audit::{AuditOpKind, AuditResult, ChannelPublishBody, ChannelSubscribeBody};
-use agentkeys_protocol::{ChannelDirection, ChannelEvent, ChannelEventKind, ChannelProducer};
+use agentkeys_protocol::{ChannelDirection, ChannelEvent, ChannelProducer};
 use agentkeys_worker_creds::audit::{cap_hash, keccak_hex, zero_hash};
-use agentkeys_worker_creds::aws_creds::{OptionalStsCreds, StsCreds};
 use agentkeys_worker_creds::envelope;
-use agentkeys_worker_creds::errors::{
-    err_400, err_403, err_413, err_500, err_502, s3_error_summary, ApiError,
-};
-use agentkeys_worker_creds::verify::{self, CapOp, CapToken, DataClass};
+use agentkeys_worker_creds::errors::{err_400, err_403, err_413, err_500, ApiError};
+use agentkeys_worker_creds::storage_worker::{self, storage_error};
+use agentkeys_worker_creds::verify::{CapOp, CapToken, DataClass};
 
 use crate::state::SharedChannelWorkerState;
 
-/// Process-local monotonic sequence — disambiguates two events published in the
-/// same millisecond so feed keys stay strictly ordered within a worker run.
 static SEQ: AtomicU64 = AtomicU64::new(0);
 
-/// #541 — resolve the S3 client for a request. Relayed `X-Aws-*` creds win
-/// (back-compat with callers that mint their own); otherwise the worker redeems
-/// the ALREADY-VERIFIED cap for owner-scoped creds at the broker's
-/// `/v1/cap/channel-sts`. There is deliberately NO ambient fallback: the EC2
-/// instance profile defeated §17.5 layers 3/4 on AWS, and VE (no ambient creds)
-/// proved the path was never real — a request that can't resolve creds fails
-/// LOUDLY here instead (arch §22e "cap-derived, never ambient").
-async fn storage_s3(
-    state: &SharedChannelWorkerState,
-    creds: Option<&StsCreds>,
-    cap: &CapToken,
-    owner: &str,
-    channel_id: &str,
-) -> Result<aws_sdk_s3::Client, ApiError> {
-    if let Some(relayed) = creds {
-        return Ok(relayed.build_s3_client(&state.config.region).await);
-    }
-    let Some(minter) = &state.sts_minter else {
-        return Err(err_500(
-            "no storage credentials for this request: no X-Aws-* relay headers, and the cap→STS \
-             minter is unconfigured (AGENTKEYS_BROKER_URL / AGENTKEYS_CHANNEL_STS_TOKEN — \
-             setup-broker-host.sh writes both). Ambient instance-profile access is retired (#541).",
-            "storage_creds_unconfigured",
-        ));
-    };
-    let minted = minter.creds_for(cap, owner, channel_id).await?;
-    Ok(minted.build_s3_client(&state.config.region).await)
-}
-
 pub fn build_router(state: SharedChannelWorkerState) -> Router {
-    // #667 — a blob body is base64 JSON of up to `blob_max_bytes` decoded
-    // bytes: lift axum's default ~2 MB limit on the two blob routes only
-    // (4/3 for base64 + headroom for the cap + JSON framing).
     let blob_body_limit = state.config.blob_max_bytes / 3 * 4 + (256 << 10);
-    // #675 — browser device origins: an opt-in allowlist; empty = no CORS headers.
-    let browser_origins = state.config.browser_origins.clone();
+    let browser_origins = state.worker.config.browser_origins.clone();
     let router = Router::new()
         .route("/healthz", get(healthz))
         .route("/v1/channel/publish", post(channel_publish))
@@ -82,17 +37,17 @@ pub fn build_router(state: SharedChannelWorkerState) -> Router {
             "/v1/channel/blob-get",
             post(channel_blob_get).layer(axum::extract::DefaultBodyLimit::max(blob_body_limit)),
         );
-    let router = match crate::cors::browser_cors_layer(&browser_origins) {
-        Some(layer) => router.layer(layer),
-        None => router,
-    };
-    router.with_state(state)
+    router
+        .layer(agentkeys_worker_creds::cors::browser_cors_layer(
+            &browser_origins,
+        ))
+        .with_state(state)
 }
 
 #[derive(Debug, Serialize)]
 pub struct HealthBody {
     pub ok: bool,
-    pub channel_bucket: String,
+    pub data_class: DataClass,
     pub chain_profile: String,
     pub max_poll_seconds: u64,
     pub version: &'static str,
@@ -101,113 +56,29 @@ pub struct HealthBody {
 async fn healthz(State(state): State<SharedChannelWorkerState>) -> Json<HealthBody> {
     Json(HealthBody {
         ok: true,
-        channel_bucket: state.config.channel_bucket.clone(),
-        chain_profile: state.config.chain_profile.clone(),
+        data_class: DataClass::Channel,
+        chain_profile: state.worker.config.chain_profile.clone(),
         max_poll_seconds: state.config.max_poll_seconds,
         version: env!("CARGO_PKG_VERSION"),
     })
 }
 
-// ── request/response bodies (mirror agentkeys_protocol::Channel*) ────────────
-
-#[derive(Debug, Deserialize)]
-pub struct PublishRequest {
-    pub cap: CapToken,
-    pub kind: ChannelEventKind,
-    #[serde(default = "direction_in")]
-    pub direction: ChannelDirection,
-    #[serde(default)]
-    pub body_b64: Option<String>,
-    #[serde(default)]
-    pub body_ref: Option<String>,
-    #[serde(default)]
-    pub correlation: Option<String>,
-    /// #522 — producer-declared audio params (voice/rate/format), copied
-    /// verbatim onto the event like `kind`/`correlation`.
-    #[serde(default)]
-    pub audio: Option<agentkeys_protocol::ChannelAudioParams>,
-    /// #563 — streamed-reply markers + the inbound stream hint, copied
-    /// verbatim onto the event like `correlation`. Producer-declared framing,
-    /// never verified content — the worker stays a relay.
-    #[serde(default)]
-    pub partial: Option<bool>,
-    #[serde(default)]
-    pub seq: Option<u32>,
-    #[serde(default)]
-    pub stream: Option<bool>,
-    /// #667 — a RELAYING actor's declaration of the contact it relayed for
-    /// (the gateway), copied verbatim like `correlation`; `producer` stays the
-    /// cap-signed actor, so this never changes WHO published.
-    #[serde(default)]
-    pub contact: Option<agentkeys_protocol::ContactStamp>,
-    #[serde(default)]
-    pub content_type: Option<String>,
-    #[serde(default)]
-    pub relay_of: Option<String>,
-    /// The addressed app on a shared channel (see `ChannelEvent::addressee`),
-    /// copied verbatim like `relay_of`.
-    #[serde(default)]
-    pub addressee: Option<String>,
-}
-
-fn direction_in() -> ChannelDirection {
-    ChannelDirection::In
-}
-
-#[derive(Debug, Serialize)]
-pub struct PublishResponse {
-    pub ok: bool,
-    pub event_id: String,
-    pub s3_key: String,
-    pub audit_envelope_hash: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct PollRequest {
-    pub cap: CapToken,
-    #[serde(default)]
-    pub after: String,
-    #[serde(default)]
-    pub wait_seconds: u64,
-    /// #693 — only the LAST `tail` events of the window are fetched and
-    /// decrypted (a console tailing a delegate's lifecycle); absent / 0 = all.
-    #[serde(default)]
-    pub tail: Option<u32>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct PollResponse {
-    pub ok: bool,
-    pub events: Vec<ChannelEvent>,
-    pub cursor: String,
-    pub audit_envelope_hash: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct TeardownRequest {
-    pub cap: CapToken,
-    #[serde(default)]
-    pub channel_id: String,
-}
-
-#[derive(Debug, Serialize)]
-pub struct TeardownResponse {
-    pub ok: bool,
-    pub keys_deleted: usize,
-    pub audit_envelope_hash: Option<String>,
-}
-
-// ── publish ─────────────────────────────────────────────────────────────────
+pub type PublishRequest = agentkeys_protocol::ChannelPublishBody<CapToken>;
+pub type PollRequest = agentkeys_protocol::ChannelPollBody<CapToken>;
+pub type TeardownRequest = agentkeys_protocol::ChannelTeardownBody<CapToken>;
+pub use agentkeys_protocol::{
+    ChannelPollResp as PollResponse, ChannelPublishResp as PublishResponse,
+    ChannelTeardownResp as TeardownResponse,
+};
 
 async fn channel_publish(
     State(state): State<SharedChannelWorkerState>,
-    OptionalStsCreds(creds): OptionalStsCreds,
     Json(req): Json<PublishRequest>,
 ) -> Result<Json<PublishResponse>, ApiError> {
     verify_cap(&state, &req.cap, CapOp::ChannelPublish).await?;
     let channel_id = channel_id_from_service(&req.cap.payload.service)?;
 
-    let outcome = channel_publish_inner(&state, creds.as_ref(), &req, &channel_id).await;
+    let outcome = channel_publish_inner(&state, &req, &channel_id).await;
     let audit_body = ChannelPublishBody {
         key: outcome
             .as_ref()
@@ -229,6 +100,7 @@ async fn channel_publish(
         AuditResult::Failure
     };
     let audited = state
+        .worker
         .audit
         .emit(
             &req.cap,
@@ -238,31 +110,27 @@ async fn channel_publish(
         )
         .await;
     let (event_id, s3_key, _env) = outcome?;
-    // NRT write-through wakeup (§14.12): the durable write is done; wake any
-    // held consumer long-poll on this channel so it returns immediately.
-    state.wakeup.signal(&channel_id);
-    // #669 — an INBOUND event (toward the app) may also need to wake a
-    // hibernating application bound to this feed: tell the broker,
-    // fire-and-forget (the durable feed already holds the event).
-    if matches!(req.direction, ChannelDirection::In) {
-        if let Some(minter) = state.sts_minter.as_ref() {
-            let owner = normalize_omni(&req.cap.payload.operator_omni);
-            let state2 = state.clone();
-            let channel = channel_id.clone();
-            // The event id is `<ts_millis>-<seq>`: its timestamp is the
-            // woken app's replay window (#669).
-            let event_ts_ms = event_id
+    state.wakeup.signal(&feed_prefix(
+        &normalize_omni(&req.cap.payload.operator_omni),
+        &channel_id,
+    ));
+    if matches!(req.direction, ChannelDirection::In) && state.wake.is_some() {
+        let state = state.clone();
+        let request = agentkeys_protocol::ChannelWakeRequest {
+            owner_omni: format!("0x{}", normalize_omni(&req.cap.payload.operator_omni)),
+            channel_id: channel_id.clone(),
+            event_ts_ms: event_id
                 .split('-')
                 .next()
-                .and_then(|t| t.parse::<u64>().ok())
-                .unwrap_or(0);
-            let _ = minter;
-            tokio::spawn(async move {
-                if let Some(m) = state2.sts_minter.as_ref() {
-                    m.wake(&owner, &channel, event_ts_ms).await;
+                .and_then(|value| value.parse().ok()),
+        };
+        tokio::spawn(async move {
+            if let Some(wake) = &state.wake {
+                if wake.wake(&request).await.is_err() {
+                    tracing::warn!("channel message stored; configured application wake failed");
                 }
-            });
-        }
+            }
+        });
     }
     Ok(Json(PublishResponse {
         ok: true,
@@ -272,14 +140,11 @@ async fn channel_publish(
     }))
 }
 
-/// Returns `(event_id, s3_key, envelope_bytes)` on success.
 async fn channel_publish_inner(
     state: &SharedChannelWorkerState,
-    creds: Option<&StsCreds>,
     req: &PublishRequest,
     channel_id: &str,
 ) -> Result<(String, String, Vec<u8>), ApiError> {
-    // Exactly one of body_b64 / body_ref (small inline vs large-by-reference).
     let (body, body_ref) = match (&req.body_b64, &req.body_ref) {
         (Some(_), Some(_)) => {
             return Err(err_400(
@@ -294,13 +159,9 @@ async fn channel_publish_inner(
             ))
         }
         (Some(b64), None) => {
-            // Validate it is real base64 up front (fail-loud, #284 posture).
             let decoded = STANDARD
                 .decode(b64)
                 .map_err(|e| err_400(e.to_string(), "channel_body_b64_decode"))?;
-            // #522 — explicit inline ceiling (there was NO size validation at
-            // all before, only axum's implicit body limit). Larger payloads
-            // belong in body_ref; the refusal names the escape hatch.
             let max = state.config.inline_max_bytes;
             if decoded.len() > max {
                 return Err(err_413(
@@ -320,21 +181,13 @@ async fn channel_publish_inner(
     let now_millis = unix_millis();
     let seq = SEQ.fetch_add(1, Ordering::Relaxed);
     let event_id = format!("{now_millis:013}-{seq:016x}");
-    // D8 (#430): the feed is OPERATOR-owned — `bots/<operator>/channel/<id>/`
-    // is the household bus every granted actor meets on (a delegate's reply
-    // and the operator's send land in ONE feed). Master-self caps
-    // (operator == actor) are byte-identical to the pre-#430 layout.
     let owner = normalize_omni(&req.cap.payload.operator_omni);
 
-    // Provenance is WORKER-STAMPED from the cap-signed actor — never a body
-    // field (§4.1). A delegate labels the event's `kind`, never its producer.
     let event = ChannelEvent {
         event_id: event_id.clone(),
         channel_id: channel_id.to_string(),
         direction: req.direction,
         producer: ChannelProducer::Actor {
-            // Provenance stays the cap-signed ACTOR (who spoke), independent
-            // of the operator-owned feed prefix (where it lives).
             actor_omni: format!("0x{}", normalize_omni(&req.cap.payload.actor_omni)),
         },
         kind: req.kind,
@@ -354,54 +207,27 @@ async fn channel_publish_inner(
     let plaintext =
         serde_json::to_vec(&event).map_err(|e| err_500(e.to_string(), "channel_event_encode"))?;
 
-    // Envelope-encrypt under the worker KEK. AAD is DIRECTION-NEUTRAL (the bare
-    // channel_id, not the channel-pub:/channel-sub: service) so a subscribe cap
-    // decrypts what a publish cap encrypted (envelope::aad ignores operator +
-    // k3_epoch, so pub/sub + epoch rotation don't break the AAD match).
-    let aad = envelope::aad("", &owner, channel_id, 0);
-    let env_bytes = envelope::encrypt(&state.config.kek_hex, &plaintext, &aad)
+    let key = feed_key(&owner, channel_id, &event_id);
+    let aad = object_aad(&owner, &key);
+    let env_bytes = envelope::encrypt(development_key(state)?, &plaintext, &aad)
         .map_err(|e| err_500(e.to_string(), "channel_envelope_encrypt"))?;
 
-    let key = feed_key(&owner, channel_id, &event_id);
-    let s3 = storage_s3(state, creds, &req.cap, &owner, channel_id).await?;
-    s3.put_object()
-        .bucket(&state.config.channel_bucket)
-        .key(&key)
-        .body(env_bytes.clone().into())
-        .send()
+    state
+        .worker
+        .storage
+        .put(&req.cap, &key, &env_bytes, Some(""))
         .await
-        .map_err(|e| err_502(format!("s3 PutObject: {}", s3_error_summary(&e)), "s3_put"))?;
+        .map_err(storage_error)?;
     Ok((event_id, key, env_bytes))
 }
 
-// ── blobs (#667 — media originals beside the feed) ──────────────────────────
+pub type BlobPutRequest = agentkeys_protocol::ChannelBlobPutBody<CapToken>;
+pub type BlobGetRequest = agentkeys_protocol::ChannelBlobGetBody<CapToken>;
 
-/// Worker-side mirror of `agentkeys_protocol::ChannelBlobPutBody` (the typed
-/// cap, like [`PublishRequest`]).
-#[derive(Debug, Deserialize)]
-pub struct BlobPutRequest {
-    pub cap: CapToken,
-    pub content_type: String,
-    pub bytes_b64: String,
-}
-
-/// Worker-side mirror of `agentkeys_protocol::ChannelBlobGetBody`.
-#[derive(Debug, Deserialize)]
-pub struct BlobGetRequest {
-    pub cap: CapToken,
-    pub body_ref: String,
-}
-
-/// Blob S3 key: `bots/<owner>/channel/<channel_id>.blob/<blob_id>.enc` — a
-/// SIBLING of the feed prefix (`…/channel/<channel_id>/`), so the poll listing
-/// never sees it and the feed cursor stays an event-only ordering.
 fn blob_key(owner: &str, channel_id: &str, blob_id: &str) -> String {
     format!("bots/{owner}/channel/{channel_id}.blob/{blob_id}.enc")
 }
 
-/// Parse a `body_ref` back into `(owner, channel_id, blob_id)` — the consumer's
-/// cap must name the SAME owner + channel, or the ref is refused (a subscribe
-/// cap on one feed can never read another feed's blobs).
 fn parse_blob_ref(body_ref: &str) -> Option<(String, String, String)> {
     let rest = body_ref.strip_prefix("bots/")?;
     let (owner, rest) = rest.split_once("/channel/")?;
@@ -423,8 +249,6 @@ fn parse_blob_ref(body_ref: &str) -> Option<(String, String, String)> {
     ))
 }
 
-/// The encrypted blob plaintext layout: `u16-BE content-type length ‖
-/// content type (UTF-8) ‖ the ORIGINAL bytes, unchanged`.
 fn encode_blob_plaintext(content_type: &str, bytes: &[u8]) -> Vec<u8> {
     let ct = content_type.as_bytes();
     let ct_len = ct.len().min(u16::MAX as usize);
@@ -453,14 +277,8 @@ fn sha256_hex(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
 
-/// `POST /v1/channel/blob-put` — store one media original UNCHANGED beside the
-/// feed under the caller's PUBLISH cap (the same authority as publishing the
-/// event that will reference it). Returns the `body_ref`. Audited as a
-/// `ChannelPublish` row (key = the blob key, event_id = the blob id, hash =
-/// keccak of the stored envelope) — a blob store IS a publish-class write.
 async fn channel_blob_put(
     State(state): State<SharedChannelWorkerState>,
-    OptionalStsCreds(creds): OptionalStsCreds,
     Json(req): Json<BlobPutRequest>,
 ) -> Result<Json<agentkeys_protocol::ChannelBlobPutResp>, ApiError> {
     verify_cap(&state, &req.cap, CapOp::ChannelPublish).await?;
@@ -476,7 +294,7 @@ async fn channel_blob_put(
     if bytes.len() > max {
         return Err(err_413(
             format!(
-                "blob is {} bytes decoded (max {max}, AGENTKEYS_CHANNEL_BLOB_MAX_BYTES)",
+                "blob is {} bytes decoded (max {max}, --blob-max-bytes)",
                 bytes.len()
             ),
             "channel_blob_too_large",
@@ -494,19 +312,17 @@ async fn channel_blob_put(
     let seq = SEQ.fetch_add(1, Ordering::Relaxed);
     let blob_id = format!("{now_millis:013}-{seq:016x}");
     let key = blob_key(&owner, &channel_id, &blob_id);
-    let aad = envelope::aad("", &owner, &channel_id, 0);
+    let aad = object_aad(&owner, &key);
     let plaintext = encode_blob_plaintext(content_type, &bytes);
-    let env_bytes = envelope::encrypt(&state.config.kek_hex, &plaintext, &aad)
+    let env_bytes = envelope::encrypt(development_key(&state)?, &plaintext, &aad)
         .map_err(|e| err_500(e.to_string(), "channel_envelope_encrypt"))?;
     let outcome: Result<(), ApiError> = async {
-        let s3 = storage_s3(&state, creds.as_ref(), &req.cap, &owner, &channel_id).await?;
-        s3.put_object()
-            .bucket(&state.config.channel_bucket)
-            .key(&key)
-            .body(env_bytes.clone().into())
-            .send()
+        state
+            .worker
+            .storage
+            .put(&req.cap, &key, &env_bytes, Some(""))
             .await
-            .map_err(|e| err_502(format!("s3 PutObject: {}", s3_error_summary(&e)), "s3_put"))?;
+            .map_err(storage_error)?;
         Ok(())
     }
     .await;
@@ -521,6 +337,7 @@ async fn channel_blob_put(
         },
     };
     let audited = state
+        .worker
         .audit
         .emit(
             &req.cap,
@@ -543,13 +360,8 @@ async fn channel_blob_put(
     }))
 }
 
-/// `POST /v1/channel/blob-get` — fetch a blob by `body_ref` under the feed's
-/// SUBSCRIBE cap. The ref's owner + channel MUST match the cap's (403
-/// `blob_ref_out_of_feed` otherwise). Audited as a `ChannelSubscribe` row
-/// (cursor = the ref).
 async fn channel_blob_get(
     State(state): State<SharedChannelWorkerState>,
-    OptionalStsCreds(creds): OptionalStsCreds,
     Json(req): Json<BlobGetRequest>,
 ) -> Result<Json<agentkeys_protocol::ChannelBlobGetResp>, ApiError> {
     verify_cap(&state, &req.cap, CapOp::ChannelSubscribe).await?;
@@ -569,23 +381,16 @@ async fn channel_blob_get(
             "blob_ref_out_of_feed",
         ));
     }
-    let aad = envelope::aad("", &owner, &channel_id, 0);
+    let aad = object_aad(&owner, &req.body_ref);
     let fetched: Result<(String, Vec<u8>), ApiError> = async {
-        let s3 = storage_s3(&state, creds.as_ref(), &req.cap, &owner, &channel_id).await?;
-        let got = s3
-            .get_object()
-            .bucket(&state.config.channel_bucket)
-            .key(&req.body_ref)
-            .send()
+        let bytes = state
+            .worker
+            .storage
+            .get(&req.cap, &req.body_ref)
             .await
-            .map_err(|e| err_502(format!("s3 GetObject: {}", s3_error_summary(&e)), "s3_get"))?;
-        let bytes = got
-            .body
-            .collect()
-            .await
-            .map_err(|e| err_502(e.to_string(), "s3_body"))?
-            .into_bytes();
-        let plaintext = envelope::decrypt(&state.config.kek_hex, &bytes, &aad)
+            .map_err(storage_error)?
+            .bytes;
+        let plaintext = envelope::decrypt(development_key(&state)?, &bytes, &aad)
             .map_err(|e| err_500(e.to_string(), "channel_envelope_decrypt"))?;
         let (content_type, raw) = decode_blob_plaintext(&plaintext)
             .ok_or_else(|| err_500("blob plaintext layout invalid", "channel_blob_decode"))?;
@@ -599,6 +404,7 @@ async fn channel_blob_get(
         cap_hash: cap_hash(&req.cap),
     };
     let audited = state
+        .worker
         .audit
         .emit(
             &req.cap,
@@ -621,49 +427,24 @@ async fn channel_blob_get(
     }))
 }
 
-// ── poll (the NRT long-poll) ─────────────────────────────────────────────────
-
 async fn channel_poll(
     State(state): State<SharedChannelWorkerState>,
-    OptionalStsCreds(creds): OptionalStsCreds,
     Json(req): Json<PollRequest>,
 ) -> Result<Json<PollResponse>, ApiError> {
     verify_cap(&state, &req.cap, CapOp::ChannelSubscribe).await?;
     let channel_id = channel_id_from_service(&req.cap.payload.service)?;
-    // D8 (#430): read from the OPERATOR-owned feed (see channel_publish_inner).
     let owner = normalize_omni(&req.cap.payload.operator_omni);
 
-    // Grab the wakeup handle BEFORE the first list so a publish landing during
-    // the list still wakes us (§14.12 race note in wakeup.rs).
-    let waiter = state.wakeup.waiter(&channel_id);
+    let waiter = state.wakeup.waiter(&feed_prefix(&owner, &channel_id));
 
-    let mut events = channel_list_after(
-        &state,
-        creds.as_ref(),
-        &req.cap,
-        &owner,
-        &channel_id,
-        &req.after,
-        req.tail,
-    )
-    .await?;
+    let mut events =
+        channel_list_after(&state, &req.cap, &owner, &channel_id, &req.after, req.tail).await?;
 
-    // NRT long-poll: if nothing new and the caller wants to wait, hold the
-    // request until a publish signals this channel (or the ceiling elapses),
-    // then re-list once.
     if events.is_empty() && req.wait_seconds > 0 {
         let wait = req.wait_seconds.min(state.config.max_poll_seconds);
         let _ = tokio::time::timeout(Duration::from_secs(wait), waiter.notified()).await;
-        events = channel_list_after(
-            &state,
-            creds.as_ref(),
-            &req.cap,
-            &owner,
-            &channel_id,
-            &req.after,
-            req.tail,
-        )
-        .await?;
+        events =
+            channel_list_after(&state, &req.cap, &owner, &channel_id, &req.after, req.tail).await?;
     }
 
     let cursor = events
@@ -678,6 +459,7 @@ async fn channel_poll(
         cap_hash: cap_hash(&req.cap),
     };
     let audited = state
+        .worker
         .audit
         .emit(
             &req.cap,
@@ -695,12 +477,8 @@ async fn channel_poll(
     }))
 }
 
-/// List + decrypt every feed event whose key sorts strictly after `after`
-/// (empty = from the feed start), oldest-first. S3 is the DURABLE record — this
-/// is what makes an event survive a worker restart (§14.12).
 async fn channel_list_after(
     state: &SharedChannelWorkerState,
-    creds: Option<&StsCreds>,
     cap: &CapToken,
     owner: &str,
     channel_id: &str,
@@ -708,65 +486,43 @@ async fn channel_list_after(
     tail: Option<u32>,
 ) -> Result<Vec<ChannelEvent>, ApiError> {
     let prefix = feed_prefix(owner, channel_id);
-    let s3 = storage_s3(state, creds, cap, owner, channel_id).await?;
-    let tail_n = tail.map(|n| n as usize).filter(|n| *n > 0);
-    // The listing is PAGED (S3 answers at most 1000 keys per call). A cursor
-    // read takes ONE page — the caller advances its cursor on the next poll.
-    // A tail read (#693) must walk EVERY page to find the feed's true tail:
-    // until 2026-09-22 it tailed the FIRST page only, so a feed past 1000
-    // events froze the console's latest-card and lifecycle reads at its first
-    // thousand (the kitchen display feed held 984 lifecycle rows there).
-    let mut keys: Vec<String> = Vec::new();
-    let mut continuation: Option<String> = None;
+    if !after.is_empty() && !after.starts_with(&prefix) {
+        return Err(err_400(
+            "cursor belongs to another channel",
+            "channel_cursor_out_of_scope",
+        ));
+    }
+    let tail_n = tail.map(|count| count as usize).filter(|count| *count > 0);
+    let mut keys = Vec::new();
+    let mut continuation = (!after.is_empty()).then(|| after.to_string());
     loop {
-        let mut list = s3
-            .list_objects_v2()
-            .bucket(&state.config.channel_bucket)
-            .prefix(&prefix);
-        if !after.is_empty() {
-            list = list.start_after(after);
+        let page = state
+            .worker
+            .storage
+            .list(cap, &prefix, continuation.as_deref())
+            .await
+            .map_err(storage_error)?;
+        keys.extend(page.keys);
+        if let Some(count) = tail_n {
+            keep_tail(&mut keys, count);
         }
-        if let Some(token) = &continuation {
-            list = list.continuation_token(token);
-        }
-        let resp = list.send().await.map_err(|e| {
-            err_502(
-                format!("s3 ListObjectsV2: {}", s3_error_summary(&e)),
-                "s3_list",
-            )
-        })?;
-        keys.extend(
-            resp.contents()
-                .iter()
-                .filter_map(|o| o.key().map(str::to_string)),
-        );
-        if let Some(n) = tail_n {
-            keep_tail(&mut keys, n);
-        }
-        let more = resp.is_truncated().unwrap_or(false);
-        match (tail_n, more, resp.next_continuation_token()) {
-            (Some(_), true, Some(token)) => continuation = Some(token.to_string()),
-            _ => break,
+        continuation = page.next;
+        if tail_n.is_none() || continuation.is_none() {
+            break;
         }
     }
 
-    let aad = envelope::aad("", owner, channel_id, 0);
     let mut events = Vec::new();
     for key in keys {
-        let got = s3
-            .get_object()
-            .bucket(&state.config.channel_bucket)
-            .key(key)
-            .send()
+        let aad = object_aad(owner, &key);
+        let bytes = state
+            .worker
+            .storage
+            .get(cap, &key)
             .await
-            .map_err(|e| err_502(format!("s3 GetObject: {}", s3_error_summary(&e)), "s3_get"))?;
-        let bytes = got
-            .body
-            .collect()
-            .await
-            .map_err(|e| err_502(e.to_string(), "s3_body"))?
-            .into_bytes();
-        let plaintext = envelope::decrypt(&state.config.kek_hex, &bytes, &aad)
+            .map_err(storage_error)?
+            .bytes;
+        let plaintext = envelope::decrypt(development_key(state)?, &bytes, &aad)
             .map_err(|e| err_500(e.to_string(), "channel_envelope_decrypt"))?;
         let event: ChannelEvent = serde_json::from_slice(&plaintext)
             .map_err(|e| err_500(e.to_string(), "channel_event_decode"))?;
@@ -775,20 +531,22 @@ async fn channel_list_after(
     Ok(events)
 }
 
-// ── teardown (owner-scoped feed GC; admin, not route-minted in phase 1) ──────
-
 async fn channel_teardown(
     State(state): State<SharedChannelWorkerState>,
-    OptionalStsCreds(creds): OptionalStsCreds,
     Json(req): Json<TeardownRequest>,
 ) -> Result<Json<TeardownResponse>, ApiError> {
     verify_cap(&state, &req.cap, CapOp::Teardown).await?;
+    if normalize_omni(&req.cap.payload.operator_omni) != normalize_omni(&req.cap.payload.actor_omni)
+    {
+        return Err(err_403(
+            "channel deletion requires owner-self authority",
+            "channel_not_owner",
+        ));
+    }
     let channel_id = channel_id_from_service(&req.cap.payload.service)?;
-    // D8 (#430): teardown sweeps the OPERATOR-owned feed prefix.
     let owner = normalize_omni(&req.cap.payload.operator_omni);
 
-    let outcome =
-        channel_teardown_inner(&state, creds.as_ref(), &req.cap, &owner, &channel_id).await;
+    let outcome = channel_teardown_inner(&state, &req.cap, &owner, &channel_id).await;
     let audit_body = agentkeys_core::audit::ChannelTeardownBody {
         channel_id: channel_id.clone(),
         actor_target: req.cap.payload.actor_omni.clone(),
@@ -799,6 +557,7 @@ async fn channel_teardown(
         AuditResult::Failure
     };
     let audited = state
+        .worker
         .audit
         .emit(
             &req.cap,
@@ -817,104 +576,43 @@ async fn channel_teardown(
 
 async fn channel_teardown_inner(
     state: &SharedChannelWorkerState,
-    creds: Option<&StsCreds>,
     cap: &CapToken,
     owner: &str,
     channel_id: &str,
 ) -> Result<usize, ApiError> {
-    let prefix = feed_prefix(owner, channel_id);
-    let s3 = storage_s3(state, creds, cap, owner, channel_id).await?;
-    let list = s3
-        .list_objects_v2()
-        .bucket(&state.config.channel_bucket)
-        .prefix(&prefix)
-        .send()
-        .await
-        .map_err(|e| err_502(e.to_string(), "s3_list"))?;
-    let keys: Vec<String> = list
-        .contents()
-        .iter()
-        .filter_map(|o| o.key().map(String::from))
-        .collect();
-    let mut deleted = 0usize;
-    for k in &keys {
-        if s3
-            .delete_object()
-            .bucket(&state.config.channel_bucket)
-            .key(k)
-            .send()
-            .await
-            .is_ok()
-        {
-            deleted += 1;
-        }
+    let mut deleted = 0;
+    for prefix in [
+        feed_prefix(owner, channel_id),
+        format!("bots/{owner}/channel/{channel_id}.blob/"),
+    ] {
+        deleted += storage_worker::delete_prefix(&state.worker, cap, &prefix).await?;
     }
     Ok(deleted)
 }
 
-// ── shared cap-verify + key helpers ──────────────────────────────────────────
-
 async fn verify_cap(
     state: &SharedChannelWorkerState,
     cap: &CapToken,
-    expected_op: CapOp,
+    operation: CapOp,
 ) -> Result<(), ApiError> {
-    verify::verify_signature(&state.config.broker_pubkey_pem, cap)
-        .map_err(|e| err_403(e.to_string(), "broker_sig_invalid"))?;
-    // K10 proof-of-possession (#76 — broker-SPOF defense); shared across classes.
-    verify::enforce_client_pop(cap).map_err(|e| err_403(e.to_string(), "cap_pop_invalid"))?;
-    // Direction isolation (D2): a ChannelPublish cap is honored only at
-    // /publish, a ChannelSubscribe cap only at /poll.
-    verify::check_op(cap, expected_op).map_err(|e| err_403(e.to_string(), "cap_op_mismatch"))?;
-    // Per-data-class isolation (#90/#201): a memory/cred/config cap MUST NOT be
-    // honored here (and a Channel cap is rejected by every other worker).
-    verify::check_data_class(cap, DataClass::Channel)
-        .map_err(|e| err_403(e.to_string(), "cap_data_class_mismatch"))?;
-    verify::check_freshness(cap).map_err(|e| err_403(e.to_string(), "cap_freshness_failed"))?;
-    verify::check_chain_device(
-        &state.http,
-        &state.config.chain_rpc_http,
-        &state.config.registry_contract,
-        cap,
-    )
-    .await
-    .map_err(err_403_or_502)?;
-    // Scope: skipped when operator == actor (master-self channels — mirrors
-    // every worker); consulted for a delegate/device (operator != actor)
-    // against the on-chain channel-pub:<id> / channel-sub:<id> grant.
-    verify::check_chain_scope(
-        &state.http,
-        &state.config.chain_rpc_http,
-        &state.config.scope_contract,
-        cap,
-    )
-    .await
-    .map_err(err_403_or_502)?;
-    verify::check_chain_k3_epoch(
-        &state.http,
-        &state.config.chain_rpc_http,
-        &state.config.epoch_contract,
-        cap,
-    )
-    .await
-    .map_err(err_403_or_502)?;
-    Ok(())
+    storage_worker::verify_cap(&state.worker, cap, operation, DataClass::Channel).await
 }
 
-fn err_403_or_502(e: verify::VerifyError) -> ApiError {
-    match e {
-        verify::VerifyError::DeviceInactive
-        | verify::VerifyError::DeviceMismatch { .. }
-        | verify::VerifyError::DeviceRoleMissing { .. }
-        | verify::VerifyError::NotInScope
-        | verify::VerifyError::K3Mismatch { .. } => err_403(e.to_string(), "chain_check_failed"),
-        _ => err_502(e.to_string(), "chain_rpc"),
-    }
+fn development_key(state: &SharedChannelWorkerState) -> Result<&str, ApiError> {
+    state
+        .worker
+        .config
+        .development_kek
+        .as_deref()
+        .map(String::as_str)
+        .ok_or_else(|| {
+            err_500(
+                "channel encryption requires a protected development key",
+                "development_kek_missing",
+            )
+        })
 }
 
-/// Extract the channel id from a SIGNED cap service (`channel-pub:<id>` or
-/// `channel-sub:<id>`). Binding the feed to the signed service is what stops a
-/// `channel-pub:cam` cap from writing into a different channel's feed.
 fn channel_id_from_service(service: &str) -> Result<String, ApiError> {
     let id = service
         .strip_prefix("channel-pub:")
@@ -925,7 +623,7 @@ fn channel_id_from_service(service: &str) -> Result<String, ApiError> {
                 "channel_service_shape",
             )
         })?;
-    if id.is_empty() || id.contains(['/', '\\', '*', '?']) || id.contains("..") {
+    if !agentkeys_protocol::console::valid_channel_id(id) {
         return Err(err_400(
             "channel id must be non-empty and free of path/wildcard characters",
             "channel_id_shape",
@@ -938,9 +636,10 @@ fn normalize_omni(omni: &str) -> String {
     omni.trim_start_matches("0x").to_lowercase()
 }
 
-/// Feed S3 key: `bots/<owner>/channel/<channel_id>/<event_id>.enc`. Distinct
-/// `channel/` prefix from memory/config/credentials so a single audit pass
-/// covers every data class and the per-actor STS tag bounds the blast radius.
+fn object_aad(owner: &str, key: &str) -> Vec<u8> {
+    envelope::aad("", owner, key, 0)
+}
+
 fn feed_key(owner: &str, channel_id: &str, event_id: &str) -> String {
     format!("bots/{owner}/channel/{channel_id}/{event_id}.enc")
 }
@@ -962,8 +661,6 @@ mod tests {
 
     #[test]
     fn feed_key_uses_channel_prefix_not_memory_or_config() {
-        // arch.md §17.2 separation: the channel worker writes to
-        // bots/<owner>/channel/..., never memory/ config/ credentials/.
         let key = feed_key("abcdef", "cam-frontdoor", "0000000001-0000000000000001");
         assert_eq!(
             key,
@@ -984,15 +681,11 @@ mod tests {
             channel_id_from_service("channel-sub:family-weixin").unwrap(),
             "family-weixin"
         );
-        // A memory service is not a channel service.
         assert!(channel_id_from_service("knowledge:travel").is_err());
-        // Path/wildcard injection into the feed key is rejected.
         assert!(channel_id_from_service("channel-pub:../escape").is_err());
         assert!(channel_id_from_service("channel-pub:a/b").is_err());
     }
 
-    /// #667 — blob keys live in a SIBLING prefix of the feed (never listed by
-    /// a poll), and a ref only ever resolves back to its own feed.
     #[test]
     fn blob_key_is_a_sibling_of_the_feed_prefix_and_refs_parse_back() {
         let key = blob_key("abcdef", "weixin-chef", "0000000001-0000000000000001");
@@ -1009,7 +702,6 @@ mod tests {
                 "0000000001-0000000000000001".to_string()
             ))
         );
-        // An event key is NOT a blob ref; a traversal is not either.
         assert!(parse_blob_ref(&feed_key("abcdef", "weixin-chef", "x")).is_none());
         assert!(parse_blob_ref("bots/a/channel/c.blob/../x.enc").is_none());
         assert!(parse_blob_ref("memory/a/b.blob/c.enc").is_none());
@@ -1032,7 +724,6 @@ mod tests {
 
     #[test]
     fn feed_keys_sort_by_time_then_seq() {
-        // The cursor relies on lexicographic ordering matching event order.
         let a = feed_key("o", "c", "0000000001-0000000000000001");
         let b = feed_key("o", "c", "0000000001-0000000000000002");
         let c = feed_key("o", "c", "0000000002-0000000000000000");
@@ -1041,8 +732,6 @@ mod tests {
     }
 }
 
-/// Keep only the last `n` keys — the tail of a feed listing, applied per page
-/// so a long feed never holds more than `n` keys in memory.
 fn keep_tail(keys: &mut Vec<String>, n: usize) {
     if keys.len() > n {
         keys.drain(..keys.len() - n);
@@ -1058,11 +747,9 @@ mod tail_tests {
         let mut keys: Vec<String> = (1..=1000).map(|i| format!("k{i:05}")).collect();
         keep_tail(&mut keys, 3);
         assert_eq!(keys, vec!["k00998", "k00999", "k01000"]);
-        // The next page appends, and the tail follows it.
         keys.extend((1001..=1002).map(|i| format!("k{i:05}")));
         keep_tail(&mut keys, 3);
         assert_eq!(keys, vec!["k01000", "k01001", "k01002"]);
-        // Fewer keys than the tail: all kept.
         let mut few = vec!["a".to_string()];
         keep_tail(&mut few, 3);
         assert_eq!(few, vec!["a"]);

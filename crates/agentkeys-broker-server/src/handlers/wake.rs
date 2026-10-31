@@ -26,7 +26,7 @@
 use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::Json;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use crate::auth::extract_bearer_token;
 use crate::error::{BrokerError, BrokerResult};
@@ -35,17 +35,7 @@ use crate::handlers::channel_sts::constant_time_str_eq;
 use crate::handlers::revoke::parse_device_probe;
 use crate::state::SharedState;
 
-#[derive(Debug, Deserialize)]
-pub struct WakeRequest {
-    /// The feed's owner (`0x`-omni) — the cap's `operator_omni` at the worker.
-    pub owner_omni: String,
-    pub channel_id: String,
-    /// The waking event's `ts_millis` — where the woken sandbox replays its
-    /// feeds from. Absent from an older worker: the window falls back to the
-    /// last two minutes.
-    #[serde(default)]
-    pub event_ts_ms: Option<u64>,
-}
+pub use agentkeys_protocol::ChannelWakeRequest as WakeRequest;
 
 /// How long a cold-create claim holds before a new wake may create again. A
 /// create + adopt stays well under it; a crashed task must not pin the

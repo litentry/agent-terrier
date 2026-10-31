@@ -189,6 +189,10 @@ pub fn create_router(state: SharedState) -> Router {
         // channel worker rejects a cross-direction or cross-class cap.
         .route("/v1/cap/channel-pub", post(handlers::cap::cap_channel_pub))
         .route("/v1/cap/channel-sub", post(handlers::cap::cap_channel_sub))
+        .route(
+            agentkeys_protocol::CapMintOp::ChannelTeardown.broker_path(),
+            post(handlers::cap::cap_channel_teardown),
+        )
         // #225 / #164 E7 — Touch-ID-gated agent accept: assemble the sponsored
         // executeBatch([registerAgentDevice, setScope]) UserOp + return the userOpHash.
         .route("/v1/accept/build", post(handlers::accept::accept_build))

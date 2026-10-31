@@ -906,6 +906,306 @@ async fn memory_separates_own_canonical_and_append_only_inbox_authority() {
     assert_eq!(fixture.snapshot().len(), before.len() - 1);
 }
 
+#[tokio::test]
+async fn channel_ciphertext_cannot_be_replayed_under_another_object_key() {
+    let fixture = Fixture::new_for(DataClass::Channel, channel_router, true).await;
+    let mut publish = fixture.cap(false, CapOp::ChannelPublish);
+    publish.payload.service = "channel-pub:chat".into();
+    fixture.sign(&mut publish, false);
+    let mut subscribe = fixture.cap(false, CapOp::ChannelSubscribe);
+    subscribe.payload.service = "channel-sub:chat".into();
+    fixture.sign(&mut subscribe, false);
+    let (status, body) = fixture.call_body("/v1/channel/publish", serde_json::json!({"cap":publish, "kind":"text", "body_b64":STANDARD.encode(PLAINTEXT)})).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let original = body["s3_key"].as_str().unwrap();
+    let client = ObjectClient::new(fixture.storage.clone());
+    let stored = client.get(&subscribe, original).await.unwrap();
+    let replay = format!(
+        "{}/9999999999999-replay.enc",
+        original.rsplit_once('/').unwrap().0
+    );
+    client
+        .put(&publish, &replay, &stored.bytes, None)
+        .await
+        .unwrap();
+    let before = fixture.snapshot();
+    let (status, body) = fixture
+        .call_body("/v1/channel/poll", serde_json::json!({"cap":subscribe}))
+        .await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+    assert_eq!(body["reason"], "channel_envelope_decrypt");
+    assert!(body.get("events").is_none());
+    assert_eq!(fixture.snapshot(), before);
+}
+
+#[tokio::test]
+async fn channel_wake_uses_a_protected_explicit_token_and_refuses_redirects() {
+    use agentkeys_core::protected_file;
+    use agentkeys_worker_channel::wake::WakeClient;
+    use std::os::unix::fs::PermissionsExt;
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("wake.key");
+    let secret = SigningKey::random(&mut rand_core::OsRng);
+    let token = hex::encode(secret.to_bytes());
+    protected_file::write(path.to_str().unwrap(), token.as_bytes(), true).unwrap();
+    let hits = Arc::new(AtomicUsize::new(0));
+    let seen = hits.clone();
+    let (url, task) = serve(Router::new()
+        .route("/wake", post(move |headers: axum::http::HeaderMap, Json(body): Json<agentkeys_protocol::ChannelWakeRequest>| {
+            let seen = seen.clone();
+            let token = token.clone();
+            async move {
+                assert_eq!(headers["authorization"], format!("Bearer {token}"));
+                assert_eq!(body.channel_id, "chat");
+                assert_eq!(body.event_ts_ms, Some(1));
+                seen.fetch_add(1, Ordering::SeqCst);
+                StatusCode::NO_CONTENT
+            }
+        }))
+        .route("/redirect", post(|| async { (StatusCode::TEMPORARY_REDIRECT, [("location", "/wake")]) }))
+        .route("/refuse", post(|| async { StatusCode::FORBIDDEN }))).await;
+    let request = agentkeys_protocol::ChannelWakeRequest {
+        owner_omni: "11".repeat(32),
+        channel_id: "chat".into(),
+        event_ts_ms: Some(1),
+    };
+    WakeClient::local(format!("{url}/wake"), &path)
+        .unwrap()
+        .wake(&request)
+        .await
+        .unwrap();
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+    for endpoint in ["redirect", "refuse"] {
+        assert!(WakeClient::local(format!("{url}/{endpoint}"), &path)
+            .unwrap()
+            .wake(&request)
+            .await
+            .is_err());
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+    }
+    assert!(WakeClient::local("http://192.0.2.1/wake".into(), &path).is_err());
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(WakeClient::local(format!("{url}/wake"), &path).is_err());
+    task.abort();
+}
+
+fn channel_router(worker: Arc<WorkerState>) -> Router {
+    agentkeys_worker_channel::handlers::build_router(Arc::new(
+        agentkeys_worker_channel::ChannelWorkerState::new(worker, Default::default(), None)
+            .unwrap(),
+    ))
+}
+
+#[tokio::test]
+async fn channel_publishing_cannot_read_overwrite_or_delete_and_owner_deletes_only_one_feed() {
+    let fixture = Fixture::new_for(DataClass::Channel, channel_router, true).await;
+    let cap = |owner, operation, channel: &str| {
+        let mut cap = fixture.cap(owner, operation);
+        let direction = if operation == CapOp::ChannelSubscribe {
+            "sub"
+        } else {
+            "pub"
+        };
+        cap.payload.service = format!("channel-{direction}:{channel}");
+        fixture.sign(&mut cap, owner);
+        cap
+    };
+    let publish = |channel: &str| serde_json::json!({"cap":cap(false, CapOp::ChannelPublish, channel), "kind":"text", "body_b64":STANDARD.encode(PLAINTEXT)});
+    let (status, event) = fixture
+        .call_body("/v1/channel/publish", publish("chat"))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{event}");
+    let event_key = event["s3_key"].as_str().unwrap();
+    let (status, polled) = fixture
+        .call_body(
+            "/v1/channel/poll",
+            serde_json::json!({"cap":cap(false, CapOp::ChannelSubscribe, "chat")}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{polled}");
+    assert_eq!(
+        polled["events"][0]["producer"]["actor"]["actor_omni"],
+        format!("0x{}", "22".repeat(32))
+    );
+    assert_eq!(polled["events"][0]["body"], STANDARD.encode(PLAINTEXT));
+    let (status, blob) = fixture.call_body("/v1/channel/blob-put", serde_json::json!({"cap":cap(false, CapOp::ChannelPublish, "chat"), "content_type":"image/png", "bytes_b64":STANDARD.encode(PLAINTEXT)})).await;
+    assert_eq!(status, StatusCode::OK, "{blob}");
+    let blob_key = blob["body_ref"].as_str().unwrap();
+    let (status, fetched) = fixture.call_body("/v1/channel/blob-get", serde_json::json!({"cap":cap(false, CapOp::ChannelSubscribe, "chat"), "body_ref":blob_key})).await;
+    assert_eq!(status, StatusCode::OK, "{fetched}");
+    assert_eq!(fetched["bytes_b64"], STANDARD.encode(PLAINTEXT));
+    let client = ObjectClient::new(fixture.storage.clone());
+    let snapshot = fixture.snapshot();
+    assert!(matches!(
+        client
+            .get(&cap(false, CapOp::ChannelSubscribe, "CHAT"), event_key)
+            .await,
+        Err(ObjectError::Denied)
+    ));
+    assert!(snapshot.iter().all(|(_, value)| !value
+        .windows(PLAINTEXT.len())
+        .any(|window| window == PLAINTEXT)));
+    for key in [event_key, blob_key] {
+        assert!(matches!(
+            client
+                .get(&cap(false, CapOp::ChannelPublish, "chat"), key)
+                .await,
+            Err(ObjectError::Denied)
+        ));
+        assert!(matches!(
+            client
+                .delete(&cap(false, CapOp::ChannelPublish, "chat"), key, None)
+                .await,
+            Err(ObjectError::Denied)
+        ));
+        assert!(matches!(
+            client
+                .put(
+                    &cap(false, CapOp::ChannelSubscribe, "chat"),
+                    key,
+                    b"forbidden",
+                    None
+                )
+                .await,
+            Err(ObjectError::Denied)
+        ));
+        assert!(matches!(
+            client
+                .put(
+                    &cap(false, CapOp::ChannelPublish, "chat"),
+                    key,
+                    b"replacement",
+                    None
+                )
+                .await,
+            Err(ObjectError::Conflict)
+        ));
+        assert!(matches!(
+            client
+                .get(&cap(false, CapOp::ChannelSubscribe, "other"), key)
+                .await,
+            Err(ObjectError::Denied)
+        ));
+    }
+    assert_eq!(fixture.snapshot(), snapshot);
+    for (route, request, reason) in [
+        (
+            "/v1/channel/poll",
+            serde_json::json!({"cap":cap(false, CapOp::ChannelPublish, "chat")}),
+            "cap_op_mismatch",
+        ),
+        (
+            "/v1/channel/publish",
+            serde_json::json!({"cap":cap(false, CapOp::ChannelSubscribe, "chat"), "kind":"text", "body_b64":STANDARD.encode(PLAINTEXT)}),
+            "cap_op_mismatch",
+        ),
+        (
+            "/v1/channel/blob-get",
+            serde_json::json!({"cap":cap(false, CapOp::ChannelSubscribe, "other"), "body_ref":blob_key}),
+            "blob_ref_out_of_feed",
+        ),
+        (
+            "/v1/channel/teardown",
+            serde_json::json!({"cap":cap(false, CapOp::Teardown, "chat"), "channel_id":"chat"}),
+            "channel_not_owner",
+        ),
+    ] {
+        let calls = fixture.storage.calls.load(Ordering::SeqCst);
+        let (status, body) = fixture.call_body(route, request).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+        assert_eq!(body["reason"], reason);
+        assert_eq!(fixture.storage.calls.load(Ordering::SeqCst), calls);
+        assert_eq!(fixture.snapshot(), snapshot);
+    }
+    let (status, other) = fixture
+        .call_body("/v1/channel/publish", publish("other"))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{other}");
+    let other_key = other["s3_key"].as_str().unwrap();
+    assert!(matches!(
+        client
+            .delete(&cap(true, CapOp::Teardown, "chat"), other_key, None)
+            .await,
+        Err(ObjectError::Denied)
+    ));
+    fixture.storage.fail_delete.store(1, Ordering::SeqCst);
+    let before = fixture.snapshot();
+    let (status, body) = fixture
+        .call_body(
+            "/v1/channel/teardown",
+            serde_json::json!({"cap":cap(true, CapOp::Teardown, "chat"), "channel_id":"chat"}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+    assert_eq!(body["reason"], "storage_unavailable");
+    assert_eq!(fixture.snapshot(), before);
+    fixture.storage.fail_delete.store(0, Ordering::SeqCst);
+    let (status, body) = fixture
+        .call_body(
+            "/v1/channel/teardown",
+            serde_json::json!({"cap":cap(true, CapOp::Teardown, "chat"), "channel_id":"other"}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["keys_deleted"], 2);
+    assert_eq!(fixture.snapshot().len(), 1);
+    assert_eq!(fixture.snapshot()[0].0, other_key);
+}
+
+#[tokio::test]
+async fn channel_waiting_reads_recheck_authority_after_a_publish() {
+    use std::time::Duration;
+    let fixture = Arc::new(Fixture::new_for(DataClass::Channel, channel_router, true).await);
+    for revoked_while_waiting in [false, true] {
+        fixture.chain.lock().unwrap().allowed = true;
+        let channel = if revoked_while_waiting {
+            "revoked"
+        } else {
+            "active"
+        };
+        let mut read = fixture.cap(false, CapOp::ChannelSubscribe);
+        read.payload.service = format!("channel-sub:{channel}");
+        fixture.sign(&mut read, false);
+        let mut publish = fixture.cap(true, CapOp::ChannelPublish);
+        publish.payload.service = format!("channel-pub:{channel}");
+        fixture.sign(&mut publish, true);
+        let calls = fixture.storage.calls.load(Ordering::SeqCst);
+        let subscriber = fixture.clone();
+        let waiting = tokio::spawn(async move {
+            subscriber
+                .call_body(
+                    "/v1/channel/poll",
+                    serde_json::json!({"cap":read, "wait_seconds":5}),
+                )
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while fixture.storage.calls.load(Ordering::SeqCst) == calls {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        fixture.chain.lock().unwrap().allowed = !revoked_while_waiting;
+        let (status, body) = fixture.call_body("/v1/channel/publish", serde_json::json!({"cap":publish, "kind":"text", "body_b64":STANDARD.encode(PLAINTEXT)})).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let snapshot = fixture.snapshot();
+        let (status, body) = tokio::time::timeout(Duration::from_secs(2), waiting)
+            .await
+            .unwrap()
+            .unwrap();
+        if revoked_while_waiting {
+            assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+            assert_eq!(body["reason"], "storage_denied");
+            assert!(body.get("events").is_none());
+        } else {
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(body["events"][0]["body"], STANDARD.encode(PLAINTEXT));
+        }
+        assert_eq!(fixture.snapshot(), snapshot);
+    }
+}
+
 struct WorkerProcess {
     child: tokio::process::Child,
     url: String,
@@ -972,6 +1272,9 @@ impl WorkerProcess {
         if route.starts_with("/v1/memory/") {
             body["namespace"] = "notes".into();
         }
+        if route == "/v1/channel/publish" {
+            body = serde_json::json!({"cap":body["cap"], "kind":"text", "body_b64":STANDARD.encode(PLAINTEXT)});
+        }
         let response = reqwest::Client::builder()
             .no_proxy()
             .build()
@@ -1001,6 +1304,23 @@ async fn real_chain_config_worker() {
 #[ignore = "requires the explicit real-chain memory qualification fixture"]
 async fn real_chain_memory_worker() {
     qualify_real_worker(DataClass::Memory).await;
+}
+
+#[tokio::test]
+#[ignore = "requires the explicit real-chain channel qualification fixture"]
+async fn real_chain_channel_worker() {
+    qualify_real_worker(DataClass::Channel).await;
+}
+
+fn worker_plaintext(data_class: DataClass, body: &serde_json::Value) -> Vec<u8> {
+    let encoded = if data_class == DataClass::Channel {
+        &body["events"][0]["body"]
+    } else {
+        &body["plaintext_b64"]
+    };
+    STANDARD
+        .decode(encoded.as_str().expect("worker returned no plaintext"))
+        .unwrap()
 }
 
 async fn qualify_real_worker(data_class: DataClass) {
@@ -1061,10 +1381,27 @@ async fn qualify_real_worker(data_class: DataClass) {
     )
     .await;
     let cap = |key: &DeviceKey, actor: &str, op| {
-        let mut cap = cap_for(&signer, key, &operator, actor, op);
+        let operation = if data_class == DataClass::Channel {
+            match op {
+                CapOp::Store => CapOp::ChannelPublish,
+                CapOp::Fetch => CapOp::ChannelSubscribe,
+                _ => op,
+            }
+        } else {
+            op
+        };
+        let mut cap = cap_for(&signer, key, &operator, actor, operation);
         cap.payload.data_class = data_class;
         if data_class == DataClass::Memory {
             cap.payload.service = "knowledge:notes".into();
+        }
+        if data_class == DataClass::Channel {
+            cap.payload.service = if operation == CapOp::ChannelPublish {
+                "channel-pub:chat"
+            } else {
+                "channel-sub:chat"
+            }
+            .into();
         }
         sign_cap(&signer, key, &mut cap);
         cap
@@ -1083,6 +1420,8 @@ async fn qualify_real_worker(data_class: DataClass) {
     };
     let (put_route, get_route) = if data_class == DataClass::Config {
         ("/v1/config/put", "/v1/config/get")
+    } else if data_class == DataClass::Channel {
+        ("/v1/channel/publish", "/v1/channel/poll")
     } else if data_class == DataClass::Memory {
         ("/v1/memory/put", "/v1/memory/get")
     } else {
@@ -1121,12 +1460,7 @@ async fn qualify_real_worker(data_class: DataClass) {
             assert_eq!(body["reason"], "config_not_master_self");
         } else {
             assert_eq!(status, StatusCode::OK, "{body}");
-            assert_eq!(
-                STANDARD
-                    .decode(body["plaintext_b64"].as_str().unwrap())
-                    .unwrap(),
-                PLAINTEXT
-            );
+            assert_eq!(worker_plaintext(data_class, &body), PLAINTEXT);
         }
         let before = snapshot();
         assert_eq!(before.len(), 1);
@@ -1193,12 +1527,7 @@ async fn qualify_real_worker(data_class: DataClass) {
     }
     let (status, body) = worker.call(get_route, owner_cap(CapOp::Fetch), false).await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(
-        STANDARD
-            .decode(body["plaintext_b64"].as_str().unwrap())
-            .unwrap(),
-        PLAINTEXT
-    );
+    assert_eq!(worker_plaintext(data_class, &body), PLAINTEXT);
     worker.stop().await;
     storage_task.abort();
 }

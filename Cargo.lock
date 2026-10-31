@@ -518,8 +518,6 @@ dependencies = [
  "agentkeys-protocol",
  "agentkeys-worker-creds",
  "anyhow",
- "aws-config",
- "aws-sdk-s3",
  "axum",
  "base64 0.22.1",
  "clap",
@@ -528,12 +526,10 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
- "thiserror 2.0.18",
  "tokio",
  "tower 0.4.13",
- "tower-http 0.5.2",
  "tracing",
- "tracing-subscriber",
+ "zeroize",
 ]
 
 [[package]]
@@ -608,6 +604,7 @@ dependencies = [
  "agentkeys-protocol",
  "agentkeys-types",
  "agentkeys-worker-audit",
+ "agentkeys-worker-channel",
  "agentkeys-worker-config",
  "agentkeys-worker-memory",
  "anyhow",
