@@ -1,4 +1,4 @@
-This qualification exercises the real Docker adapter from a CLI. It uses a small HTTP fixture, not the complete agent image. Local models, application onboarding and contract-driven revocation are separate release gates.
+These explicit qualifications exercise the real Docker adapter from a CLI. The small HTTP fixture checks lifecycle ownership and isolation. The managed-agent scenario also checks the actual daemon/agent image, service transport and saved conversations. Real models, application onboarding and contract-driven revocation are separate release gates.
 
 ## Prerequisites
 
@@ -20,6 +20,19 @@ cargo test -p agentkeys-runtime --test docker_local -- --ignored --nocapture
 
 The explicit ignored-test invocation keeps ordinary unit tests independent of Docker availability. A missing socket, missing image or denied operation fails the qualification; it is never recorded as a pass or silently skipped. Compilation time and first image download are separate from the warm execution measurement.
 
+## Managed agent qualification
+
+Build the reviewed [public agent image](./local-agent-image.md) first. Local, from the public checkout and the same explicitly configured Docker socket:
+
+```sh
+export AGENT_TERRIER_TEST_AGENT_IMAGE="${AGENT_TERRIER_TEST_AGENT_IMAGE:?Set the preloaded public agent image}"
+cargo test -p agentkeys-runtime --test docker_managed -- --ignored --nocapture
+```
+
+This uses `DockerRuntime::connect_managed`, the same lifecycle owner as the broker adapter, and the public `service-transport.mjs`; it adds no second Docker controller. The container has networking disabled, a read-only root, an unprivileged user and the existing owned state volume. The host supplies local service targets and the existing chain profile explicitly. After translated loopback listeners are ready, the host delivers the bounded bootstrap frame over the attached process stream. Credentials are absent from Docker environment metadata and command arguments. Reuse requires the current controller's active lease; another controller is refused before minting. Ordinary shutdown preserves state, while failed startup removes its owned container and preserves the volume for inspection/retry.
+
+The scenario checks wrong chat proof with no model call, an authorized model reply, reuse without another mint, second-controller denial, restored conversation after container replacement, separate actor conversations, controller-loss shutdown and failed-transport cleanup. Its fixture deliberately denies chain/signer/channel requests: this proves process and transport integration, not real delegate authorization. It removes only its random namespace's containers and state volumes. A killed qualifier can leave a `terrier-managed-` namespace for inspection.
+
 ## What the check proves
 
 - One create and one credential callback, followed by reuse without another mint.
@@ -34,7 +47,7 @@ Each run uses a random ownership namespace. Cleanup removes only that run's cont
 
 Runtime images initialize the directory named by `agentkeys-protocol::runtime_layout::STATE_DIRECTORY` with its canonical user/group and mode 0700. The Docker owner mounts a named local volume there; it accepts no volume driver options, remote driver or host bind mount. It checks namespace/device/actor labels and mounted volume identity before reuse or removal. Ordinary `kill_for_device` retains state; the separate `reset_state_for_device` API checks actor ownership and refuses while any device container remains. This is host-controlled development storage, not a credential vault or production custody boundary.
 
-The Docker host remains trusted. Its administrators can inspect container environments. The adapter sends values over stdin and does not put credentials in command arguments or error output. The host client receives only `PATH`, `HOME`, `TMPDIR` and an explicitly supplied `DOCKER_CONFIG`, so inherited cloud settings and Docker context variables do not select another engine.
+The Docker host remains trusted. Its administrators can inspect container state. Generic fixture mode supplies an environment over stdin, which Docker retains; managed mode delivers credentials through the attached process stream instead. Neither puts credentials in command arguments or error output. The host client receives only `PATH`, `HOME`, `TMPDIR` and an explicitly supplied `DOCKER_CONFIG`, so inherited cloud settings and Docker context variables do not select another engine.
 
 ## Management transport
 

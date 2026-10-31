@@ -10,7 +10,11 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+mod managed;
 mod state_volume;
+use crate::managed_agent::{RuntimeBootstrap, BOOTSTRAP_VERSION};
+pub use managed::ManagedDockerConfig;
+use managed::ManagedLease;
 
 use crate::sandbox_backend::{
     CreateEnvProvider, DelegateLocks, EnsureOutcome, InstanceImageInfo, LiveRuntime, RuntimeImage,
@@ -107,6 +111,14 @@ impl DockerConfig {
 #[async_trait]
 trait DockerCommand: Send + Sync {
     async fn execute(&self, arguments: &[String], input: Option<Vec<u8>>) -> Result<Vec<u8>>;
+    async fn start_managed(
+        &self,
+        _id: &str,
+        _settings: &ManagedDockerConfig,
+        _bootstrap: RuntimeBootstrap,
+    ) -> Result<ManagedLease> {
+        anyhow::bail!("managed runtime startup is unavailable")
+    }
     async fn forward(
         &self,
         _id: &str,
@@ -140,6 +152,14 @@ impl LocalDockerCommand {
 
 #[async_trait]
 impl DockerCommand for LocalDockerCommand {
+    async fn start_managed(
+        &self,
+        id: &str,
+        settings: &ManagedDockerConfig,
+        bootstrap: RuntimeBootstrap,
+    ) -> Result<ManagedLease> {
+        self.launch_managed(id, settings, bootstrap).await
+    }
     async fn forward(
         &self,
         id: &str,
@@ -231,6 +251,8 @@ struct Container {
     state: ContainerState,
     network_settings: NetworkSettings,
     mounts: Vec<serde_json::Value>,
+    #[serde(default)]
+    host_config: serde_json::Value,
 }
 
 impl Container {
@@ -269,6 +291,8 @@ struct NetworkSettings {
 struct Image {
     #[serde(rename = "Id")]
     id: String,
+    #[serde(rename = "Config", default)]
+    config: serde_json::Value,
 }
 
 struct LocalEndpoint {
@@ -381,6 +405,8 @@ pub struct DockerRuntime {
     command: Arc<dyn DockerCommand>,
     locks: DelegateLocks,
     endpoints: EndpointCache,
+    managed_config: Option<ManagedDockerConfig>,
+    managed_leases: RwLock<HashMap<String, ManagedLease>>,
 }
 
 impl DockerRuntime {
@@ -393,7 +419,20 @@ impl DockerRuntime {
             command,
             locks: DelegateLocks::default(),
             endpoints: RwLock::default(),
+            managed_config: None,
+            managed_leases: RwLock::default(),
         };
+        runtime.current_image().await?;
+        Ok(runtime)
+    }
+
+    pub async fn connect_managed(
+        config: DockerConfig,
+        managed: ManagedDockerConfig,
+    ) -> Result<Self> {
+        managed.validate()?;
+        let mut runtime = Self::connect(config).await?;
+        runtime.managed_config = Some(managed);
         runtime.current_image().await?;
         Ok(runtime)
     }
@@ -413,6 +452,12 @@ impl DockerRuntime {
                 && hex::decode(&image.id[7..]).is_ok(),
             "Docker returned an invalid image digest"
         );
+        if self.managed_config.is_some() {
+            ensure!(
+                image.config["Entrypoint"] == serde_json::json!(["agent-terrier-runtime"]),
+                "local image does not provide the managed runtime entry point"
+            );
+        }
         Ok(image)
     }
 
@@ -448,6 +493,15 @@ impl DockerRuntime {
             );
             normalize_identity(&container.id)?;
             self.verify_state_mount(container).await?;
+            if self.managed_config.is_some() {
+                ensure!(
+                    container.host_config["NetworkMode"] == "none"
+                        && container.host_config["ReadonlyRootfs"] == true
+                        && container.host_config["Privileged"] == false
+                        && !container.has_published_ports(),
+                    "managed runtime isolation mismatch"
+                );
+            }
         }
         Ok(containers)
     }
@@ -485,6 +539,16 @@ impl DockerRuntime {
     }
 
     fn cache_endpoints(&self, container: &Container) -> Result<()> {
+        if self.managed_config.is_some() && container.state.running {
+            ensure!(
+                self.managed_leases
+                    .read()
+                    .map_err(|_| anyhow::anyhow!("runtime lease cache poisoned"))?
+                    .get(&container.id)
+                    .is_some_and(ManagedLease::active),
+                "running runtime has no active controller; stop it explicitly before replacing it"
+            );
+        }
         let mut cache = self
             .endpoints
             .write()
@@ -520,6 +584,14 @@ impl DockerRuntime {
             !container.has_published_ports(),
             "refusing a runtime with published container ports"
         );
+        let lease = self
+            .managed_leases
+            .write()
+            .map_err(|_| anyhow::anyhow!("runtime lease cache poisoned"))?
+            .remove(&container.id);
+        if let Some(lease) = lease {
+            lease.close().await;
+        }
         self.command
             .execute(
                 &[
@@ -650,21 +722,24 @@ fn normalize_identity(value: &str) -> Result<String> {
     Ok(normalized)
 }
 
-fn environment_input(
+fn environment_values(
     actor: &str,
     base: &[(String, String)],
     additional: Vec<(String, String)>,
-) -> Result<Vec<u8>> {
+) -> Result<BTreeMap<String, String>> {
     use agentkeys_protocol::sandbox_env;
     let allowed_names: Vec<&str> = sandbox_env::CHAT_COMMON
         .into_iter()
         .chain(sandbox_env::CHAT_CREDENTIAL_ANY)
         .chain(agentkeys_protocol::model_runtime::ENVIRONMENT_NAMES)
+        .chain(
+            crate::managed_agent::SERVICE_ENVIRONMENT
+                .iter()
+                .map(|(_, name)| *name),
+        )
         .chain([
             sandbox_env::MGMT_TOKEN,
             sandbox_env::BRIDGE_TOKEN,
-            sandbox_env::CHANNEL_WORKER_URL,
-            sandbox_env::SIGNER_URL,
             sandbox_env::MEMORY_NS,
             sandbox_env::BOUND_CHANNELS,
             sandbox_env::APP_TEMPLATE,
@@ -728,8 +803,7 @@ fn environment_input(
         );
         environment.insert(name.into(), expected.into());
     }
-    let mut output = Vec::new();
-    for (name, value) in environment {
+    for (name, value) in &environment {
         ensure!(
             !name.is_empty()
                 && name.bytes().all(|value| value.is_ascii_uppercase()
@@ -738,6 +812,17 @@ fn environment_input(
                 && !value.contains(['\n', '\r', '\0']),
             "invalid sandbox environment entry"
         );
+    }
+    Ok(environment)
+}
+
+fn environment_input(
+    actor: &str,
+    base: &[(String, String)],
+    additional: Vec<(String, String)>,
+) -> Result<Vec<u8>> {
+    let mut output = Vec::new();
+    for (name, value) in environment_values(actor, base, additional)? {
         output.extend_from_slice(format!("{name}={value}\n").as_bytes());
     }
     Ok(output)
@@ -802,9 +887,32 @@ impl SandboxRuntime for DockerRuntime {
         }
         let image = self.current_image().await?;
         self.state_volume_metadata(&device, &actor).await?;
-        self.network_metadata(&device).await?;
-        let input = environment_input(&actor, base_envs, on_create().await)?;
-        let network = self.ensure_network(&device).await?;
+        if self.managed_config.is_none() {
+            self.network_metadata(&device).await?;
+        }
+        let additional = on_create().await;
+        let (input, bootstrap) = if let Some(settings) = &self.managed_config {
+            let mut environment = environment_values(&actor, base_envs, additional)?;
+            environment.remove("AGENTKEYS_CHAIN");
+            environment.remove("AGENT_TERRIER_LOCAL_DEV");
+            let bootstrap = RuntimeBootstrap {
+                version: BOOTSTRAP_VERSION,
+                chain_profile: settings.chain_profile.clone(),
+                environment,
+            };
+            bootstrap.validate()?;
+            (None, Some(bootstrap))
+        } else {
+            (
+                Some(environment_input(&actor, base_envs, additional)?),
+                None,
+            )
+        };
+        let network = if self.managed_config.is_some() {
+            "none".into()
+        } else {
+            self.ensure_network(&device).await?
+        };
         let state_volume = self.ensure_state_volume(&device, &actor).await?;
         for container in &existing {
             self.remove(container).await?;
@@ -823,8 +931,6 @@ impl SandboxRuntime for DockerRuntime {
             format!("{ACTOR_LABEL}={actor}"),
             "--network".into(),
             network,
-            "--add-host".into(),
-            "host.docker.internal:host-gateway".into(),
             "--read-only".into(),
             "--cap-drop=ALL".into(),
             "--security-opt=no-new-privileges".into(),
@@ -836,14 +942,40 @@ impl SandboxRuntime for DockerRuntime {
             "--tmpfs=/home/agent:rw,nosuid,nodev,uid=1000,gid=1000,size=512m".into(),
             "--mount".into(),
             format!("type=volume,source={state_volume},target={STATE_DIRECTORY}"),
-            "--env-file=/dev/stdin".into(),
         ];
+        if self.managed_config.is_some() {
+            arguments.push("--interactive".into());
+        } else {
+            arguments.extend([
+                "--add-host".into(),
+                "host.docker.internal:host-gateway".into(),
+                "--env-file=/dev/stdin".into(),
+            ]);
+        }
         arguments.push(image.id);
-        let output = self.command.execute(&arguments, Some(input)).await?;
+        let output = self.command.execute(&arguments, input).await?;
         let id = normalize_identity(std::str::from_utf8(&output)?.trim())?;
-        self.command
-            .execute(&["container".into(), "start".into(), id.clone()], None)
-            .await?;
+        if let (Some(settings), Some(bootstrap)) = (&self.managed_config, bootstrap) {
+            match self.command.start_managed(&id, settings, bootstrap).await {
+                Ok(lease) => {
+                    self.managed_leases
+                        .write()
+                        .map_err(|_| anyhow::anyhow!("runtime lease cache poisoned"))?
+                        .insert(id.clone(), lease);
+                }
+                Err(error) => {
+                    let containers = self.inspect(std::slice::from_ref(&id)).await?;
+                    if let Some(container) = containers.first() {
+                        self.remove(container).await?;
+                    }
+                    return Err(error.context("managed runtime startup failed; owned container removed and state preserved"));
+                }
+            }
+        } else {
+            self.command
+                .execute(&["container".into(), "start".into(), id.clone()], None)
+                .await?;
+        }
         let containers = self.inspect(std::slice::from_ref(&id)).await?;
         let container = containers.first().context("created container missing")?;
         ensure!(container.state.running, "created container is not running");
@@ -882,7 +1014,9 @@ impl SandboxRuntime for DockerRuntime {
             self.remove(&container).await?;
             removed.push(container.id);
         }
-        self.remove_network(&device).await?;
+        if self.managed_config.is_none() {
+            self.remove_network(&device).await?;
+        }
         Ok(removed)
     }
 
@@ -1098,6 +1232,8 @@ mod tests {
             command: engine,
             locks: DelegateLocks::default(),
             endpoints: RwLock::default(),
+            managed_config: None,
+            managed_leases: RwLock::default(),
         }
     }
 

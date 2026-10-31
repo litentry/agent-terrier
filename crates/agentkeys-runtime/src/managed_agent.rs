@@ -10,15 +10,16 @@ pub const MAX_BOOTSTRAP_BYTES: usize = 64 * 1024;
 pub const STARTUP_TIMEOUT_SECONDS: u64 = 30;
 pub const RUNTIME_SCRIPT: &str = "/opt/terrier/packages/agent-terrier-runtime/start.mjs";
 
-const ENDPOINTS: &[&str] = &[
-    sandbox_env::BROKER_URL,
-    sandbox_env::SIGNER_URL,
-    sandbox_env::CHANNEL_WORKER_URL,
-    "AGENTKEYS_WORKER_CRED_URL",
-    "AGENTKEYS_WORKER_MEMORY_URL",
-    "AGENTKEYS_WORKER_CONFIG_URL",
-    model_runtime::BASE_URL,
+pub const SERVICE_ENVIRONMENT: &[(&str, &str)] = &[
+    ("broker", sandbox_env::BROKER_URL),
+    ("signer", sandbox_env::SIGNER_URL),
+    ("channel", sandbox_env::CHANNEL_WORKER_URL),
+    ("cred", "AGENTKEYS_WORKER_CRED_URL"),
+    ("memory", "AGENTKEYS_WORKER_MEMORY_URL"),
+    ("config", "AGENTKEYS_WORKER_CONFIG_URL"),
+    ("model", model_runtime::BASE_URL),
 ];
+
 const TOKENS: &[&str] = &[
     sandbox_env::SESSION_JWT,
     sandbox_env::BRIDGE_TOKEN,
@@ -60,7 +61,9 @@ impl RuntimeBootstrap {
         self.chain_profile.require_local_development(true, None)?;
         for name in self.environment.keys() {
             ensure!(
-                ENDPOINTS.contains(&name.as_str())
+                SERVICE_ENVIRONMENT
+                    .iter()
+                    .any(|(_, environment_name)| environment_name == name)
                     || TOKENS.contains(&name.as_str())
                     || [
                         sandbox_env::ACTOR_OMNI,
@@ -72,7 +75,7 @@ impl RuntimeBootstrap {
                 "unsupported bootstrap environment field"
             );
         }
-        for name in ENDPOINTS {
+        for (_, name) in SERVICE_ENVIRONMENT {
             let value = self.value(name)?;
             agentkeys_protocol::model_config::require_local_endpoint(value)
                 .map_err(anyhow::Error::msg)?;
@@ -133,7 +136,7 @@ mod tests {
 
     fn fixture() -> RuntimeBootstrap {
         let mut environment = BTreeMap::new();
-        for name in ENDPOINTS {
+        for (_, name) in SERVICE_ENVIRONMENT {
             environment.insert((*name).into(), "http://127.0.0.1:1".into());
         }
         for name in TOKENS {
