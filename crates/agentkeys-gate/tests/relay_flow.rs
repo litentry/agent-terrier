@@ -18,13 +18,13 @@ use axum::{
 };
 use serde_json::{json, Value};
 
+use agentkeys_gate::config::DecisionEndpoint;
 use agentkeys_gate::config::{DecisionUpstreams, GateConfig, RelayKey, UpstreamConfig};
 use agentkeys_gate::relay::Relay;
 use agentkeys_gate::server;
-use agentkeys_inference_creds::SystemOneCreds;
 
-const UPSTREAM_KEY: &str = "ark-vendor-secret";
-/// #722 — the gate-held TypeSafe key (a different vendor than Ark).
+const UPSTREAM_KEY: &str = "synthetic-upstream-secret";
+/// #722 — the gate-held TypeSafe key (independent of the chat key).
 const TYPESAFE_KEY: &str = "ts-vendor-secret";
 /// The gate-held key of the self-hosted Kev server (a third credential).
 const KEV_KEY: &str = "kev-server-secret";
@@ -91,20 +91,19 @@ async fn upstream_chat(
             Json(json!({"error": {"message": "model not found", "type": "invalid_request_error"}})),
         )
             .into_response(),
-        "overdue" => ark_account_overdue(),
+        "overdue" => account_quota_refusal(),
         other => panic!("unknown upstream mode {other}"),
     }
 }
 
-/// What Ark answered EVERY call on VE prod 2026-09-29 — chat and embeddings
-/// alike, whatever key — while its account had an overdue balance.
-const ARK_ACCOUNT_OVERDUE: &str = r#"{"error":{"code":"AccountOverdueError","message":"The request failed because your account has an overdue balance. Request id: 021790685392088bfe35b6525b6a24c7ddbea7b420bd5585f179e","param":"","type":"Forbidden"}}"#;
+/// Synthetic account-scoped refusal.
+const ACCOUNT_REFUSAL: &str = r#"{"error":{"code":"insufficient_quota","message":"Synthetic account quota exhausted.","param":"","type":"Forbidden"}}"#;
 
-fn ark_account_overdue() -> Response {
+fn account_quota_refusal() -> Response {
     Response::builder()
         .status(StatusCode::FORBIDDEN)
         .header("content-type", "application/json")
-        .body(Body::from(ARK_ACCOUNT_OVERDUE))
+        .body(Body::from(ACCOUNT_REFUSAL))
         .unwrap()
 }
 
@@ -126,7 +125,7 @@ async fn upstream_embeddings(
         .map(str::to_string);
     state.requests.lock().unwrap().push((auth, body.clone()));
     if state.mode.lock().unwrap().as_str() == "overdue" {
-        return ark_account_overdue();
+        return account_quota_refusal();
     }
     let input_count = match body.get("input") {
         Some(Value::Array(a)) => a.len(),
@@ -278,17 +277,16 @@ async fn spawn_gate(budget: Option<u64>) -> TestGate {
         audit_url: Some(format!("http://{audit_addr}")),
         require_audit: false,
         aws_region: "us-east-1".into(),
-        speech_asr: None,
-        speech_tts: None,
+        speech_backend: None,
         search: None,
         // #722 — the mock upstream doubles as TypeSafe (same host, own key);
         // Kev is a second server with a third key.
         decision: DecisionUpstreams {
-            jev: Some(SystemOneCreds {
+            jev: Some(DecisionEndpoint {
                 api_key: TYPESAFE_KEY.into(),
                 base_url: format!("http://{up_addr}"),
             }),
-            kev: Some(SystemOneCreds {
+            kev: Some(DecisionEndpoint {
                 api_key: KEV_KEY.into(),
                 base_url: format!("http://{kev_addr}/kev"),
             }),
@@ -347,7 +345,10 @@ async fn non_streamed_turn_custody_metering_audit() {
     // extra params rode through.
     let reqs = gate.upstream.requests.lock().unwrap().clone();
     assert_eq!(reqs.len(), 1);
-    assert_eq!(reqs[0].0.as_deref(), Some("Bearer ark-vendor-secret"));
+    assert_eq!(
+        reqs[0].0.as_deref(),
+        Some("Bearer synthetic-upstream-secret")
+    );
     assert_eq!(reqs[0].1["temperature"], 0.4);
     assert!(reqs[0].1.get("stream_options").is_none());
 
@@ -428,7 +429,10 @@ async fn embeddings_call_custody_metering_audit() {
     // caller's model rode through untouched (no chat model_override applied).
     let reqs = gate.upstream.requests.lock().unwrap().clone();
     assert_eq!(reqs.len(), 1);
-    assert_eq!(reqs[0].0.as_deref(), Some("Bearer ark-vendor-secret"));
+    assert_eq!(
+        reqs[0].0.as_deref(),
+        Some("Bearer synthetic-upstream-secret")
+    );
     assert_eq!(reqs[0].1["model"], "ep-doubao-embedding");
 
     // Metering: embed tokens land in the shared totals AND the embed slice.
@@ -661,14 +665,11 @@ async fn upstream_4xx_is_forwarded_verbatim() {
     assert_eq!(resp.status(), 200);
 }
 
-/// VE prod 2026-09-28/29: an overdue upstream account refused every chat and
-/// every embedding with 403 `AccountOverdueError`, for every key. The caller
-/// still gets the upstream's own answer; the gate reports the ACCOUNT on
-/// `/readyz` (liveness stays 200) until the upstream answers 2xx again.
+/// An account-scoped failure holds readiness until a successful inference.
 async fn readyz(client: &reqwest::Client, base: &str) -> (reqwest::StatusCode, Value) {
-    let resp = client.get(format!("{base}/readyz")).send().await.unwrap();
-    let status = resp.status();
-    (status, resp.json::<Value>().await.unwrap())
+    let response = client.get(format!("{base}/readyz")).send().await.unwrap();
+    let status = response.status();
+    (status, response.json::<Value>().await.unwrap())
 }
 
 #[tokio::test]
@@ -689,7 +690,7 @@ async fn an_account_refusal_is_forwarded_and_holds_readyz_until_a_2xx() {
         .unwrap();
     assert_eq!(resp.status(), 403);
     let body: Value = resp.json().await.unwrap();
-    assert_eq!(body["error"]["code"], "AccountOverdueError");
+    assert_eq!(body["error"]["code"], "insufficient_quota");
     // A different key, a different route — the same account refusal.
     let resp = client
         .post(format!("{}/v1/chat/completions", gate.base))
@@ -704,7 +705,7 @@ async fn an_account_refusal_is_forwarded_and_holds_readyz_until_a_2xx() {
     assert_eq!(status, 503);
     assert_eq!(body["status"], "unready");
     let refused = &body["upstream_account_refused"];
-    assert_eq!(refused["code"], "AccountOverdueError");
+    assert_eq!(refused["code"], "insufficient_quota");
     assert_eq!(refused["status"], 403);
     assert_eq!(refused["route"], "/chat/completions");
     assert_eq!(refused["refusals"], 2);
@@ -1025,8 +1026,7 @@ async fn search_call_pins_engines_maps_results_and_audits() {
         audit_url: Some(format!("http://{audit_addr}")),
         require_audit: false,
         aws_region: "us-east-1".into(),
-        speech_asr: None,
-        speech_tts: None,
+        speech_backend: None,
         search: Some(agentkeys_gate::config::SearchConfig {
             base_url: format!("http://{searx_addr}"),
             engines: "bing".into(),
@@ -1122,7 +1122,7 @@ async fn systemone_call_custody_metering_audit() {
     assert_eq!(body["answers"]["destination"]["confidence"], 0.81);
     assert_eq!(body["model"], "jev-1.13.0");
 
-    // The vendor saw the TypeSafe key — not Ark's, not the caller's.
+    // The vendor saw the TypeSafe key — not the chat key, not the caller's.
     let seen = gate.upstream.requests.lock().unwrap().clone();
     assert_eq!(seen.len(), 1);
     assert_eq!(
@@ -1212,11 +1212,11 @@ async fn systemone_models_names_each_providers_server_for_a_relay_key() {
     assert_eq!(status, 401);
 }
 
-/// No typesafe family → 503, loud, and the vendor is never contacted (the
+/// No explicit decision endpoint → 503, loud, and the vendor is never contacted (the
 /// contact gate's router reads this as "gate down" and runs its deterministic
 /// tier). The models report still lists both providers, saying what is missing.
 #[tokio::test]
-async fn systemone_is_503_when_the_typesafe_family_is_unprovisioned() {
+async fn systemone_is_503_when_no_endpoint_is_configured() {
     let (up_addr, upstream) = spawn_upstream().await;
     let config = GateConfig {
         listen: "127.0.0.1:0".parse().unwrap(),
@@ -1234,8 +1234,7 @@ async fn systemone_is_503_when_the_typesafe_family_is_unprovisioned() {
         audit_url: None,
         require_audit: false,
         aws_region: "us-east-1".into(),
-        speech_asr: None,
-        speech_tts: None,
+        speech_backend: None,
         search: None,
         decision: DecisionUpstreams::default(),
     };
@@ -1264,13 +1263,13 @@ async fn systemone_is_503_when_the_typesafe_family_is_unprovisioned() {
         .json()
         .await
         .unwrap();
-    for (provider, family) in [("jev", "typesafe"), ("kev", "kev")] {
+    for provider in ["jev", "kev"] {
         let p = &report["providers"][provider];
         assert_eq!(p["configured"], false, "{report}");
         assert!(
             p["error"]
                 .as_str()
-                .is_some_and(|e| e.contains(&format!("rotate-inference-cred.sh {family}"))),
+                .is_some_and(|e| e.contains("No explicit endpoint configured")),
             "{report}"
         );
     }
@@ -1371,11 +1370,10 @@ async fn systemone_refuses_an_unknown_model_and_503s_an_unarmed_provider() {
         audit_url: None,
         require_audit: false,
         aws_region: "us-east-1".into(),
-        speech_asr: None,
-        speech_tts: None,
+        speech_backend: None,
         search: None,
         decision: DecisionUpstreams {
-            jev: Some(SystemOneCreds {
+            jev: Some(DecisionEndpoint {
                 api_key: TYPESAFE_KEY.into(),
                 base_url: format!("http://{up_addr}"),
             }),
@@ -1411,7 +1409,8 @@ async fn systemone_refuses_an_unknown_model_and_503s_an_unarmed_provider() {
     assert_eq!(resp.status().as_u16(), 503);
     let body: Value = resp.json().await.unwrap();
     assert!(
-        body.to_string().contains("`kev` inference family"),
+        body.to_string()
+            .contains("No explicit endpoint configured for Kev"),
         "{body}"
     );
     assert_eq!(

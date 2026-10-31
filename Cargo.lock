@@ -74,7 +74,6 @@ version = "0.1.0"
 dependencies = [
  "agentkeys-broker-server",
  "agentkeys-core",
- "agentkeys-inference-creds",
  "agentkeys-mock-server",
  "agentkeys-protocol",
  "agentkeys-provisioner",
@@ -311,9 +310,9 @@ version = "0.2.0"
 dependencies = [
  "agentkeys-backend-client",
  "agentkeys-core",
- "agentkeys-inference-creds",
  "agentkeys-protocol",
  "anyhow",
+ "async-trait",
  "axum",
  "base64 0.22.1",
  "bytes",
@@ -331,14 +330,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
-]
-
-[[package]]
-name = "agentkeys-inference-creds"
-version = "0.1.0"
-dependencies = [
- "tempfile",
- "thiserror 2.0.18",
+ "zeroize",
 ]
 
 [[package]]
@@ -526,7 +518,6 @@ dependencies = [
  "aes",
  "agentkeys-backend-client",
  "agentkeys-core",
- "agentkeys-inference-creds",
  "agentkeys-protocol",
  "agentkeys-worker-creds",
  "anyhow",

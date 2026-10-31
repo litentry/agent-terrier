@@ -86,14 +86,19 @@ impl UpstreamClient {
         api_key: &str,
         body: &Value,
     ) -> GateResult<reqwest::Response> {
-        client
+        let request = client
             .post(format!(
                 "{}{}",
                 base_url.trim_end_matches('/'),
                 agentkeys_protocol::SYSTEMONE_ROUTE
             ))
-            .bearer_auth(api_key)
-            .json(body)
+            .json(body);
+        let request = if api_key.is_empty() {
+            request
+        } else {
+            request.bearer_auth(api_key)
+        };
+        request
             .send()
             .await
             .map_err(|e| GateError::Upstream(format!("systemone upstream transport: {e}")))
@@ -107,12 +112,17 @@ impl UpstreamClient {
         base_url: &str,
         api_key: &str,
     ) -> GateResult<reqwest::Response> {
-        client
+        let request = client
             .get(format!("{}/v1/models", base_url.trim_end_matches('/')))
             .timeout(std::time::Duration::from_millis(
                 SYSTEMONE_MODELS_TIMEOUT_MS,
-            ))
-            .bearer_auth(api_key)
+            ));
+        let request = if api_key.is_empty() {
+            request
+        } else {
+            request.bearer_auth(api_key)
+        };
+        request
             .send()
             .await
             .map_err(|e| GateError::Upstream(format!("systemone upstream transport: {e}")))

@@ -1,95 +1,61 @@
-//! Runtime configuration — CLI flags + env vars, read ONCE at startup and
-//! treated as immutable (the `from_env`/inject pattern; AGENTS.md bans
-//! `std::env::set_var` in tests, so tests build `GateConfig` directly).
+//! Explicit relay configuration; no host credential discovery.
 
-use std::collections::HashMap;
-use std::net::SocketAddr;
-use std::path::PathBuf;
-
+use crate::speech::SpeechBackend;
+use agentkeys_core::{models, protected_file};
+use agentkeys_protocol::{normalize_omni_0x, DecisionProvider};
 use clap::Parser;
 use serde::{Deserialize, Serialize};
+use std::{
+    collections::HashMap,
+    net::SocketAddr,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
-use agentkeys_inference_creds::{AsrCreds, Family, Resolver, SystemOneCreds, TtsCreds};
-use agentkeys_protocol::{normalize_omni_0x, DecisionProvider};
-
-#[derive(Parser, Debug, Clone)]
-#[command(
-    name = "agentkeys-gate",
-    about = "AgentKeys metered key-custody LLM-egress relay (#384) — holds the vendor \
-             inference key, meters per-user token usage with per-device/per-key stats, \
-             audits every turn as GateTurn (#332)"
-)]
+#[derive(Parser, Clone)]
+#[command(name = "agentkeys-gate", about = "Authenticated, metered model relay")]
 pub struct Cli {
-    /// HTTP bind address. OpenAI-compatible endpoint at `POST
-    /// /v1/chat/completions`; rollup at `GET /v1/usage`; health at `GET /healthz`.
-    #[arg(long, env = "AGENTKEYS_GATE_LISTEN", default_value = "0.0.0.0:8077")]
+    #[arg(long, env = "AGENTKEYS_GATE_LISTEN", default_value = "127.0.0.1:8077")]
     pub listen: SocketAddr,
-
-    /// Upstream OpenAI-compatible base URL — an explicit, engine-agnostic
-    /// override. When unset, the **ark family** resolves it (#338: env
-    /// `ARK_BASE_URL` > `ark.env` family file > the built-in Ark default), so
-    /// the relay's upstream comes from the SAME source every other component
-    /// reads — never a gate-private notion of "where Ark is".
+    /// Explicit compatible endpoint; defaults to the local model recipe.
     #[arg(long, env = "AGENTKEYS_GATE_UPSTREAM_BASE_URL")]
     pub upstream_base_url: Option<String>,
-
-    /// Upstream API key — the ONE vendor key the relay holds (never handed to
-    /// sandboxes). Explicit override; when unset (and no `_FILE`), the **ark
-    /// family** resolves it (#338: env `ARK_API_KEY` > `ark.env` family file —
-    /// rotate with `scripts/operator/secrets/rotate-inference-cred.sh ark`).
-    #[arg(long, env = "AGENTKEYS_GATE_UPSTREAM_API_KEY")]
+    /// Optional explicit credential. Prefer the protected file form.
+    #[arg(
+        long,
+        env = "AGENTKEYS_GATE_UPSTREAM_API_KEY",
+        hide_env_values = true,
+        conflicts_with = "upstream_api_key_file"
+    )]
     pub upstream_api_key: Option<String>,
-
-    /// Owner-only file (0600) holding the upstream API key — an engine-agnostic
-    /// escape hatch. For the Ark deployment prefer the per-family `ark.env`
-    /// (the loader finds it without any flag).
     #[arg(long, env = "AGENTKEYS_GATE_UPSTREAM_API_KEY_FILE")]
     pub upstream_api_key_file: Option<PathBuf>,
-
-    /// Optional upstream model / Ark endpoint-id override. When unset the
-    /// caller's `model` is forwarded verbatim.
+    /// Override the requested chat model.
     #[arg(long, env = "AGENTKEYS_GATE_MODEL")]
     pub model: Option<String>,
-
-    /// JSON file with the relay key records + per-user budgets (see
-    /// `KeysFile`). Without it the relay 401s every request (logged loudly).
+    /// Default for a request with no model; defaults to the local recipe.
+    #[arg(long, env = "AGENTKEYS_GATE_DEFAULT_MODEL")]
+    pub default_model: Option<String>,
+    /// Explicit protected JSON describing optional decision endpoints.
+    #[arg(long, env = "AGENTKEYS_GATE_DECISION_CONFIG")]
+    pub decision_config: Option<PathBuf>,
+    /// Owner-only relay key records and budgets. Absent means no callers are authorized.
     #[arg(long, env = "AGENTKEYS_GATE_KEYS_FILE")]
     pub keys_file: Option<PathBuf>,
-
-    /// Default per-user token budget when the keys file has no per-user
-    /// override. Unset = unlimited (but still metered).
     #[arg(long, env = "AGENTKEYS_GATE_DEFAULT_BUDGET_TOKENS")]
     pub default_budget_tokens: Option<u64>,
-
-    /// Bearer token for operator queries of `GET /v1/usage` across all users.
-    #[arg(long, env = "AGENTKEYS_GATE_ADMIN_TOKEN")]
+    #[arg(long, env = "AGENTKEYS_GATE_ADMIN_TOKEN", hide_env_values = true)]
     pub admin_token: Option<String>,
-
-    /// Audit worker base URL for `GateTurn` appends. Unset = no audit emission
-    /// (logged loudly at boot; pair with --require-audit for the strict mode).
     #[arg(long, env = "AGENTKEYS_AUDIT_URL")]
     pub audit_url: Option<String>,
-
-    /// Fail a (non-streamed) turn if its GateTurn audit row cannot be appended
-    /// — matches the `AGENTKEYS_WORKER_REQUIRE_AUDIT` staged-rollout posture.
     #[arg(long, env = "AGENTKEYS_GATE_REQUIRE_AUDIT", default_value_t = false)]
     pub require_audit: bool,
-
-    /// AWS region for the shared BackendClient constructor (unused on the
-    /// audit-only path, but required by the one-owner client).
+    // Removed with the remaining storage client dependency migration.
     #[arg(long, env = "AWS_REGION", default_value = "us-east-1")]
     pub aws_region: String,
-
-    /// #653 — base URL of the SearXNG instance the `/v1/search` leg relays to
-    /// (the broker-host loopback service). Unset = the leg is unconfigured on
-    /// this gate (its endpoint refuses 503, loudly logged at boot).
     #[arg(long, env = "AGENTKEYS_GATE_SEARCH_URL")]
     pub search_url: Option<String>,
-
-    /// #653 — engine set the gate pins on every SearXNG query (callers cannot
-    /// widen it). Bing is the deployment default (owner decision, 2026-08-31);
-    /// Baidu/Sogou/Quark stay reachable via this knob, never per-request.
-    #[arg(long, env = "AGENTKEYS_GATE_SEARCH_ENGINES", default_value = "bing")]
+    #[arg(long, env = "AGENTKEYS_GATE_SEARCH_ENGINES", default_value = "")]
     pub search_engines: String,
 }
 
@@ -97,7 +63,7 @@ pub struct Cli {
 /// bound to the owning user + the device it is attributed to.
 /// Serialize too (#427): the key registry write-throughs back to the keys
 /// file after an admin provision/disable, so restarts re-hydrate.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct RelayKey {
     /// The bearer secret the caller presents. Never logged, never audited.
     pub key: String,
@@ -124,14 +90,14 @@ pub struct RelayKey {
     pub disabled: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct UserBudget {
     pub user_omni: String,
     pub budget_tokens: u64,
 }
 
 /// On-disk shape of `--keys-file`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct KeysFile {
     #[serde(default)]
     pub default_budget_tokens: Option<u64>,
@@ -141,183 +107,180 @@ pub struct KeysFile {
     pub keys: Vec<RelayKey>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct UpstreamConfig {
     pub base_url: String,
     pub api_key: String,
     pub model_override: Option<String>,
-    /// The chat model for a caller whose body names none: the ark family's
-    /// `LLM_ENDPOINT_ID`. Ark refuses a chat with no `model` (HTTP 400
-    /// `MissingParameter`, measured 2026-09-25), so a caller that does not
-    /// pick one — the daemon's perception step, the contact gate's photo
-    /// description — runs on the stack's own chat endpoint. A named model
-    /// always rides through; `model_override` still beats both.
     pub default_model: Option<String>,
 }
 
-/// #653 — the search relay's one upstream (a self-hosted SearXNG; no vendor
-/// key — the engine set is the policy surface).
 #[derive(Debug, Clone)]
 pub struct SearchConfig {
     pub base_url: String,
     pub engines: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct GateConfig {
     pub listen: SocketAddr,
     pub upstream: UpstreamConfig,
-    /// BOOT-time key set. The LIVE registry is `keys::KeyStore` (seeded from
-    /// this at startup) — #427 admin provisioning mutates the store, never
-    /// this snapshot.
     pub keys: Vec<RelayKey>,
-    /// Per-user budget overrides (user omni → tokens).
     pub user_budgets: HashMap<String, u64>,
     pub default_budget_tokens: Option<u64>,
     pub admin_token: Option<String>,
-    /// The keys-file path, retained so the live key store can write-through
-    /// admin mutations (#427). `None` = in-memory only (loudly logged).
     pub keys_file: Option<PathBuf>,
     pub audit_url: Option<String>,
     pub require_audit: bool,
     pub aws_region: String,
-    /// #519 speech relay — the gate-held Doubao app tokens (#386 posture),
-    /// resolved from the `asr`/`tts` inference families. `None` = that leg is
-    /// unconfigured on this gate (its endpoint refuses 503, loudly logged at
-    /// boot); a present-but-malformed family file fails boot instead.
-    pub speech_asr: Option<AsrCreds>,
-    pub speech_tts: Option<TtsCreds>,
-    /// #653 web-search relay — `None` = leg unconfigured (503, loud at boot).
+    pub speech_backend: Option<Arc<dyn SpeechBackend>>,
     pub search: Option<SearchConfig>,
-    /// #722 — the System One relay's providers: one gate-held key + server
-    /// per decision model (Jev, Kev), each from its own inference family. An
-    /// unprovisioned provider refuses its models with 503 (loud at boot), and
-    /// the contact gate's router falls back to its deterministic tier.
     pub decision: DecisionUpstreams,
 }
 
-/// #722 — where `/v1/systemone` sends a request: the provider its `model`
-/// names ([`DecisionProvider::of_model`]), with that provider's key.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone)]
+pub struct DecisionEndpoint {
+    pub base_url: String,
+    pub api_key: String,
+}
+
+#[derive(Clone, Default)]
 pub struct DecisionUpstreams {
-    /// TypeSafe's hosted Jev — the `typesafe` family.
-    pub jev: Option<SystemOneCreds>,
-    /// The self-hosted Kev — the `kev` family.
-    pub kev: Option<SystemOneCreds>,
+    pub jev: Option<DecisionEndpoint>,
+    pub kev: Option<DecisionEndpoint>,
 }
 
 impl DecisionUpstreams {
-    pub fn get(&self, provider: DecisionProvider) -> Option<&SystemOneCreds> {
+    pub fn get(&self, provider: DecisionProvider) -> Option<&DecisionEndpoint> {
         match provider {
             DecisionProvider::Jev => self.jev.as_ref(),
             DecisionProvider::Kev => self.kev.as_ref(),
         }
     }
-
-    /// The inference family that arms a provider.
-    pub fn family(provider: DecisionProvider) -> Family {
-        match provider {
-            DecisionProvider::Jev => Family::Typesafe,
-            DecisionProvider::Kev => Family::Kev,
-        }
-    }
 }
 
-/// Missing vars = the family is legitimately unconfigured (None). A family
-/// file that EXISTS but cannot be read/parsed is an operator error — loud,
-/// never a silent skip (the no-silent-fallback rule).
-fn optional_family<T>(r: Result<T, agentkeys_inference_creds::Error>) -> anyhow::Result<Option<T>> {
-    match r {
-        Ok(v) => Ok(Some(v)),
-        Err(agentkeys_inference_creds::Error::Missing { .. }) => Ok(None),
-        Err(e) => Err(e.into()),
-    }
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct DecisionFile {
+    jev: Option<EndpointFile>,
+    kev: Option<EndpointFile>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EndpointFile {
+    base_url: String,
+    api_key_file: Option<PathBuf>,
+}
+
+fn read_protected(path: &Path) -> anyhow::Result<zeroize::Zeroizing<String>> {
+    protected_file::read_text(
+        path.to_str()
+            .ok_or_else(|| anyhow::anyhow!("configuration path must be UTF-8"))?,
+    )
+}
+
+fn endpoint_file(endpoint: Option<EndpointFile>) -> anyhow::Result<Option<DecisionEndpoint>> {
+    endpoint
+        .map(|endpoint| {
+            models::base_url(&endpoint.base_url)?;
+            let api_key = match endpoint.api_key_file {
+                Some(path) => read_credential(&path)?,
+                None => String::new(),
+            };
+            Ok(DecisionEndpoint {
+                base_url: endpoint.base_url.trim_end_matches('/').to_owned(),
+                api_key,
+            })
+        })
+        .transpose()
+}
+
+fn read_credential(path: &Path) -> anyhow::Result<String> {
+    let value = read_protected(path)?;
+    let value = value.trim();
+    anyhow::ensure!(
+        !value.is_empty() && !value.contains(['\n', '\r']),
+        "credential file must contain one nonempty token"
+    );
+    Ok(value.to_owned())
 }
 
 impl GateConfig {
     pub fn from_cli(cli: Cli) -> anyhow::Result<Self> {
-        Self::from_cli_with(cli, &Resolver::from_process())
-    }
-
-    /// Testable core: the ark-family resolver is injected (never mutate process
-    /// env in tests). Precedence per upstream field: explicit `AGENTKEYS_GATE_*`
-    /// form > the ark family (env > `ark.env` file > built-in default, #338).
-    /// A fully-explicit config never consults the family at all.
-    pub fn from_cli_with(cli: Cli, ark: &Resolver) -> anyhow::Result<Self> {
-        let explicit_key = match (&cli.upstream_api_key, &cli.upstream_api_key_file) {
-            (Some(k), _) if !k.is_empty() => Some(k.clone()),
-            (_, Some(path)) => Some(
-                std::fs::read_to_string(path)
-                    .map_err(|e| anyhow::anyhow!("reading upstream api key file {path:?}: {e}"))?
-                    .trim()
-                    .to_string(),
-            ),
-            _ => None,
+        anyhow::ensure!(
+            cli.upstream_api_key.is_none() || cli.upstream_api_key_file.is_none(),
+            "choose one upstream credential source"
+        );
+        let api_key = match (&cli.upstream_api_key, &cli.upstream_api_key_file) {
+            (Some(value), _) => {
+                anyhow::ensure!(
+                    !value.trim().is_empty() && !value.contains(['\n', '\r']),
+                    "explicit upstream credential must be nonempty and single-line"
+                );
+                value.clone()
+            }
+            (_, Some(path)) => read_credential(path)?,
+            _ => String::new(),
         };
-        // lookup_var (not `ark()`): the relay forwards the caller's `model`, so
-        // it must not require LLM_ENDPOINT_ID just to resolve a key. Errors here
-        // are unreadable/malformed ark.env — fail loud, never skip.
-        let explicit_key_given = explicit_key.is_some();
-        let api_key = match explicit_key {
-            Some(k) => k,
-            None => ark
-                .lookup_var("ARK_API_KEY")?
-                .map(|(v, _)| v)
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "no upstream API key — set AGENTKEYS_GATE_UPSTREAM_API_KEY (or _FILE), \
-                         or provide the ark family (env ARK_API_KEY, or ark.env via \
-                         scripts/operator/secrets/rotate-inference-cred.sh ark) — #338"
-                    )
-                })?,
+        let base_url = cli
+            .upstream_base_url
+            .unwrap_or_else(|| models::default_base_url().to_owned());
+        models::base_url(&base_url)?;
+        let default_model = cli
+            .default_model
+            .unwrap_or_else(|| models::default_chat_model().to_owned());
+        anyhow::ensure!(
+            !default_model.trim().is_empty(),
+            "default model cannot be empty"
+        );
+        anyhow::ensure!(
+            cli.model
+                .as_ref()
+                .is_none_or(|model| !model.trim().is_empty()),
+            "model override cannot be empty"
+        );
+        let decisions: DecisionFile = match &cli.decision_config {
+            Some(path) => serde_json::from_str(&read_protected(path)?)?,
+            None => DecisionFile::default(),
         };
-        // The family's chat endpoint only when the key is the family's too (an
-        // explicit upstream names its models itself).
-        let default_model = if explicit_key_given {
-            None
-        } else {
-            ark.lookup_var("LLM_ENDPOINT_ID")?.map(|(v, _)| v)
-        };
-        let base_url = match cli.upstream_base_url {
-            Some(b) if !b.is_empty() => b,
-            _ => ark
-                .lookup_var("ARK_BASE_URL")?
-                .map(|(v, _)| v)
-                .unwrap_or_else(|| agentkeys_inference_creds::DEFAULT_ARK_BASE.to_string()),
-        };
-
         let mut keys = Vec::new();
         let mut user_budgets = HashMap::new();
         let mut default_budget = cli.default_budget_tokens;
         if let Some(path) = &cli.keys_file {
-            let raw = std::fs::read_to_string(path)
-                .map_err(|e| anyhow::anyhow!("reading keys file {path:?}: {e}"))?;
-            let parsed: KeysFile = serde_json::from_str(&raw)
-                .map_err(|e| anyhow::anyhow!("parsing keys file {path:?}: {e}"))?;
+            let parsed: KeysFile = serde_json::from_str(&read_protected(path)?)?;
             keys = parsed
                 .keys
                 .into_iter()
-                .map(|mut k| {
-                    k.user_omni = normalize_omni_0x(&k.user_omni);
-                    k
+                .map(|mut key| {
+                    key.user_omni = normalize_omni_0x(&key.user_omni);
+                    key
                 })
                 .collect();
             user_budgets = parsed
                 .users
                 .into_iter()
-                .map(|u| (normalize_omni_0x(&u.user_omni), u.budget_tokens))
+                .map(|user| (normalize_omni_0x(&user.user_omni), user.budget_tokens))
                 .collect();
-            // CLI/env wins over the file's default (explicit operator override).
             default_budget = default_budget.or(parsed.default_budget_tokens);
         }
-
+        let search = cli
+            .search_url
+            .map(|base_url| -> anyhow::Result<SearchConfig> {
+                models::base_url(&base_url)?;
+                Ok(SearchConfig {
+                    base_url: base_url.trim_end_matches('/').to_owned(),
+                    engines: cli.search_engines,
+                })
+            })
+            .transpose()?;
         Ok(Self {
             listen: cli.listen,
             upstream: UpstreamConfig {
-                base_url: base_url.trim_end_matches('/').to_string(),
+                base_url: base_url.trim_end_matches('/').to_owned(),
                 api_key,
                 model_override: cli.model,
-                default_model,
+                default_model: Some(default_model),
             },
             keys,
             user_budgets,
@@ -327,24 +290,15 @@ impl GateConfig {
             audit_url: cli.audit_url,
             require_audit: cli.require_audit,
             aws_region: cli.aws_region,
-            speech_asr: optional_family(ark.asr())?,
-            speech_tts: optional_family(ark.tts())?,
+            speech_backend: None,
+            search,
             decision: DecisionUpstreams {
-                jev: optional_family(ark.typesafe())?,
-                kev: optional_family(ark.kev())?,
+                jev: endpoint_file(decisions.jev)?,
+                kev: endpoint_file(decisions.kev)?,
             },
-            search: cli
-                .search_url
-                .filter(|u| !u.trim().is_empty())
-                .map(|u| SearchConfig {
-                    base_url: u.trim().trim_end_matches('/').to_string(),
-                    engines: cli.search_engines.trim().to_string(),
-                }),
         })
     }
 
-    /// The user's effective token budget: per-user override → default → none
-    /// (unlimited but metered).
     pub fn budget_for(&self, user_omni: &str) -> Option<u64> {
         self.user_budgets
             .get(user_omni)
@@ -374,8 +328,7 @@ mod tests {
             audit_url: None,
             require_audit: false,
             aws_region: "us-east-1".into(),
-            speech_asr: None,
-            speech_tts: None,
+            speech_backend: None,
             search: None,
             decision: DecisionUpstreams::default(),
         }
@@ -397,6 +350,8 @@ mod tests {
             upstream_base_url: None,
             upstream_api_key: None,
             upstream_api_key_file: None,
+            default_model: None,
+            decision_config: None,
             search_url: None,
             search_engines: "bing".into(),
             model: None,
@@ -409,114 +364,73 @@ mod tests {
         }
     }
 
-    fn resolver_of(pairs: &[(&str, &str)], dir: Option<&std::path::Path>) -> Resolver {
-        let map: HashMap<String, String> = pairs
-            .iter()
-            .map(|(k, v)| (k.to_string(), v.to_string()))
-            .collect();
-        Resolver::with(
-            Box::new(move |k| map.get(k).cloned()),
-            dir.map(|d| d.to_path_buf()),
-        )
+    #[test]
+    fn defaults_select_local_recipe_without_credentials_or_optional_adapters() {
+        let config = GateConfig::from_cli(cli_min()).unwrap();
+        assert_eq!(config.upstream.base_url, models::default_base_url());
+        assert_eq!(
+            config.upstream.default_model.as_deref(),
+            Some(models::default_chat_model())
+        );
+        assert!(config.upstream.api_key.is_empty());
+        assert!(config.keys.is_empty() && config.admin_token.is_none());
+        assert!(config.speech_backend.is_none() && config.search.is_none());
+        assert!(config.decision.jev.is_none() && config.decision.kev.is_none());
     }
 
     #[test]
-    fn upstream_resolves_from_ark_family_file() {
-        let tmp = tempfile::tempdir().unwrap();
-        std::fs::write(
-            tmp.path().join("ark.env"),
-            "ARK_API_KEY=file-key\nARK_BASE_URL=https://file.example/api/v3/\n",
-        )
-        .unwrap();
-        let cfg =
-            GateConfig::from_cli_with(cli_min(), &resolver_of(&[], Some(tmp.path()))).unwrap();
-        assert_eq!(cfg.upstream.api_key, "file-key");
-        // trailing slash trimmed, same as the explicit path
-        assert_eq!(cfg.upstream.base_url, "https://file.example/api/v3");
-    }
-
-    #[test]
-    fn explicit_gate_override_beats_family_and_default_base_applies() {
+    fn explicit_credentials_and_decision_endpoints_are_isolated_and_protected() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let credential = directory.path().join("credential");
+        protected_file::write(credential.to_str().unwrap(), b"synthetic-token", true).unwrap();
         let mut cli = cli_min();
-        cli.upstream_api_key = Some("explicit-key".into());
-        let cfg =
-            GateConfig::from_cli_with(cli, &resolver_of(&[("ARK_API_KEY", "family-key")], None))
-                .unwrap();
-        assert_eq!(cfg.upstream.api_key, "explicit-key");
-        // no explicit base_url and no family value → the built-in Ark default
-        assert_eq!(
-            cfg.upstream.base_url,
-            agentkeys_inference_creds::DEFAULT_ARK_BASE
-        );
+        cli.upstream_api_key_file = Some(credential.clone());
+        let config = GateConfig::from_cli(cli).unwrap();
+        assert_eq!(config.upstream.api_key, "synthetic-token");
+        assert!(config.decision.jev.is_none());
+
+        let decision = directory.path().join("decision.json");
+        let source = serde_json::json!({"kev":{"base_url":"http://127.0.0.1:8009", "api_key_file":credential}});
+        protected_file::write(
+            decision.to_str().unwrap(),
+            source.to_string().as_bytes(),
+            true,
+        )
+        .unwrap();
+        let mut cli = cli_min();
+        cli.decision_config = Some(decision.clone());
+        let config = GateConfig::from_cli(cli.clone()).unwrap();
+        assert!(config.decision.jev.is_none());
+        assert!(config.upstream.api_key.is_empty());
+        assert_eq!(config.decision.kev.unwrap().api_key, "synthetic-token");
+        std::fs::set_permissions(&credential, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(GateConfig::from_cli(cli).is_err());
+        assert_eq!(std::fs::read(&credential).unwrap(), b"synthetic-token");
     }
 
     #[test]
-    fn each_decision_provider_is_armed_by_its_own_family_and_absence_is_a_loud_none() {
-        let tmp = tempfile::tempdir().unwrap();
-        std::fs::write(tmp.path().join("ark.env"), "ARK_API_KEY=file-key\n").unwrap();
-        let cfg =
-            GateConfig::from_cli_with(cli_min(), &resolver_of(&[], Some(tmp.path()))).unwrap();
-        assert!(
-            cfg.decision.jev.is_none() && cfg.decision.kev.is_none(),
-            "no typesafe.env / kev.env → both providers unconfigured"
-        );
-        std::fs::write(
-            tmp.path().join("typesafe.env"),
-            "TYPESAFE_API_KEY=ts-key\nTYPESAFE_BASE_URL=https://mock.example/\n",
-        )
-        .unwrap();
-        let cfg =
-            GateConfig::from_cli_with(cli_min(), &resolver_of(&[], Some(tmp.path()))).unwrap();
-        let ts = cfg.decision.jev.expect("typesafe family resolved");
-        assert_eq!(ts.api_key, "ts-key");
-        assert_eq!(ts.base_url, "https://mock.example");
-        assert!(cfg.decision.kev.is_none(), "TypeSafe's key never arms Kev");
-        std::fs::write(
-            tmp.path().join("kev.env"),
-            "KEV_API_KEY=kev-key\nKEV_BASE_URL=https://kev.example/kev\n",
-        )
-        .unwrap();
-        let cfg =
-            GateConfig::from_cli_with(cli_min(), &resolver_of(&[], Some(tmp.path()))).unwrap();
-        let kev = cfg.decision.get(DecisionProvider::Kev).expect("kev family");
-        assert_eq!(kev.api_key, "kev-key");
-        assert_eq!(kev.base_url, "https://kev.example/kev");
-        assert_eq!(
-            cfg.decision.get(DecisionProvider::Jev).unwrap().api_key,
-            "ts-key"
-        );
-        assert_eq!(
-            DecisionUpstreams::family(DecisionProvider::Kev).file_name(),
-            "kev.env"
-        );
-    }
-
-    #[test]
-    fn the_ark_familys_chat_endpoint_is_the_default_model_only_for_its_own_key() {
-        let tmp = tempfile::tempdir().unwrap();
-        std::fs::write(
-            tmp.path().join("ark.env"),
-            "ARK_API_KEY=file-key\nLLM_ENDPOINT_ID=ep-stack-chat\n",
-        )
-        .unwrap();
-        let cfg =
-            GateConfig::from_cli_with(cli_min(), &resolver_of(&[], Some(tmp.path()))).unwrap();
-        assert_eq!(cfg.upstream.default_model.as_deref(), Some("ep-stack-chat"));
-        // An explicit upstream key names its own models: no family default.
+    fn explicit_invalid_values_fail_without_falling_back() {
+        for base in [
+            "",
+            "file:///tmp/models",
+            "https://user:pass@example.invalid/v1",
+            "http://localhost:1/v1?key=x",
+        ] {
+            let mut cli = cli_min();
+            cli.upstream_base_url = Some(base.into());
+            assert!(GateConfig::from_cli(cli).is_err());
+        }
+        let mut cli = cli_min();
+        cli.upstream_api_key = Some(String::new());
+        assert!(GateConfig::from_cli(cli).is_err());
+        let mut cli = cli_min();
+        cli.upstream_api_key_file = Some("/missing/credential".into());
+        assert!(GateConfig::from_cli(cli).is_err());
         let mut cli = cli_min();
         cli.upstream_api_key = Some("explicit".into());
-        let cfg = GateConfig::from_cli_with(cli, &resolver_of(&[], Some(tmp.path()))).unwrap();
-        assert!(cfg.upstream.default_model.is_none());
-    }
-
-    #[test]
-    fn missing_key_everywhere_fails_naming_all_sources() {
-        let err = GateConfig::from_cli_with(cli_min(), &resolver_of(&[], None))
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("AGENTKEYS_GATE_UPSTREAM_API_KEY"), "{err}");
-        assert!(err.contains("ark family"), "{err}");
-        assert!(err.contains("rotate-inference-cred.sh"), "{err}");
+        cli.upstream_api_key_file = Some("/missing/credential".into());
+        assert!(GateConfig::from_cli(cli).is_err());
     }
 
     #[test]

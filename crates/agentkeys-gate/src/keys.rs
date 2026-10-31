@@ -16,14 +16,7 @@ use rand_core::RngCore;
 use crate::config::{GateConfig, KeysFile, RelayKey, UserBudget};
 use crate::error::{GateError, GateResult};
 
-/// The ONE spelling of a relay key id. The broker keys a delegate's relay key
-/// by its `device_key_hash`, which reaches the gate spelled two ways — `0x…`
-/// from the session paths, bare hex from spawn-context-driven creates (the
-/// #669 wake: that store keeps the bare form) — and an exact-match upsert gave
-/// each spelling its OWN live row, so a re-provision under one left the other
-/// secret live and an archive disabled only one (measured on VE prod
-/// 2026-09-29: two delegates each held two live rows). A 32-byte hex id
-/// folds to `0x` + lowercase; any other id (`contact-gate-…`, `k1`) is kept.
+/// Canonicalize 32-byte hex identifiers; preserve named identifiers.
 pub fn canonical_key_id(id: &str) -> String {
     let trimmed = id.trim();
     let hex = trimmed
@@ -298,8 +291,7 @@ mod tests {
             audit_url: None,
             require_audit: false,
             aws_region: "us-east-1".into(),
-            speech_asr: None,
-            speech_tts: None,
+            speech_backend: None,
             search: None,
             decision: Default::default(),
         }
@@ -440,8 +432,7 @@ mod tests {
         }
     }
 
-    /// The VE prod shape (2026-09-29): one delegate, two live rows — `0x…`
-    /// from the resolve path, bare hex from the #669 wake.
+    /// Synthetic legacy spelling collision for one delegate.
     fn split_rows() -> Vec<RelayKey> {
         let mut prefixed = boot_key("gk_from_resolve", &format!("0x{DKH}"));
         prefixed.device_id = format!("0x{DKH}");

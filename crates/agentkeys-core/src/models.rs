@@ -32,7 +32,7 @@ pub const EMBEDDINGS_PATH: &str = "/embeddings";
 pub const MODEL_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 pub const MAX_MODEL_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 
-fn base_url(value: &str) -> Result<Url> {
+pub fn base_url(value: &str) -> Result<Url> {
     let url = Url::parse(value).context("invalid model endpoint URL")?;
     ensure!(
         matches!(url.scheme(), "http" | "https")

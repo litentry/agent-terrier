@@ -1,31 +1,12 @@
-//! What an upstream non-2xx says, and whose problem it is.
-//!
-//! Measured on VE prod 2026-09-29: an overdue Volcano Engine account makes Ark
-//! answer HTTP 403 `AccountOverdueError` to EVERY call — `/chat/completions`
-//! and `/embeddings/multimodal` alike, whatever relay key sent it — while
-//! `GET /models` still answers 200. The gate logged each refusal as a per-key
-//! `upstream 4xx forwarded key=… status=403` with no route, model or code, so
-//! two stack-wide outages (2026-09-21, 2026-09-28) read as one delegate's
-//! embedding problem: the only key calling steadily was the one in the log.
-//!
-//! So every forwarded refusal now carries the upstream's own `code` and
-//! `message`, and an ACCOUNT-scoped code is an operator alarm (ERROR +
-//! `/readyz` 503), never a caller fault. The standing refusal clears on the
-//! next upstream 2xx — there is no free probe (`/models` answers 200 while
-//! the account is refused), so it is the next real call that proves recovery.
+//! Shared relay policy for account-scoped error codes and recovery state.
 
 use std::sync::Mutex;
 
 use serde::Serialize;
 use serde_json::Value;
 
-/// Upstream error codes that refuse the whole ACCOUNT — every caller, every
-/// model — so the fix is the operator's (billing), never the caller's. Add a
-/// code only with the same evidence: an answer measured on a live stack.
-pub const ACCOUNT_SCOPED_CODES: &[&str] = &[
-    // Ark, measured 2026-09-29 on VE prod (403, `type: Forbidden`).
-    "AccountOverdueError",
-];
+/// Error code classified as account-scoped by relay policy.
+pub const ACCOUNT_SCOPED_CODES: &[&str] = &["insufficient_quota"];
 
 /// The upstream message is logged, never trusted to be short.
 const MESSAGE_LOG_CHARS: usize = 300;
@@ -156,13 +137,13 @@ pub fn now_unix() -> u64 {
 mod tests {
     use super::*;
 
-    /// The body Ark answered on VE prod 2026-09-29 (chat and embeddings alike).
-    const ARK_OVERDUE: &str = r#"{"error":{"code":"AccountOverdueError","message":"The request failed because your account has an overdue balance. Request id: 021790685392088bfe35b6525b6a24c7ddbea7b420bd5585f179e","param":"","type":"Forbidden"}}"#;
+    /// Synthetic error fixture.
+    const ACCOUNT_REFUSAL: &str = r#"{"error":{"code":"insufficient_quota","message":"The request failed because your account has insufficient quota.","param":"","type":"Forbidden"}}"#;
 
     #[test]
-    fn the_measured_ark_overdue_body_is_an_account_refusal() {
-        let d = UpstreamErrorDetail::parse(ARK_OVERDUE.as_bytes());
-        assert_eq!(d.code.as_deref(), Some("AccountOverdueError"));
+    fn configured_account_code_is_an_account_refusal() {
+        let d = UpstreamErrorDetail::parse(ACCOUNT_REFUSAL.as_bytes());
+        assert_eq!(d.code.as_deref(), Some("insufficient_quota"));
         assert_eq!(d.kind.as_deref(), Some("Forbidden"));
         assert!(d
             .message
@@ -199,8 +180,8 @@ mod tests {
     fn a_standing_refusal_counts_until_the_upstream_answers() {
         let state = UpstreamAccountState::default();
         assert_eq!(state.current(), None);
-        state.refused("AccountOverdueError", 403, "/embeddings/multimodal", 100);
-        let r = state.refused("AccountOverdueError", 403, "/chat/completions", 160);
+        state.refused("insufficient_quota", 403, "/embeddings/multimodal", 100);
+        let r = state.refused("insufficient_quota", 403, "/chat/completions", 160);
         assert_eq!(r.first_seen_unix, 100);
         assert_eq!(r.last_seen_unix, 160);
         assert_eq!(r.refusals, 2);

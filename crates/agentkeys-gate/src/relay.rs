@@ -32,7 +32,7 @@ use agentkeys_protocol::{
 use base64::Engine;
 
 use crate::audit::Auditor;
-use crate::config::{DecisionUpstreams, GateConfig, RelayKey};
+use crate::config::{GateConfig, RelayKey};
 use crate::error::{GateError, GateResult};
 use crate::meter::Meter;
 use crate::openai::{extract_usage, SseUsageScanner, UsageCounters};
@@ -49,11 +49,7 @@ pub struct Relay {
     /// keys), seeded from `config.keys` and mutated only via the admin surface.
     pub keys: Arc<crate::keys::KeyStore>,
     upstream: UpstreamClient,
-    /// #519 — gate-held Doubao speech legs (each independently optional).
-    speech: SpeechClient,
-    /// #527 — the gate-held IAM credential for the voices catalog OpenAPI
-    /// (`None` = unconfigured; `GET /v1/audio/voices` then 503s). See voices.rs.
-    pub voices: Option<crate::voices::VoicesConfig>,
+    pub speech: SpeechClient,
     /// #653 — transport for the SearXNG relay (its base/engines live in
     /// `config.search`; `None` config = the leg 503s).
     search_http: reqwest::Client,
@@ -141,6 +137,15 @@ pub(crate) fn compact_search_results(v: &Value, engines: &str, cap: usize) -> Va
     })
 }
 
+fn isolated_http() -> reqwest::Client {
+    reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(agentkeys_core::models::MODEL_REQUEST_TIMEOUT)
+        .build()
+        .expect("relay HTTP client")
+}
+
 impl Relay {
     pub fn new(config: GateConfig) -> Self {
         let upstream = UpstreamClient::new(&config.upstream);
@@ -149,19 +154,15 @@ impl Relay {
             .clone()
             .map(|url| Arc::new(Auditor::new(url, config.aws_region.clone())));
         let keys = Arc::new(crate::keys::KeyStore::from_config(&config));
-        let speech = SpeechClient::new(config.speech_asr.clone(), config.speech_tts.clone());
-        // #527 — read the voices IAM credential once at boot (a gate-held key,
-        // never in a sandbox/device). Absent ⇒ the endpoint 503s.
-        let voices = crate::voices::VoicesConfig::from_env();
+        let speech = SpeechClient::new(config.speech_backend.clone());
         Self {
             config,
             meter: Arc::new(Meter::default()),
             keys,
             upstream,
             speech,
-            voices,
-            search_http: reqwest::Client::new(),
-            decide_http: reqwest::Client::new(),
+            search_http: isolated_http(),
+            decide_http: isolated_http(),
             auditor,
             upstream_account: UpstreamAccountState::default(),
         }
@@ -207,9 +208,7 @@ impl Relay {
                 refusals = s.refusals,
                 since_unix = s.first_seen_unix,
                 message = %detail.message,
-                "upstream 4xx forwarded — the upstream refused the ACCOUNT, not this key: every \
-                 relayed call fails until the vendor account is fixed (AccountOverdueError = top \
-                 up the Volcano Engine account); /readyz answers 503 until an upstream 2xx"
+                "upstream account-scoped refusal; readiness remains unavailable until successful inference"
             ),
             None => tracing::warn!(
                 key = %caller.key_id,
@@ -480,18 +479,14 @@ impl Relay {
         let reports = futures_util::future::join_all(DecisionProvider::ALL.into_iter().map(
             |provider| async move {
                 let report = match self.config.decision.get(provider) {
-                    None => {
-                        let family = DecisionUpstreams::family(provider);
-                        DecisionServerReport {
-                            configured: false,
-                            error: Some(format!(
-                                "this gate holds no {} key — arm the `{family}` inference family \
-                                 (rotate-inference-cred.sh {family})",
-                                provider.label()
-                            )),
-                            ..Default::default()
-                        }
-                    }
+                    None => DecisionServerReport {
+                        configured: false,
+                        error: Some(format!(
+                            "No explicit endpoint configured for {}",
+                            provider.label()
+                        )),
+                        ..Default::default()
+                    },
                     Some(creds) => match UpstreamClient::systemone_models_get(
                         &self.decide_http,
                         &creds.base_url,
@@ -552,9 +547,8 @@ impl Relay {
             )));
         };
         let Some(ts) = self.config.decision.get(provider).cloned() else {
-            let family = DecisionUpstreams::family(provider);
             return Err(GateError::NotConfigured(format!(
-                "the {} decision model is not configured on this gate (`{family}` inference family)",
+                "No explicit endpoint configured for {}",
                 provider.label()
             )));
         };
@@ -870,9 +864,7 @@ impl Relay {
     /// embedding egress. Same custody + budget gates + triage as `handle_chat`;
     /// embeddings never stream, so the flow is the non-streamed leg only.
     ///
-    /// The chat `model_override` is deliberately NOT applied: it names the CHAT
-    /// Ark endpoint id, and an embeddings call runs against a different
-    /// (embedding-family) endpoint the caller names in its own body.
+    /// The chat override is not applied to the embedding model.
     pub async fn handle_embeddings(
         &self,
         caller: &RelayKey,
