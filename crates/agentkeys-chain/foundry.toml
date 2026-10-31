@@ -12,6 +12,7 @@ optimizer_runs = 200
 # The P-256 verifier requires IR compilation for stack depth.
 via_ir = true
 extra_output = ["storageLayout"]
+fs_permissions = [{ access = "read", path = "./bytecode" }, { access = "write", path = "./deployment-registry.json" }]
 
 [profile.default.fmt]
 line_length = 100

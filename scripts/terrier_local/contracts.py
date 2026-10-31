@@ -182,16 +182,27 @@ def run(repository, action, offline=False, match_test=None):
         return run_forge(project, action, offline, match_test)
 
 
+def foundry_binary(name):
+    executable = os.environ.get(f"AGENT_TERRIER_{name.upper()}") or shutil.which(name)
+    if not executable:
+        candidate = Path.home() / ".foundry/bin" / name
+        executable = str(candidate) if candidate.is_file() else None
+    if not executable:
+        raise RuntimeError(f"Foundry {name} is required; install it before continuing")
+    return executable
+
+
+def tool_environment():
+    return {key: value for key, value in os.environ.items() if key in {
+        "PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "SSL_CERT_FILE", "SSL_CERT_DIR",
+    }}
+
+
 def run_forge(project, action, offline, match_test):
     if action == "setup":
         print("Pinned contract dependency verified and local build cache prepared.")
         return 0
-    forge = os.environ.get("AGENT_TERRIER_FORGE") or shutil.which("forge")
-    if not forge:
-        candidate = Path.home() / ".foundry/bin/forge"
-        forge = str(candidate) if candidate.is_file() else None
-    if not forge:
-        raise RuntimeError("Foundry forge is required; install it before building contracts")
+    forge = foundry_binary("forge")
     command = [forge, action, "--root", ".", "--remappings", "forge-std/=lib/forge-std/src/"]
     if offline:
         command.append("--offline")
@@ -199,7 +210,4 @@ def run_forge(project, action, offline, match_test):
         if action != "test":
             raise ValueError("--match-test is only valid for contract tests")
         command.extend(["--match-test", match_test])
-    environment = {key: value for key, value in os.environ.items() if key in {
-        "PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "SSL_CERT_FILE", "SSL_CERT_DIR",
-    }}
-    return subprocess.run(command, cwd=project, env=environment, check=False).returncode
+    return subprocess.run(command, cwd=project, env=tool_environment(), check=False).returncode

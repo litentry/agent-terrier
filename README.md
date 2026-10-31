@@ -35,3 +35,5 @@ For contract development, install Python 3 and Foundry, then run locally from th
 ```
 
 See the fresh [contract development wiki source](docs/wiki/contract-development.md) for offline tests, focused checks and cache configuration.
+
+The [local chain guide](docs/wiki/local-chain.md) covers `terrier chain start/deploy/status/logs/stop`, disposable signing identities, persistent restart and explicit deployment recovery. These commands deploy the actual contracts locally; the complete application environment remains under development.
