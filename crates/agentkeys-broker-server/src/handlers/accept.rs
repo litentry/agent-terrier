@@ -164,9 +164,40 @@ pub(crate) fn addr20(hex_s: &str, name: &str) -> Result<[u8; 20], String> {
 /// Profile-aware env read: `BASE_<CHAIN>` (e.g. `SIDECAR_REGISTRY_ADDRESS_HEIMA`),
 /// falling back to the bare `BASE` — the same convention the operator env uses.
 pub(crate) fn env_profile(base: &str) -> Result<String, String> {
-    let profile = std::env::var("AGENTKEYS_CHAIN")
-        .unwrap_or_else(|_| agentkeys_core::chain_profile::DEFAULT_PROFILE.into());
-    resolve_profile_var(base, &profile, |k| std::env::var(k).ok())
+    let lookup = |name: &str| std::env::var(name).ok();
+    let (profile, _) = agentkeys_core::chain_profile::ChainProfile::resolve(
+        None,
+        lookup("AGENTKEYS_CHAIN").as_deref(),
+        lookup("AGENTKEYS_CHAIN_PROFILE_FILE").as_deref(),
+    )
+    .map_err(|error| format!("cannot resolve chain profile: {error}"))?;
+    profile_configuration(base, &profile, lookup)
+}
+
+fn profile_configuration(
+    name: &str,
+    profile: &agentkeys_core::chain_profile::ChainProfile,
+    lookup: impl Fn(&str) -> Option<String>,
+) -> Result<String, String> {
+    if let Ok(value) = resolve_profile_var(name, &profile.name, lookup) {
+        return Ok(value);
+    }
+    if name == "AGENTKEYS_CHAIN_ID" {
+        return Ok(profile.chain_id.to_string());
+    }
+    let contract = match name {
+        "ENTRYPOINT_ADDRESS" => "EntryPoint",
+        "SIDECAR_REGISTRY_ADDRESS" => "SidecarRegistry",
+        "SCOPE_CONTRACT_ADDRESS" => "AgentKeysScope",
+        "P256_ACCOUNT_FACTORY_ADDRESS" => "P256AccountFactory",
+        _ => return Err(format!("configuration {name} is not set")),
+    };
+    profile
+        .contracts
+        .iter()
+        .find(|item| item.name == contract)
+        .map(|item| item.address.clone())
+        .ok_or_else(|| format!("chain profile has no {contract}"))
 }
 
 /// The lookup behind [`env_profile`], injectable so it can be tested without
@@ -240,7 +271,7 @@ fn enforce_profile_drift_guard(
 
 /// Load the chain config + the broker submitter key from env.
 ///
-/// `BROKER_SPONSOR_SIGNER_KEY` (hex secp256k1) is the broker EVM identity that
+/// `BROKER_SPONSOR_SIGNER_KEY` or its protected `_FILE` form supplies the EVM identity that
 /// fronts the outer `EntryPoint.handleOps` tx (and, sponsored only, co-signs the
 /// paymaster). **Required** — it's the funded submitter EOA.
 ///
@@ -250,17 +281,32 @@ fn enforce_profile_drift_guard(
 /// the `handleOps` beneficiary). `BROKER_SPONSOR_SIGNER_ADDRESS` is optional too
 /// — it defaults to the submitter key's own address (the beneficiary).
 pub fn load_accept_config() -> Result<(AcceptConfig, SigningKey), String> {
-    let rpc_url = std::env::var("AGENTKEYS_CHAIN_RPC_HTTP")
-        .map_err(|_| "env AGENTKEYS_CHAIN_RPC_HTTP not set".to_string())?;
+    accept_config_from_lookup(|name| std::env::var(name).ok())
+}
+
+fn accept_config_from_lookup(
+    lookup: impl Fn(&str) -> Option<String>,
+) -> Result<(AcceptConfig, SigningKey), String> {
+    let (profile, _) = agentkeys_core::chain_profile::ChainProfile::resolve(
+        None,
+        lookup("AGENTKEYS_CHAIN").as_deref(),
+        lookup("AGENTKEYS_CHAIN_PROFILE_FILE").as_deref(),
+    )
+    .map_err(|error| format!("cannot resolve accept chain profile: {error}"))?;
+    let resolved_profile = Some(profile);
+    let profile = resolved_profile.as_ref().expect("resolved profile");
+    let env_profile = |name: &str| profile_configuration(name, profile, &lookup);
+    let rpc_url = agentkeys_core::chain_profile::rpc_http_override(&profile.name, &lookup)
+        .unwrap_or_else(|| profile.rpc.http.clone());
     let chain_id_env: Option<u64> = env_profile("AGENTKEYS_CHAIN_ID")
         .ok()
-        .and_then(|s| s.trim().parse().ok());
-    let key_hex = std::env::var("BROKER_SPONSOR_SIGNER_KEY")
-        .map_err(|_| "env BROKER_SPONSOR_SIGNER_KEY not set".to_string())?;
-    let key_bytes = hex::decode(key_hex.trim().trim_start_matches("0x"))
-        .map_err(|e| format!("BROKER_SPONSOR_SIGNER_KEY hex: {e}"))?;
-    let broker_sk = SigningKey::from_slice(&key_bytes)
-        .map_err(|e| format!("BROKER_SPONSOR_SIGNER_KEY invalid: {e}"))?;
+        .and_then(|value| value.trim().parse().ok());
+    let broker_sk = agentkeys_core::secp256k1_key::from_sources(
+        lookup("BROKER_SPONSOR_SIGNER_KEY"),
+        lookup("BROKER_SPONSOR_SIGNER_KEY_FILE"),
+    )
+    .map_err(|_| "sponsor signing key is invalid, unsafe or ambiguously configured")?
+    .ok_or("a sponsor signing key is required")?;
 
     // Optional paymaster: present ⇒ sponsored; absent ⇒ unsponsored (default).
     let paymaster = match env_profile("PAYMASTER_ADDRESS") {
@@ -288,35 +334,17 @@ pub fn load_accept_config() -> Result<(AcceptConfig, SigningKey), String> {
         "SCOPE_CONTRACT_ADDRESS",
     )?;
 
-    // #231 drift guard: refuse to serve /v1/accept/* when the accept env disagrees
-    // with the compiled-in chain profile — fail loud with the re-sync command
-    // instead of building doomed UserOps that surface as "wrong passkey". Profile
-    // resolution mirrors env_profile's chain pick ($AGENTKEYS_CHAIN, default
-    // local); $AGENTKEYS_CHAIN_PROFILE_FILE wins when set.
-    let resolved_profile = match agentkeys_core::chain_profile::ChainProfile::resolve(
-        None,
-        std::env::var("AGENTKEYS_CHAIN").ok().as_deref(),
-        std::env::var("AGENTKEYS_CHAIN_PROFILE_FILE")
-            .ok()
-            .as_deref(),
-    ) {
-        Ok((chain_profile, _src)) => {
-            let allow_override = std::env::var("AGENTKEYS_ACCEPT_ALLOW_ADDR_OVERRIDE")
-                .map(|v| v.trim() == "1" || v.trim().eq_ignore_ascii_case("true"))
-                .unwrap_or(false);
-            enforce_profile_drift_guard(
-                &chain_profile,
-                &[
-                    ("ENTRYPOINT_ADDRESS", "EntryPoint", entry_point),
-                    ("SIDECAR_REGISTRY_ADDRESS", "SidecarRegistry", registry),
-                    ("SCOPE_CONTRACT_ADDRESS", "AgentKeysScope", scope),
-                ],
-                allow_override,
-            )?;
-            Some(chain_profile)
-        }
-        Err(error) => return Err(format!("cannot resolve accept chain profile: {error}")),
-    };
+    let allow_override = lookup("AGENTKEYS_ACCEPT_ALLOW_ADDR_OVERRIDE")
+        .is_some_and(|value| value.trim() == "1" || value.trim().eq_ignore_ascii_case("true"));
+    enforce_profile_drift_guard(
+        profile,
+        &[
+            ("ENTRYPOINT_ADDRESS", "EntryPoint", entry_point),
+            ("SIDECAR_REGISTRY_ADDRESS", "SidecarRegistry", registry),
+            ("SCOPE_CONTRACT_ADDRESS", "AgentKeysScope", scope),
+        ],
+        allow_override,
+    )?;
 
     // #278 D6: verificationGasLimit / preVerificationGas are env > profile > default
     // (shared by accept / scope / revoke / register). The live RIP-7212 precompile
@@ -337,11 +365,13 @@ pub fn load_accept_config() -> Result<(AcceptConfig, SigningKey), String> {
         "ACCEPT_VERIFICATION_GAS_LIMIT",
         prof_vgl,
         DEF_VERIFICATION_GAS_LIMIT,
+        env_profile,
     );
     let pre_verification_gas_amt = resolve_gas_limit(
         "ACCEPT_PRE_VERIFICATION_GAS",
         prof_pvg,
         DEF_PRE_VERIFICATION_GAS,
+        env_profile,
     );
     // gas_fees come from the chain's real fee market (its compiled profile, gwei→wei),
     // with the broker DEF as the fallback for a chain with no usable profile fee
@@ -384,8 +414,13 @@ pub fn load_accept_config() -> Result<(AcceptConfig, SigningKey), String> {
 /// then the compiled chain profile value, then the broker default (#278 D6). Env
 /// parse failures fall through to the profile/default rather than erroring — a
 /// typo'd override degrades safely instead of taking accept down.
-fn resolve_gas_limit(env_base: &str, profile_val: Option<u128>, default: u128) -> u128 {
-    env_profile(env_base)
+fn resolve_gas_limit(
+    env_base: &str,
+    profile_val: Option<u128>,
+    default: u128,
+    lookup: impl Fn(&str) -> Result<String, String>,
+) -> u128 {
+    lookup(env_base)
         .ok()
         .and_then(|s| s.trim().parse::<u128>().ok())
         .or(profile_val)
@@ -1562,5 +1597,87 @@ mod env_profile_tests {
             resolve_profile_var("PAYMASTER_ADDRESS", "heima", &e).unwrap(),
             "0xcc"
         );
+    }
+}
+
+#[cfg(test)]
+mod local_configuration_tests {
+    use super::*;
+    use std::{collections::BTreeMap, os::unix::fs::PermissionsExt};
+
+    #[test]
+    fn explicit_profile_and_protected_key_supply_existing_accept_configuration() {
+        let directory = tempfile::tempdir().unwrap();
+        let key_path = directory.path().join("sponsor.key");
+        let key = agentkeys_core::secp256k1_key::create(key_path.to_str().unwrap()).unwrap();
+        let profile_path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../e2e/fixtures/chain-profiles/local-test.json"
+        );
+        let (profile, _) =
+            agentkeys_core::chain_profile::ChainProfile::resolve(None, None, Some(profile_path))
+                .unwrap();
+        let values = BTreeMap::from([
+            ("AGENTKEYS_CHAIN_PROFILE_FILE", profile_path.to_owned()),
+            ("AGENTKEYS_CHAIN", "unused-ambient-selection".to_owned()),
+            (
+                "BROKER_SPONSOR_SIGNER_KEY_FILE",
+                key_path.to_str().unwrap().to_owned(),
+            ),
+        ]);
+        let load = |values: &BTreeMap<&str, String>| {
+            accept_config_from_lookup(|name| values.get(name).cloned())
+        };
+        let (config, loaded) = load(&values).unwrap();
+        assert_eq!(loaded.verifying_key(), key.verifying_key());
+        assert_eq!(config.chain_id, profile.chain_id);
+        assert_eq!(config.rpc_url, profile.rpc.http);
+        assert!(
+            config.paymaster.is_none(),
+            "a profile entry must not implicitly enable sponsorship"
+        );
+        for (name, expected) in [
+            ("EntryPoint", config.entry_point),
+            ("SidecarRegistry", config.registry),
+            ("AgentKeysScope", config.scope),
+        ] {
+            assert_eq!(
+                format!("0x{}", hex::encode(expected)),
+                profile
+                    .contracts
+                    .iter()
+                    .find(|entry| entry.name == name)
+                    .unwrap()
+                    .address
+            );
+        }
+        assert_eq!(
+            profile_configuration("P256_ACCOUNT_FACTORY_ADDRESS", &profile, |_| None).unwrap(),
+            profile
+                .contracts
+                .iter()
+                .find(|entry| entry.name == "P256AccountFactory")
+                .unwrap()
+                .address
+        );
+        let mut inline = values.clone();
+        inline.remove("BROKER_SPONSOR_SIGNER_KEY_FILE");
+        assert!(load(&inline).is_err(), "the signing key remains mandatory");
+        inline.insert("BROKER_SPONSOR_SIGNER_KEY", hex::encode(key.to_bytes()));
+        assert_eq!(load(&inline).unwrap().0.broker_signer, config.broker_signer);
+        let mut conflicting = values.clone();
+        conflicting.insert(
+            "BROKER_SPONSOR_SIGNER_KEY",
+            "synthetic-conflicting-token".into(),
+        );
+        assert!(load(&conflicting).is_err());
+        let mut changed = values.clone();
+        changed.insert("ENTRYPOINT_ADDRESS", format!("0x{}", "ab".repeat(20)));
+        assert!(
+            load(&changed).is_err(),
+            "profile drift guard must remain enforced"
+        );
+        std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(load(&values).is_err());
     }
 }

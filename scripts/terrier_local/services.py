@@ -296,7 +296,8 @@ def serve(repository, state, configured):
             environment = broker_environment(broker_directory, profile_path, manifest["broker_port"])
             environment.update(AGENTKEYS_GATE_ADMIN_URL=components["model_relay"][1],
                 AGENTKEYS_GATE_ADMIN_TOKEN_FILE=str(relay_directory / "admin.key"),
-                AGENTKEYS_GATE_TURN_URL=components["model_relay"][1] + "/v1", AGENTKEYS_BUNDLER_URL=components["bundler"][1])
+                AGENTKEYS_GATE_TURN_URL=components["model_relay"][1] + "/v1", AGENTKEYS_BUNDLER_URL=components["bundler"][1],
+                BROKER_SPONSOR_SIGNER_KEY_FILE=str(directory / "bundler/submitter.key"))
             components["broker"] = launch(binaries / BROKER_BINARY,
                 broker_arguments(broker_directory, manifest["broker_port"]),
                 environment, directory / "broker.log", children)
