@@ -53,10 +53,7 @@ pub struct BrokerConfig {
     /// `BROKER_REFUSE_TO_BOOT_STRICT=true` collapses Tier-2 reachability
     /// probes into Tier-1 hard boot fails.
     pub refuse_to_boot_strict: bool,
-    /// Per-stack identity namespace (#464): the `client_id` input to omni
-    /// derivation (`AGENTKEYS_CLIENT_ID` env). Default `agentkeys` (AWS,
-    /// unchanged by omission); the VE stack sets `agentterrier`. Logged at
-    /// boot — a wrong value forks every identity on the stack.
+    /// Configured identity namespace; changes require an identity migration.
     pub client_id: String,
     /// #510 — the `aud` claim stamped into broker-minted OIDC JWTs
     /// (`BROKER_STS_AUDIENCE`). AWS's provider registers

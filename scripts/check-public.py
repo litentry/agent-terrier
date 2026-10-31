@@ -74,6 +74,20 @@ def inspect_file(root, path):
     ):
         findings.append({"path": str(relative), "rule": "credential-or-state-file", "line": 0})
     contents = path.read_bytes().decode("utf-8", errors="replace")
+    if path.suffix == ".json":
+        try:
+            payload = json.loads(contents)
+        except (ValueError, RecursionError):
+            payload = None
+        if isinstance(payload, dict):
+            metadata = payload.get("ResponseMetadata")
+            result = payload.get("Result")
+            images = result.get("Images") if isinstance(result, dict) else None
+            if (isinstance(metadata, dict) and {"RequestId", "Service", "Region"} <= metadata.keys()
+                    and isinstance(images, list)
+                    and any(isinstance(image, dict) and {"ImageId", "ImageUrl"} <= image.keys()
+                            for image in images)):
+                findings.append({"path": str(relative), "rule": "deployment-inventory", "line": 0})
     newline_offsets = [match.start() for match in re.finditer("\n", contents)]
     for rule_name, pattern in RULES.items():
         found_lines = set()

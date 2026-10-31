@@ -137,13 +137,8 @@ pub const BROKER_DELEGATE_SESSION_JWT_TTL_SECONDS: &str = "BROKER_DELEGATE_SESSI
 // Auth method selection
 // ---------------------------------------------------------------------------
 
-/// Optional. Per-stack identity namespace (#464): the `client_id` input to
-/// `OmniAccount = SHA256(client_id || identity_type || identity_value)`.
-/// Default `agentkeys` (the AWS stack — unchanged by omission); the VE stack
-/// sets `agentterrier`. A wrong value forks EVERY identity on the stack as
-/// surely as a wrong signer secret — the broker logs it at boot and pins the
-/// derivation with vector tests. Changing a live stack's value requires a
-/// migration.
+/// Optional identity namespace; changing it changes every derived OmniAccount.
+/// The default is owned by `identity::DEFAULT_CLIENT_ID`.
 pub const AGENTKEYS_CLIENT_ID: &str = "AGENTKEYS_CLIENT_ID";
 
 /// Optional exact email allowlist. Unset preserves development access; empty denies all.
