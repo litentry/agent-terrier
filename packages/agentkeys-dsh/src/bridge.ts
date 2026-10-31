@@ -48,7 +48,7 @@ import { exportHome, homeBytes, importHome, settleQuiet } from './bridge-mgmt.js
 import { MAX_LIVE_SESSIONS, parseChatSession, parseResetBody } from './bridge-sessions.js';
 import type { ChatSessionSpec, ResetSpec } from './bridge-sessions.js';
 import { TurnStreamer } from './bridge-stream.js';
-import { SERVICE as SESSIONS_SERVICE } from './sessions.js';
+import { resolveRuntimeHome, SERVICE as SESSIONS_SERVICE } from './sessions.js';
 import type { SessionStore } from './sessions.js';
 
 export const name = 'agentkeys-bridge';
@@ -59,7 +59,7 @@ export interface Config {
   engine?: string;
   provider?: string;
   model?: string;
-  /** The runtime home the #616 mgmt surface snapshots. */
+  /** Optional compatibility assertion; must match the sessions service home. */
   homeDir?: string;
   /** #577 mgmt bearer override (default: env AGENTKEYS_SANDBOX_MGMT_TOKEN).
    *  Empty/absent = the surface answers 404 not-armed (fail closed). */
@@ -78,7 +78,7 @@ export const Config: z<Config> = z.object({
   engine: z.string().default('dsh'),
   provider: z.string().default('gate'),
   model: z.string().default(process.env[MODEL_ID] ?? '(unset)'),
-  homeDir: z.string().default(process.env.DSH_HOME ?? '/root/.dsh'),
+  homeDir: z.string(),
   mgmtToken: z.string(),
   bridgeToken: z.string(),
   sessionSweepMs: z.number().default(60_000),
@@ -227,6 +227,10 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
 }
 
 export function apply(ctx: Context, config: Config): void {
+  const store = (ctx as unknown as Record<string, unknown>)[SESSIONS_SERVICE] as SessionStore;
+  if (config.homeDir !== undefined && resolveRuntimeHome(config.homeDir) !== store.home) {
+    throw new Error('The bridge runtime home must match the sessions service');
+  }
   let handle: AgentHandle | undefined;
   let starting = false;
   const engine = config.engine ?? 'dsh';
@@ -428,7 +432,6 @@ export function apply(ctx: Context, config: Config): void {
   // ── typed sessions (owner decision 2026-09-23) ──────────────────────────
   // Policy = the `agentkeysSessions` service (sessions.ts); here: the live
   // handles and the one-turn-at-a-time lock every session shares.
-  const store = (ctx as unknown as Record<string, unknown>)[SESSIONS_SERVICE] as SessionStore;
   /** Live typed sessions: dsh session id → handle + last use. */
   const live = new Map<string, { handle: AgentHandle; usedAt: number }>();
 
@@ -588,7 +591,7 @@ export function apply(ctx: Context, config: Config): void {
     return true;
   }
 
-  const home = () => config.homeDir ?? process.env.DSH_HOME ?? '/root/.dsh';
+  const home = () => store.home;
 
   /** Dispose the live session and ensure it again — the explicit re-source
    *  verb (persona / skills re-read). It does NOT start a new conversation:

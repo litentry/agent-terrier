@@ -1,4 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
+import { mkdtemp, readdir, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { Context } from '@deepseek-ai/cordis';
 import WebServer from '@deepseek-ai/dsh-host-webserver';
 import * as bridgePlugin from '../src/bridge.js';
@@ -82,9 +85,12 @@ function fakeAgents(ctx: Context, sessionId: string) {
 }
 
 let ctx: Context | undefined;
+let runtimeHome: string | undefined;
 afterEach(async () => {
   if (ctx) await ctx.fiber.dispose();
   ctx = undefined;
+  if (runtimeHome) await rm(runtimeHome, { recursive: true, force: true });
+  runtimeHome = undefined;
 });
 
 // #715 — the in-pod bearer every non-healthz route demands (fail-closed).
@@ -107,13 +113,23 @@ async function boot(opts?: {
     ctx.provide('agentDefaultModel', { currentSelection: () => selection });
   }
   await ctx.plugin(WebServer, { host: '127.0.0.1', port: 0 });
-  await ctx.plugin(sessionsPlugin, {});
+  runtimeHome = await mkdtemp(join(tmpdir(), 'terrier-bridge-home-'));
+  await ctx.plugin(sessionsPlugin, { homeDir: runtimeHome });
   await ctx.plugin(bridgePlugin, { cwd: '/tmp', engine: 'dsh', model: 'mock-model', ...(opts?.unarmed ? {} : { bridgeToken: BRIDGE_TOKEN }) });
   const base = `http://127.0.0.1:${ctx.webServer.port}`;
   return { base, fake };
 }
 
 describe('agentkeys bridge (real HTTP through the webServer seam)', () => {
+  it('rejects a different bridge home before registering routes or writing state', async () => {
+    ctx = new Context();
+    runtimeHome = await mkdtemp(join(tmpdir(), 'terrier-bridge-home-'));
+    await ctx.plugin(sessionsPlugin, { homeDir: runtimeHome });
+    expect(() => bridgePlugin.apply(ctx!, { homeDir: join(runtimeHome, 'different') }))
+      .toThrow('runtime home must match');
+    expect(await readdir(runtimeHome)).toEqual([]);
+  });
+
   it('healthz reports ready once the agent is created, with the byte-exact body', async () => {
     const { base } = await boot();
     // ensureAgent runs on activation; give it a tick

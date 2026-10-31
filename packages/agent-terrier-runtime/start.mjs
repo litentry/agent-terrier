@@ -123,7 +123,7 @@ async function main() {
     await context.plugin(Sessions, { homeDir: values['state-dir'] });
     await context.plugin(WebServer, { host: '127.0.0.1', port });
     await context.plugin(Bridge, {
-      cwd: values['work-dir'], homeDir: values['state-dir'], bridgeToken,
+      cwd: values['work-dir'], bridgeToken,
       engine: 'dsh', provider: 'deepseek-official', model,
     });
     const deadline = Date.now() + 10_000;

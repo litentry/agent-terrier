@@ -17,6 +17,7 @@
  * postmortem 0001).
  */
 import { randomBytes } from 'node:crypto';
+import { isAbsolute, parse, resolve } from 'node:path';
 import type { Context } from '@deepseek-ai/cordis';
 import z from '@deepseek-ai/schemastery';
 import {
@@ -43,8 +44,20 @@ export interface Config {
 }
 
 export const Config: z<Config> = z.object({
-  homeDir: z.string().default(process.env.DSH_HOME ?? '/root/.dsh'),
+  homeDir: z.string(),
 });
+
+export function resolveRuntimeHome(configuredHome?: string, environmentHome?: string): string {
+  const selectedHome = configuredHome ?? environmentHome;
+  if (!selectedHome || selectedHome.includes('\0') || !isAbsolute(selectedHome)) {
+    throw new Error('Set an absolute runtime home through homeDir or DSH_HOME');
+  }
+  const runtimeHome = resolve(selectedHome);
+  if (parse(runtimeHome).root === runtimeHome) {
+    throw new Error('The runtime home must not be a filesystem root');
+  }
+  return runtimeHome;
+}
 
 /** Why a session ended: silence, a reset marker, a throwaway window after its
  *  reply, or a newer session replacing it for the same key. */
@@ -61,7 +74,11 @@ export class SessionStore {
   private index: SessionIndex | undefined;
   private readonly listeners = new Set<EndedListener>();
 
-  constructor(readonly home: string) {}
+  readonly home: string;
+
+  constructor(home?: string, environmentHome?: string) {
+    this.home = resolveRuntimeHome(home, environmentHome);
+  }
 
   /** Hear sessions end — BEFORE their logs retire. Returns the unsubscribe. */
   onEnded(listener: EndedListener): () => void {
@@ -143,6 +160,6 @@ export class SessionStore {
 }
 
 export function apply(ctx: Context, config: Config): void {
-  const store = new SessionStore(config.homeDir ?? process.env.DSH_HOME ?? '/root/.dsh');
+  const store = new SessionStore(config.homeDir, process.env.DSH_HOME);
   (ctx as unknown as { provide(name: string, value: unknown): void }).provide(SERVICE, store);
 }
