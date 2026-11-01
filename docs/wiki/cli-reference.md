@@ -36,7 +36,7 @@ Agent Terrier local development tools
 | Argument | Required | Choices | Description |
 | --- | --- | --- | --- |
 | -h, --help | no |  | show this help message and exit |
-| lane | yes | source, core, focused, affected, qualification |  |
+| lane | yes | source, core, focused, affected, regression, qualification |  |
 | --component | no | protocol, runtime, broker, signer, relay, bundler, daemon, storage, cli, ui, display, dsh, managed, contracts, provisioner, chain, services, agents |  |
 | --changed-file | no |  | Changed repository-relative path; include old and new paths for renames |
 | --changed-files-json | no |  | JSON array of changed repository-relative paths |
