@@ -3,6 +3,7 @@ Use the CLI to select a bounded test lane. Ordinary iteration starts no browser,
 | Lane | Who runs it | Scope | Warm target | Status |
 |---|---|---|---|---|
 | `focused --component …` | Developer or coding agent, local CLI | Selected Rust library/binary tests or UI/DSH component tests | 30 seconds | Available; measure build and execution separately |
+| `affected --changed-file …` | Developer or coding agent, local CLI | Core checks plus changed workspace packages and their transitive consumers | Same 3-minute PR target; broad changes can exceed it | Available locally; hosted routing remains open |
 | `source` | GitHub Actions on every PR/main push; also local CLI | Privacy, Python checks, web-server isolation and dependency closure | Within the 3-minute PR budget | Available |
 | `core --component …` | GitHub Actions runs core on every PR/main push; developer or coding agent adds local component selection | Source lane, shared protocol, capability denials, protected files and selected component | 3 minutes; 5-minute budget reserved for future risk routing | Core wired into GitHub; automatic affected-component routing remains open |
 | `qualification --component storage` | Developer or coding agent, explicit local CLI; suitable for the future nightly runner | Existing real-chain object/worker/broker/CLI scenarios and shared client tests | Record actual duration; no PR budget | Available; no model or browser startup |
@@ -22,6 +23,7 @@ python3 terrier test focused --component ui
 python3 terrier test core --component storage
 python3 terrier test source
 python3 terrier test core --component broker --plan
+python3 terrier test affected --changed-file crates/agentkeys-gate/src/lib.rs --plan
 ```
 
 Rust builds use locked, offline dependencies. Download them explicitly with `--online` when needed. Install browser dependencies from the root workspace with `npm ci --ignore-scripts` before selecting the UI component. The DSH and managed lanes use the single `packages` workspace: locally from the public checkout, run `npm ci --prefix packages --ignore-scripts`. DSH includes shared plugin tests and [runtime process checks](./local-agent-image.md). The separately selected managed lane builds the native daemon/controller and plugins, then tests automatic process startup, authorization, saved sessions and cleanup with fixture services; it requires no Docker, browser or model download. The core lane includes its cheap configuration validation, not those process builds. UI checks run component tests without a browser; they do not replace browser-specific acceptance. The daemon component currently exposes a pre-existing dependency on an unavailable private enrollment helper; it reports that failure and must not be treated as qualified until the product path is replaced.
@@ -49,3 +51,11 @@ python3 terrier test qualification --component ui
 ```
 
 This explicit lane reuses the fast UI checks, then builds and serves the real console on a disposable loopback port. It verifies the root page and a JavaScript asset, then requires the removed anonymous development routes to return HTTP 404 with no request to a controlled test bridge. The bridge has a positive control and synthetic responses only. The test uses an explicitly unavailable application backend and no host credentials; it is an HTTP boundary check, not authenticated browser acceptance. Build and server logs are retained privately on failure. Ordinary UI iteration still starts no server or browser.
+
+## Affected changes
+
+Locally from the public checkout, pass each changed repository-relative path with `--changed-file`, or provide a JSON array using `--changed-files-json`. Include both previous and current paths for renames and paths of deleted files. The selector covers native library tests and existing curated component suites; directly changed native integration-test directories also select their integration targets. The selector reads Cargo’s current workspace metadata and follows reverse path dependencies transitively; it does not maintain a second dependency graph. Source/privacy and core authorization negatives always run. UI/display and runtime-plugin paths add their canonical component suites. The structured plan/report records the selection and the path owners.
+
+Unknown paths and packages without a supported test target fail with an explicit mapping error. Contract and provisioner changes require their explicit qualification rather than being labeled covered by this lane. Workspace manifests and shared fixtures conservatively expand to all workspace consumers. The existing daemon helper dependency can therefore fail a broad selection; it is not filtered out. This first selector covers current workspace consumers, not downstream repositories, a removed package’s former dependency graph or full integration qualification. Hosted changed-file collection and scheduled qualification are still open.
+
+The generated display route tree is ignored; the framework and route generator own it. The display component generates its route types, checks TypeScript and runs component tests without starting a browser. Local command from the public checkout: `python3 terrier test focused --component display`. Install the root browser dependencies and build the shared WASM client first, as for the console.

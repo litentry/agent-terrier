@@ -10,9 +10,9 @@ import sys
 import tempfile
 import time
 
-from . import contracts
+from . import contracts, affected
 
-COMPONENTS = ("protocol", "runtime", "broker", "signer", "relay", "bundler", "daemon", "storage", "cli", "ui", "dsh", "managed")
+COMPONENTS = ("protocol", "runtime", "broker", "signer", "relay", "bundler", "daemon", "storage", "cli", "ui", "display", "dsh", "managed")
 RUNTIME_SUITE = ("runtime", "agentkeys-runtime", "--lib", None, "")
 CORE = (
     ("protocol", "agentkeys-protocol", "--lib", None, ""),
@@ -129,16 +129,28 @@ def selection(lane, components):
     return rust
 
 
-def run(repository, lane, components, online=False, report_path=None, plan=False):
+def run(repository, lane, components, online=False, report_path=None, plan=False, changed_files=None):
+    affected_plan = None
+    if lane == "affected":
+        if components:
+            raise ValueError("affected selects its own components; use core for explicit selection")
+        affected_plan = affected.select(repository, changed_files or [])
+        components = affected_plan["components"]
+    elif changed_files:
+        raise ValueError("Changed files are only accepted by the affected lane")
     components = list(dict.fromkeys(components))
-    rust = selection(lane, components)
-    selected = [name for name, *_ in rust] + [value for value in components if value in ("ui", "dsh", "managed")]
-    if lane in ("source", "core"):
+    rust = selection("core" if affected_plan else lane, components)
+    if affected_plan:
+        for suite in affected_plan["rust_suites"]:
+            if not any(existing[1:] == suite[1:] for existing in rust):
+                rust.append(suite)
+    selected = [name for name, *_ in rust] + [value for value in components if value in ("ui", "display", "dsh", "managed")]
+    if lane in ("source", "core", "affected"):
         selected = [name for name, _ in SOURCE_COMMANDS] + selected
     qualification_scripts = list(dict.fromkeys(script for component in components for script in QUALIFICATIONS.get(component, ()))) if lane == "qualification" else []
     selected += [Path(script).stem for script in qualification_scripts]
     if plan:
-        return {"lane": lane, "selected": selected, "downloads": online}, 0
+        return {"lane": lane, "selected": selected, "downloads": online, "affected": affected_plan}, 0
     if report_path:
         report_path = report_path.expanduser().absolute()
         if report_path.is_symlink():
@@ -168,7 +180,7 @@ def run(repository, lane, components, online=False, report_path=None, plan=False
         setup, _ = check("dependencies", "setup", ["cargo", "fetch", "--locked"])
         if setup["status"] != "passed":
             rust = []
-    if lane in ("source", "core"):
+    if lane in ("source", "core", "affected"):
         for name, command in SOURCE_COMMANDS:
             check(name, "execution", command, python_test=name == "python")
     for name, package, target, target_name, test_filter in rust:
@@ -218,8 +230,10 @@ def run(repository, lane, components, online=False, report_path=None, plan=False
                 check("managed", "execution", ["node", "--test", "packages/agent-terrier-runtime/managed.test.mjs"],
                     extra_environment={"AGENT_TERRIER_TEST_RUNTIME_BINARY": executables["agent-terrier-runtime"],
                         "AGENT_TERRIER_TEST_DAEMON_BINARY": executables["agentkeys-daemon"]})
-        if component in ("ui", "dsh"):
-            directory = repository / ("apps/parent-control" if component == "ui" else "packages")
+        if component in ("ui", "display", "dsh"):
+            directory = repository / {"ui": "apps/parent-control", "display": "apps/device-display", "dsh": "packages"}[component]
+            if component == "display":
+                check("display-routes", "build", ["npm", "run", "generate-routes"], directory)
             check(component + "-types", "build", ["npm", "run", "typecheck"], directory)
             if component == "dsh":
                 check(component + "-build", "build", ["npm", "run", "build"], directory)
@@ -233,7 +247,7 @@ def run(repository, lane, components, online=False, report_path=None, plan=False
     success = bool(checks) and all(check["status"] == "passed" for check in checks)
     revision = os.environ.get("GITHUB_SHA", "") if os.environ.get("GITHUB_ACTIONS") == "true" else ""
     report = {
-        "schema_version": 1, "lane": lane, "selected": selected, "success": success,
+        "schema_version": 1, "lane": lane, "selected": selected, "success": success, "affected": affected_plan,
         "revision": revision if re.fullmatch(r"[0-9a-f]{40}", revision) else None,
         "runner": {"system": platform.system(), "architecture": platform.machine()},
         "seconds": elapsed, "warm_target_seconds": target, "target_exceeded": elapsed > target if target is not None else None,

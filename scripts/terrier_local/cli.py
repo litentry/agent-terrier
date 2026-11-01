@@ -4,7 +4,7 @@ from pathlib import Path
 import subprocess
 import sys
 
-from . import agent, chain, contracts, data, deployment, local_state, models, owner, services, stack, manager, test_lanes
+from . import agent, chain, contracts, data, deployment, local_state, models, owner, services, stack, manager, test_lanes, affected
 
 
 def build_parser():
@@ -19,8 +19,10 @@ def build_parser():
     stack_parser.add_argument("--runtime-image")
     stack_parser.add_argument("--docker-socket", type=Path)
     test_parser = commands.add_parser("test", help="Run measured source, core, focused or explicit qualification lanes")
-    test_parser.add_argument("lane", choices=["source", "core", "focused", "qualification"])
+    test_parser.add_argument("lane", choices=["source", "core", "focused", "affected", "qualification"])
     test_parser.add_argument("--component", action="append", default=[], choices=test_lanes.COMPONENTS)
+    test_parser.add_argument("--changed-file", action="append", default=[], help="Changed repository-relative path; include old and new paths for renames")
+    test_parser.add_argument("--changed-files-json", type=Path, help="JSON array of changed repository-relative paths")
     test_parser.add_argument("--online", action="store_true", help="Explicitly fetch Cargo dependencies before Rust tests")
     test_parser.add_argument("--report", type=Path, help="New JSON report path outside the checkout")
     test_parser.add_argument("--plan", action="store_true", help="Print selection without running tools")
@@ -101,8 +103,11 @@ def main(argv=None):
             print(f"Local state: {local_state.state_directory(repository)}")
             return manager.run(main)
         if arguments.command == "test":
+            changed_files = arguments.changed_file
+            if arguments.changed_files_json:
+                changed_files.extend(affected.paths_from_json(arguments.changed_files_json))
             report, exit_code = test_lanes.run(repository, arguments.lane, arguments.component,
-                arguments.online, arguments.report, arguments.plan)
+                arguments.online, arguments.report, arguments.plan, changed_files)
             print(json.dumps(report, indent=2))
             return exit_code
         if arguments.command == "contracts":
