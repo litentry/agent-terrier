@@ -31,6 +31,8 @@ The public source excludes hardware firmware, inherited operator documentation a
 
 Public source and artifact checks reject inherited deployment hostnames by comparing domain suffix hashes, including mixed-case and subdomain spellings. The public scanner stores no plaintext list of those domains and reports only file, line and rule. Synthetic examples use reserved `.example` domains. References to internal planning documents are also rejected, including those copied into generated declarations and package output. This supplements manual privacy review; it does not certify source history or a complete release.
 
+The [standalone source baseline](qualification/source-baseline-macos-arm64.json) records exact file/mode preservation, fresh native/WASM/browser/plugin builds and an independently verified anonymous public clone. The baseline refresh changes source ancestry, not product behavior. Existing qualification reports retain their original tested identities; they are not evidence of a rerun. Full application and hosted historical-content acceptance remain separate.
+
 Browser compilation remaps Rust source paths. The display build also makes route-manifest source metadata relative to the app root: the framework otherwise embeds workstation paths in its production manifest. Asset URLs and route behavior are unchanged; the artifact privacy check must pass after a framework update.
 
 The card schema has one owner in `agentkeys-protocol::card`. Its TypeScript output lives in `design-system/generated/`; the renderer and both apps consume those generated types. Existing `CardView*` names are aliases, not separate field definitions. Regenerate with `cargo test -p agentkeys-protocol -p agentkeys-daemon export_bindings` after changing a card field.

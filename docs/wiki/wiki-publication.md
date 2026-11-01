@@ -28,3 +28,9 @@ jj git clone https://github.com/litentry/agent-terrier.wiki.git \
 Review the wiki checkout for unrelated changes. Copy only the reviewed rendered Markdown pages and `_publication.json` into that checkout, preserving any unrelated content. Inspect the diff, record the publication and push its default bookmark with `jj`. Verify Home, an internal page link and a revision-pinned source link in the browser. Do not edit published pages as a second source of truth; change `docs/wiki` and regenerate.
 
 Publication is an explicit maintainer operation using existing authorized access. No personal token, private credential or private repository is required by the public source. Automatic wiki scheduling and independent full documentation walkthrough remain release work; the renderer itself performs no network writes.
+
+## Source history and qualification identities
+
+The public source history begins at a reviewed standalone baseline dated 2026-11-01. Start with a fresh public checkout after that refresh. Reapply reviewed unsubmitted source changes without importing old ancestry; never merge an old checkout’s history back into the public repository. See the [baseline build record](../qualification/source-baseline-macos-arm64.json).
+
+Regenerate wiki pages from the current reviewed public revision so their source links remain usable. Earlier qualification records keep the revisions, images and model digests actually tested. The baseline record establishes source equality and fresh builds; it does not turn those earlier results into new application runs or certify retained hosted history.
