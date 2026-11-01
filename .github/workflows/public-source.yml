@@ -5,6 +5,7 @@ on:
     branches: [main]
 permissions:
   contents: read
+  pull-requests: read
 concurrency:
   group: public-checks-${{ github.ref }}
   cancel-in-progress: true
@@ -40,7 +41,42 @@ jobs:
           key: core-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', '**/Cargo.toml') }}
       - name: Install the repository-pinned toolchain
         run: env -u RUSTUP_TOOLCHAIN rustup toolchain install --no-self-update
-      - name: Run core security checks
+      - name: Collect the complete changed-file list for this merge revision
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/ci-changed-files.py --output "${RUNNER_TEMP}/changed-files.json"
+      - name: Select canonical affected checks
+        if: github.event_name == 'pull_request'
+        id: affected
+        run: |
+          python3 terrier test affected --changed-files-json "${RUNNER_TEMP}/changed-files.json" --plan > "${RUNNER_TEMP}/affected-plan.json"
+          jq -r '"browser=" + ([.affected.components[] | select(. == "ui" or . == "display")] | length > 0 | tostring), "plugins=" + ([.affected.components[] | select(. == "dsh" or . == "managed")] | length > 0 | tostring)' "${RUNNER_TEMP}/affected-plan.json" >> "${GITHUB_OUTPUT}"
+      - name: Prepare Node for selected components
+        if: steps.affected.outputs.browser == 'true' || steps.affected.outputs.plugins == 'true'
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '24'
+      - name: Prepare browser dependencies and shared client
+        if: steps.affected.outputs.browser == 'true'
+        env:
+          WASM_PACK_RELEASE: wasm-pack-v0.15.0-x86_64-unknown-linux-musl
+          WASM_PACK_SHA256: c09f971ecaed9a2efc80fdcea7a00ef6b53c7fadc8c57d1f61b53a6aa66b668a
+        run: |
+          npm ci --ignore-scripts
+          curl --fail --location --proto '=https' --tlsv1.2 --output "${RUNNER_TEMP}/wasm-pack.tar.gz" "https://github.com/wasm-bindgen/wasm-pack/releases/download/v0.15.0/${WASM_PACK_RELEASE}.tar.gz"
+          echo "${WASM_PACK_SHA256}  ${RUNNER_TEMP}/wasm-pack.tar.gz" | sha256sum --check
+          tar -xzf "${RUNNER_TEMP}/wasm-pack.tar.gz" --directory "${RUNNER_TEMP}" "${WASM_PACK_RELEASE}/wasm-pack"
+          export PATH="${RUNNER_TEMP}/${WASM_PACK_RELEASE}:${PATH}"
+          python3 scripts/build-browser-core.py
+      - name: Prepare plugin dependencies
+        if: steps.affected.outputs.plugins == 'true'
+        run: npm ci --prefix packages --ignore-scripts
+      - name: Run core and affected PR checks
+        if: github.event_name == 'pull_request'
+        run: python3 terrier test affected --changed-files-json "${RUNNER_TEMP}/changed-files.json" --online --report "${RUNNER_TEMP}/core-lane.json"
+      - name: Run core security checks on main
+        if: github.event_name == 'push'
         run: python3 terrier test core --online --report "${RUNNER_TEMP}/core-lane.json"
       - name: Summarize timings
         if: always()

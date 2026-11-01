@@ -27,7 +27,7 @@ def paths_from_json(path):
     return paths
 
 
-def select(repository, changed_files, metadata=None):
+def validate_paths(changed_files):
     if not changed_files or len(changed_files) > 10000:
         raise ValueError("Affected checks require a nonempty, bounded changed-file list")
     for path in changed_files:
@@ -35,6 +35,10 @@ def select(repository, changed_files, metadata=None):
                 or PurePosixPath(path).is_absolute() or ".." in PurePosixPath(path).parts
                 or "\\" in path or any(ord(character) < 32 for character in path)):
             raise ValueError("Changed-file paths must be normalized repository-relative paths")
+
+
+def select(repository, changed_files, metadata=None):
+    validate_paths(changed_files)
     if metadata is None:
         result = subprocess.run(["cargo", "metadata", "--offline", "--locked", "--no-deps", "--format-version", "1"],
             cwd=repository, env=contracts.tool_environment(), capture_output=True, text=True, timeout=30)
@@ -94,13 +98,15 @@ def select(repository, changed_files, metadata=None):
         if expanded == affected_packages:
             break
         affected_packages = expanded
-    suites = []
+    suites, builds = [], []
     for name in sorted(affected_packages):
         component = PACKAGE_COMPONENTS.get(name)
         if component:
             components.add(component)
-        elif any("lib" in target["kind"] for target in packages[name]["targets"]):
+        elif any(set(target["kind"]) & {"lib", "rlib", "proc-macro"} for target in packages[name]["targets"]):
             suites.append((name, name, "--lib", None, ""))
+        elif name == "agentkeys-classify-dataset":
+            builds.append((name, "classify-dataset"))
         else:
             raise ValueError(f"Package {name} needs an explicit test target mapping")
         for target in packages[name]["targets"]:
@@ -109,4 +115,4 @@ def select(repository, changed_files, metadata=None):
         if name == "agentkeys-web-core":
             components.update(("ui", "display"))
     return {"components": sorted(components), "packages": sorted(affected_packages),
-            "rust_suites": suites, "reasons": reasons}
+            "rust_suites": suites, "rust_builds": builds, "reasons": reasons}

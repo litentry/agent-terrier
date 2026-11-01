@@ -90,6 +90,30 @@ class AffectedTests(unittest.TestCase):
         self.assertEqual(result["selected"].count("cli-agent-ceremony"), 1)
         self.assertNotIn("agentkeys-cli-agent_admin_mock", result["selected"])
 
+    def test_browser_rlib_runs_native_library_tests_and_selects_both_apps(self):
+        root = Path("/synthetic/source")
+        metadata = workspace(root)
+        package = metadata["packages"][3]
+        package.update(id="agentkeys-web-core", name="agentkeys-web-core",
+                       manifest_path=str(root / "crates/agentkeys-web-core/Cargo.toml"),
+                       targets=[{"kind": ["cdylib", "rlib"], "name": "agentkeys_web_core"}])
+        metadata["workspace_members"][3] = package["id"]
+        plan = affected.select(root, ["crates/agentkeys-web-core/src/lib.rs"], metadata)
+        self.assertEqual(plan["components"], ["display", "ui"])
+        self.assertEqual(plan["rust_suites"], [("agentkeys-web-core", "agentkeys-web-core", "--lib", None, "")])
+
+    def test_known_testless_binary_has_a_compile_check_without_claiming_tests(self):
+        root = Path("/synthetic/source")
+        metadata = workspace(root)
+        package = metadata["packages"][3]
+        package.update(id="agentkeys-classify-dataset", name="agentkeys-classify-dataset",
+                       manifest_path=str(root / "crates/agentkeys-classify-dataset/Cargo.toml"),
+                       targets=[{"kind": ["bin"], "name": "classify-dataset"}])
+        metadata["workspace_members"][3] = package["id"]
+        plan = affected.select(root, ["Cargo.lock"], metadata)
+        self.assertEqual(plan["rust_builds"], [("agentkeys-classify-dataset", "classify-dataset")])
+        self.assertNotIn("agentkeys-classify-dataset", [suite[0] for suite in plan["rust_suites"]])
+
     def test_dependency_cycle_terminates_and_covers_both_members(self):
         root = Path("/synthetic/source")
         metadata = workspace(root)
