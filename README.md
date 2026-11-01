@@ -15,10 +15,10 @@ cargo metadata --no-deps --format-version 1
 cargo fmt --all -- --check
 ```
 
-The console and browser display share the checked-in `design-system/` package and a generated browser client. Install `wasm-pack` and the `wasm32-unknown-unknown` Rust target first. Run locally from the repository root; the initial Rust build is cached for subsequent runs:
+The console and browser display share the checked-in `design-system/` package, one root npm workspace/lockfile and a generated browser client. Use Node 24 or later for this workspace. Install `wasm-pack` and the `wasm32-unknown-unknown` Rust target first. Run locally from the repository root; the initial Rust build is cached for subsequent runs:
 
 ```sh
-npm --prefix apps/parent-control install --ignore-scripts
+npm ci --ignore-scripts
 python3 scripts/build-browser-core.py
 npm --prefix apps/parent-control test
 ```

@@ -177,7 +177,7 @@ function MarkIcon({ size = 320, color = '#1a1815' }: MarkProps) {
 type VariantId = 'profile' | 'front' | 'cloud' | 'monogram' | 'seal' | 'icon';
 type BgId = 'cream' | 'ink' | 'amber' | 'sage' | 'indigo';
 
-const VARIANTS: { id: VariantId; name: string; sub: string; comp: (p: MarkProps) => JSX.Element }[] = [
+const VARIANTS: { id: VariantId; name: string; sub: string; comp: (p: MarkProps) => React.JSX.Element }[] = [
   { id: 'profile', name: 'profile', sub: 'side view · iconic', comp: MarkProfile },
   { id: 'front', name: 'front-cute', sub: 'big eyes · sheep face', comp: MarkFrontCute },
   { id: 'cloud', name: 'cloud', sub: 'minimal · just fluff', comp: MarkCloud },

@@ -7,21 +7,20 @@
     "dev": "next dev -p 3113",
     "build": "next build",
     "start": "next start -p 3113",
-    "lint": "next lint",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "next typegen && tsc --noEmit",
     "test": "vitest run"
   },
   "dependencies": {
     "@agentkeys/design-system": "file:../../design-system",
-    "next": "^14.2.34",
+    "next": "16.4.3",
     "qrcode.react": "^4.2.0",
-    "react": "18.3.1",
-    "react-dom": "18.3.1"
+    "react": "19.3.1",
+    "react-dom": "19.3.1"
   },
   "devDependencies": {
-    "@types/node": "20.14.10",
-    "@types/react": "18.3.3",
-    "@types/react-dom": "18.3.0",
+    "@types/node": "24.19.2",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
     "jsdom": "^28.1.0",
     "typescript": "5.5.3",
     "vitest": "^4.1.5"
