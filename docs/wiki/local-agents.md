@@ -22,6 +22,31 @@ The broker requires the configured signer for creation and context recovery. Uns
 
 Broker reconstruction rows contain the public address and runtime metadata. Startup refuses old databases with nonempty delegate-key fields before migrating their schema. It does not erase, export or migrate those keys. Preserve such state privately; use a separate fresh development state or an explicitly reviewed recovery procedure. Empty legacy key columns are removed while metadata is retained. Rows without a matching public address cannot recreate a runtime until their sealed context is restored. This schema change makes no claim about erasing historical database pages or backups.
 
+## Call an agent without a browser
+
+`terrier agent bridge` uses the same `BridgeProxyBody` contract and authenticated broker route as the console. The broker independently verifies the current chain owner and live instance, then enforces its route allowlist. No runtime token is exposed to the CLI. These calls do not read the owner's passkey or submit a transaction. `--sandbox-id` optionally pins an existing instance; a stale ID is refused.
+
+Local, from the same public checkout and state directory, with the agent's `device_key_hash`:
+
+```sh
+./terrier agent bridge --name developer \
+  --device-key-hash "${AGENT_TERRIER_DEVICE_KEY_HASH:?Set the agent device key hash}" \
+  --method GET --path /healthz
+```
+
+Local, from that checkout, after starting the configured local model:
+
+```sh
+jq -n --arg text "${AGENT_TERRIER_CHAT_TEXT:?Set the message text}" '{text:$text,stream:false}' |
+  ./terrier agent bridge --name developer \
+    --device-key-hash "${AGENT_TERRIER_DEVICE_KEY_HASH:?Set the agent device key hash}" \
+    --path /v1/chat --json-stdin
+```
+
+The existing bridge also exposes jobs, context files/application and agent restart. The broker owns the [route allowlist](../../crates/agentkeys-broker-server/src/handlers/bridge_proxy.rs); the [runtime bridge](../../packages/agentkeys-dsh/src/bridge.ts) owns each inner request/response. Supply a JSON object with `--json-stdin` for a POST body. GET requests have no body. This command supports JSON responses; streaming through the broker bridge remains unsupported. The model capability probe separately tests streaming.
+
+Successful output wraps the route's JSON in `response` alongside `development_only`, `action` and `device_key_hash`. Non-success HTTP status, malformed/oversized JSON and transport failures exit nonzero; backend error bodies are not printed. Request and response bodies are limited to 1 MiB. `--timeout-seconds` controls the native request deadline (default 200, range 1–600); the broker may impose a shorter route deadline. Health success does not prove model inference; use a real chat turn to check that separately.
+
 ## Archive while retaining data
 
 Local, from that same checkout and state directory, using `device_key_hash` from the creation receipt:

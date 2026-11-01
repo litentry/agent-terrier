@@ -630,3 +630,38 @@ pub async fn agent_receipt(
     );
     Ok(receipt)
 }
+
+pub(crate) const BRIDGE_TIMEOUT_SECONDS: u64 = 200;
+pub(crate) const MAX_BRIDGE_JSON_BYTES: usize = 1024 * 1024;
+
+pub async fn agent_bridge(
+    development: &crate::development_signing::DevelopmentSigning,
+    broker_url: &str,
+    session_bearer: &str,
+    request: &agentkeys_backend_client::protocol::BridgeProxyBody,
+    timeout_seconds: u64,
+) -> Result<Value> {
+    development.require_local_service(broker_url)?;
+    let mut response = client()?
+        .post(format!(
+            "{}/v1/agent/bridge",
+            broker_url.trim_end_matches('/')
+        ))
+        .bearer_auth(session_bearer)
+        .json(request)
+        .timeout(std::time::Duration::from_secs(timeout_seconds))
+        .send()
+        .await?;
+    if !response.status().is_success() {
+        return Err(RequestStatus(response.status().as_u16()).into());
+    }
+    let mut encoded = Vec::new();
+    while let Some(chunk) = response.chunk().await? {
+        anyhow::ensure!(
+            encoded.len() + chunk.len() <= MAX_BRIDGE_JSON_BYTES,
+            "bridge response exceeds size limit"
+        );
+        encoded.extend_from_slice(&chunk);
+    }
+    Ok(serde_json::from_slice(&encoded)?)
+}
