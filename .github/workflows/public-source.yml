@@ -51,9 +51,9 @@ jobs:
         id: affected
         run: |
           python3 terrier test affected --changed-files-json "${RUNNER_TEMP}/changed-files.json" --plan > "${RUNNER_TEMP}/affected-plan.json"
-          jq -r '"browser=" + ([.affected.components[] | select(. == "ui" or . == "display")] | length > 0 | tostring), "plugins=" + ([.affected.components[] | select(. == "dsh" or . == "managed")] | length > 0 | tostring)' "${RUNNER_TEMP}/affected-plan.json" >> "${GITHUB_OUTPUT}"
+          jq -r '"browser=" + ([.affected.components[] | select(. == "ui" or . == "display")] | length > 0 | tostring), "plugins=" + ([.affected.components[] | select(. == "dsh" or . == "managed")] | length > 0 | tostring), "contracts=" + (.affected.components | index("contracts") != null | tostring), "provisioner=" + (.affected.components | index("provisioner") != null | tostring)' "${RUNNER_TEMP}/affected-plan.json" >> "${GITHUB_OUTPUT}"
       - name: Prepare Node for selected components
-        if: steps.affected.outputs.browser == 'true' || steps.affected.outputs.plugins == 'true'
+        if: steps.affected.outputs.browser == 'true' || steps.affected.outputs.plugins == 'true' || steps.affected.outputs.provisioner == 'true'
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
         with:
           node-version: '24'
@@ -72,6 +72,15 @@ jobs:
       - name: Prepare plugin dependencies
         if: steps.affected.outputs.plugins == 'true'
         run: npm ci --prefix packages --ignore-scripts
+      - name: Prepare contract tooling
+        if: steps.affected.outputs.contracts == 'true'
+        uses: foundry-rs/foundry-toolchain@dba66c27052e63476d886f22216e119ba7e615bf
+        with:
+          version: v1.7.0
+          cache: false
+      - name: Prepare provisioner component dependencies
+        if: steps.affected.outputs.provisioner == 'true'
+        run: npm ci --prefix provisioner-scripts --ignore-scripts
       - name: Run core and affected PR checks
         if: github.event_name == 'pull_request'
         run: python3 terrier test affected --changed-files-json "${RUNNER_TEMP}/changed-files.json" --online --report "${RUNNER_TEMP}/core-lane.json"

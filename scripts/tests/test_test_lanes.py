@@ -82,6 +82,22 @@ class TestLaneExecutionTests(unittest.TestCase):
         self.assertEqual(result["tests"], {"passed": 1, "ignored": 1})
         self.assertEqual(test_lanes.python_counts({"status": "failed"}, "Ran 1 test in 0.1s\nFAILED\n")["status"], "failed")
 
+    def test_contract_counts_refuse_empty_skipped_and_failed_suites(self):
+        for output in ("", "Suite result: ok. 0 passed; 0 failed; 2 skipped;", "Suite result: FAILED. 1 passed; 1 failed; 0 skipped;"):
+            self.assertEqual(test_lanes.contract_counts({"status": "passed"}, output)["status"], "empty-or-failed-suite")
+        result = test_lanes.contract_counts({"status": "passed"}, "Suite result: ok. 3 passed; 0 failed; 1 skipped;")
+        self.assertEqual(result["status"], "passed")
+        self.assertEqual(result["tests"], {"passed": 3, "failed": 0, "ignored": 1})
+
+    def test_real_qualification_scenarios_cannot_enter_ordinary_lanes(self):
+        for component in ("chain", "services", "agents"):
+            for lane in ("focused", "core"):
+                with self.assertRaises(ValueError):
+                    test_lanes.selection(lane, [component])
+            plan, status = test_lanes.run(Path("."), "qualification", [component], plan=True)
+            self.assertEqual(status, 0)
+            self.assertTrue(any(name.startswith("qualify_local_") for name in plan["selected"]))
+
     def test_child_does_not_inherit_host_provider_credentials(self):
         with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {"BROKER_PRIVATE_CANARY": "synthetic"}):
             root = Path(directory)

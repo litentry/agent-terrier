@@ -56,8 +56,34 @@ This explicit lane reuses the fast UI checks, then builds and serves the real co
 
 Locally from the public checkout, pass each changed repository-relative path with `--changed-file`, or provide a JSON array using `--changed-files-json`. Include both previous and current paths for renames and paths of deleted files. The selector covers native library tests and existing curated component suites; directly changed native integration-test directories also select their integration targets. The selector reads Cargo’s current workspace metadata and follows reverse path dependencies transitively; it does not maintain a second dependency graph. Source/privacy and core authorization negatives always run. UI/display and runtime-plugin paths add their canonical component suites. The structured plan/report records the selection and the path owners.
 
-Unknown paths and packages without a supported test target fail with an explicit mapping error. Contract and provisioner changes require their explicit qualification rather than being labeled covered by this lane. Workspace manifests and shared fixtures conservatively expand to all workspace consumers. This first selector covers current workspace consumers, not downstream repositories, a removed package’s former dependency graph or full integration qualification. Hosted collection binds the complete file list to the event’s exact base/head merge revision. It keeps deleted and both renamed paths, rejects stale revisions, missing pages and duplicate entries, and refuses changes larger than the [GitHub API’s 3,000-file bound](https://docs.github.com/en/rest/pulls/pulls#list-pull-requests-files). Split such a change before rerunning. The read-only collection token is present only in that step; test children do not inherit it. Scheduled qualification remains open.
+Unknown paths and packages without a supported test target fail with an explicit mapping error. Contract changes select the shared Foundry unit runner; provisioner changes select type checking and deterministic component tests without a browser. Workspace manifests and shared fixtures conservatively expand to all workspace consumers. This first selector covers current workspace consumers, not downstream repositories, a removed package’s former dependency graph or full integration qualification. Hosted collection binds the complete file list to the event’s exact base/head merge revision. It keeps deleted and both renamed paths, rejects stale revisions, missing pages and duplicate entries, and refuses changes larger than the [GitHub API’s 3,000-file bound](https://docs.github.com/en/rest/pulls/pulls#list-pull-requests-files). Split such a change before rerunning. The read-only collection token is present only in that step; test children do not inherit it. Scheduled qualification remains open.
 
 The generated display route tree is ignored; the framework and route generator own it. The display component generates its route types, checks TypeScript and runs component tests without starting a browser. Local command from the public checkout: `python3 terrier test focused --component display`. Install the root browser dependencies and build the shared WASM client first, as for the console.
 
-The PR job prepares browser/plugin dependencies only when the canonical plan selects those components. Browser setup builds the shared WASM client; tests still use component runners without a headless browser. Setup before the CLI is outside its timing report. The dataset CLI has no standalone test target: broad native selection records an explicit compile check, while its catalog validation library retains its own tests. A compile check is not counted as a passing test. Contract/provisioner changes and unknown ownership still fail with an explicit mapping requirement; automatic routing does not claim those gates are complete.
+The PR job prepares browser/plugin dependencies only when the canonical plan selects those components. Browser setup builds the shared WASM client; tests still use component runners without a headless browser. Setup before the CLI is outside its timing report. The dataset CLI has no standalone test target: broad native selection records an explicit compile check, while its catalog validation library retains its own tests. A compile check is not counted as a passing test. Unknown ownership still fails with an explicit mapping requirement. Complete integration qualification is separate from these fast checks.
+
+## Contract and provisioner lanes
+
+Local, from the public checkout:
+
+```sh
+python3 terrier test focused --component contracts
+python3 terrier test focused --component provisioner
+python3 terrier test qualification --component provisioner
+```
+
+Contract checks call the existing contract build/test owner, using its verified archive, compiler pin and optional explicit compiler selector. Add `--online` to permit dependency/compiler preparation; the default uses prepared inputs only. Foundry suite counts must contain a positive executed-test count and zero failures; empty or skipped-only output fails. These unit checks use the local EVM simulator and start no RPC node.
+
+Install provisioner dependencies locally with `npm ci --prefix provisioner-scripts --ignore-scripts`. Its default npm test command runs component tests only. The explicit qualification additionally selects its existing browser fixtures. Prepare their browser locally with `npm exec --prefix provisioner-scripts -- playwright install chromium`. Those tests use synthetic pages and mocked email/provider clients; they neither create real accounts nor qualify the product's browser enrollment. Their raw diagnostic logs are private and are not uploaded automatically.
+
+## Reusable service qualification
+
+Local, after building the public service binaries and preparing contract dependencies:
+
+```sh
+python3 terrier test qualification --component chain --component services --component storage
+```
+
+The chain selection reuses deployment, signing, binding, owner, login and transaction-service scenarios. Services reuses full backend restart and cleanup checks. Storage keeps its existing seven-scenario selection. The chain, services and agents selections are refused by ordinary focused/core lanes; real services are never silently started on a PR.
+
+The explicit `qualification --component agents` selection reuses the existing real-contract Docker lifecycle scenario. Set `AGENT_TERRIER_TEST_AGENT_IMAGE` to a reviewed preloaded image and `AGENT_TERRIER_TEST_DOCKER_SOCKET` to the local Unix socket. Missing inputs fail. The runner forwards these explicit selectors only for that qualification; it does not inherit unrelated runtime or model settings. This deterministic lane does not claim real-model or complete browser acceptance.

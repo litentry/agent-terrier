@@ -25,7 +25,7 @@ def build_parser():
     test_parser.add_argument("--component", action="append", default=[], choices=test_lanes.COMPONENTS)
     test_parser.add_argument("--changed-file", action="append", default=[], help="Changed repository-relative path; include old and new paths for renames")
     test_parser.add_argument("--changed-files-json", type=Path, help="JSON array of changed repository-relative paths")
-    test_parser.add_argument("--online", action="store_true", help="Explicitly fetch Cargo dependencies before Rust tests")
+    test_parser.add_argument("--online", action="store_true", help="Explicitly prepare selected Rust/contract dependencies")
     test_parser.add_argument("--report", type=Path, help="New JSON report path outside the checkout")
     test_parser.add_argument("--plan", action="store_true", help="Print selection without running tools")
     model_parser = commands.add_parser("models", help="Qualify actual local model capabilities")

@@ -58,7 +58,8 @@ def select(repository, changed_files, metadata=None):
             affected_packages.update(owners)
             reasons[path] = sorted(owners)
         elif path.startswith("crates/agentkeys-chain/"):
-            raise ValueError("Contract changes require the explicit contract and real-chain qualification lanes")
+            components.add("contracts")
+            reasons[path] = ["contracts", "core"]
         elif path == "scripts/build-browser-core.py":
             affected_packages.add("agentkeys-web-core")
             components.update(("ui", "display"))
@@ -83,7 +84,8 @@ def select(repository, changed_files, metadata=None):
             components.update(("ui", "display", "dsh", "managed"))
             reasons[path] = ["all product consumers"]
         elif path.startswith("provisioner-scripts/"):
-            raise ValueError("Provisioner changes require explicit provisioner qualification")
+            components.add("provisioner")
+            reasons[path] = ["provisioner", "core"]
         elif path in ROOT_SOURCE or path.startswith(("docs/", "LICENSES/", ".github/", "scripts/")):
             reasons[path] = ["source", "core"]
             if path.startswith(("scripts/terrier_local/", "scripts/tests/test_test_lanes", "scripts/tests/test_affected")):
