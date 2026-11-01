@@ -21,13 +21,8 @@ use crate::state::SharedState;
 
 pub use agentkeys_protocol::auth::{DeriveAddressRequest, SignMessageRequest};
 
-/// Issue #82 — typed-data sign request. `typed_data` carries the canonical
-/// EIP-712 v4 JSON shape (matches MetaMask `eth_signTypedData_v4`).
-#[derive(Deserialize)]
-pub struct SignTypedDataRequest {
-    pub omni_account: String,
-    pub typed_data: agentkeys_core::clear_signing::TypedData,
-}
+pub type SignTypedDataRequest =
+    agentkeys_protocol::auth::SignTypedDataRequest<agentkeys_core::clear_signing::TypedData>;
 
 /// Minimal JWT claims we care about for verification.
 #[derive(Debug, Serialize, Deserialize)]
@@ -133,10 +128,10 @@ pub async fn derive_address(
     match signer.derive_address(&body.omni_account) {
         Ok(address) => (
             StatusCode::OK,
-            Json(json!({
-                "address":     address,
-                "key_version": KEY_VERSION,
-            })),
+            Json(agentkeys_protocol::auth::DerivedAddress {
+                address,
+                key_version: KEY_VERSION,
+            }),
         )
             .into_response(),
         Err(e) => signer_error(e).into_response(),
@@ -168,11 +163,11 @@ pub async fn sign_message(
     match signer.sign_eip191(&body.omni_account, &message_bytes) {
         Ok((signature, address)) => (
             StatusCode::OK,
-            Json(json!({
-                "signature":   signature,
-                "address":     address,
-                "key_version": KEY_VERSION,
-            })),
+            Json(agentkeys_protocol::auth::SignedMessage {
+                signature,
+                address,
+                key_version: KEY_VERSION,
+            }),
         )
             .into_response(),
         Err(e) => signer_error(e).into_response(),
@@ -198,14 +193,14 @@ pub async fn sign_typed_data(
     match signer.sign_eip712(&body.omni_account, body.typed_data) {
         Ok(result) => (
             StatusCode::OK,
-            Json(json!({
-                "signature":         result.signature,
-                "address":           result.address,
-                "primary_type_hash": result.primary_type_hash,
-                "domain_separator":  result.domain_separator,
-                "digest":            result.digest,
-                "key_version":       KEY_VERSION,
-            })),
+            Json(agentkeys_protocol::auth::SignedTypedData {
+                signature: result.signature,
+                address: result.address,
+                primary_type_hash: result.primary_type_hash,
+                domain_separator: result.domain_separator,
+                digest: result.digest,
+                key_version: KEY_VERSION,
+            }),
         )
             .into_response(),
         Err(e) => signer_error(e).into_response(),

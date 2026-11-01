@@ -1,24 +1,20 @@
-//! Daemon-side RPC client for the signer edge.
-//!
-//! The daemon never holds private key material. Instead, it asks the signer
-//! to (a) reveal the EVM address derived from a given `omni_account` and
-//! (b) sign EIP-191 messages under that derived key. The wire contract is
-//! pinned by `docs/spec/signer-protocol.md`; the v0 implementation in
-//! `agentkeys-mock-server::dev_key_service` is HKDF-backed; issue #74 step 2
-//! replaces it with a TEE worker behind the same wire shape.
-//!
-//! Daemon code MUST treat the signer as an opaque RPC dependency (no
-//! assumptions about derivation, no caching of signing keys). The
-//! `SignerClient` trait is the swap-point: tests inject a TEE-stub fixture,
-//! prod code injects the HTTP client.
+//! Native signer transport over the shared protocol; keys remain with the signer.
 
+use agentkeys_protocol::auth::{
+    DeriveAddressRequest, DeriveDeviceRequest, SignMessageRequest, SignTypedDataRequest,
+    SignedDeviceCapPop,
+};
+pub use agentkeys_protocol::auth::{
+    DerivedAddress, DerivedDevice, SignDeviceCapPopRequest as DeviceCapPopFields, SignedMessage,
+    SignedTypedData,
+};
 use async_trait::async_trait;
+use serde::{de::DeserializeOwned, Serialize};
 use thiserror::Error;
 
 use crate::clear_signing::TypedData;
 
-/// Wire-protocol error codes from `signer-protocol.md`. Daemon code matches
-/// on these (and the transport variants) to drive retry / surface logic.
+/// Stable signer failures shared by wallet and device transports.
 #[derive(Debug, Error)]
 pub enum SignerClientError {
     /// 400 `invalid_omni_account` — bug in caller; not retriable.
@@ -35,8 +31,7 @@ pub enum SignerClientError {
     #[error("invalid_typed_data: {0}")]
     InvalidTypedData(String),
 
-    /// 503 `signer_disabled` — operator must set
-    /// `DEV_KEY_SERVICE_MASTER_SECRET` (dev) or attest the TEE (prod).
+    /// 503: the configured signer is unavailable.
     #[error("signer_disabled: {0}")]
     SignerDisabled(String),
 
@@ -60,41 +55,6 @@ pub enum SignerClientError {
         error: Option<String>,
         message: Option<String>,
     },
-}
-
-/// Successful response from `/dev/derive-address`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DerivedAddress {
-    /// Lowercase 0x-prefixed 40-char hex EVM address.
-    pub address: String,
-    /// Derivation domain version. Daemon SHOULD record this alongside the
-    /// address; a mid-session change implies master-secret rotation.
-    pub key_version: u8,
-}
-
-/// Successful response from `/dev/sign-message`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SignedMessage {
-    /// 0x-prefixed 130-char hex `r || s || v` with `v ∈ {0, 1}`.
-    pub signature: String,
-    /// MUST equal the address `derive_address` returned for the same
-    /// `omni_account`. Daemon MAY assert this invariant on every sign call.
-    pub address: String,
-    pub key_version: u8,
-}
-
-/// Successful response from `/dev/sign-typed-data` (issue #82). Carries
-/// the signature plus every digest the signer computed internally — so the
-/// caller can cross-reference against the ERC-7730 metadata file pinned to
-/// the same domain separator / primary type hash for audit.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SignedTypedData {
-    pub signature: String,
-    pub address: String,
-    pub primary_type_hash: String,
-    pub domain_separator: String,
-    pub digest: String,
-    pub key_version: u8,
 }
 
 /// The daemon's view of the signer. Three methods, all pure RPC.
@@ -182,42 +142,16 @@ impl SignerClient for HttpSignerClient {
         &self,
         omni_account: &str,
     ) -> Result<DerivedAddress, SignerClientError> {
-        let url = format!("{}/dev/derive-address", self.base_url);
-        let mut req = self
-            .http
-            .post(&url)
-            .json(&agentkeys_protocol::auth::DeriveAddressRequest {
+        signer_request(
+            &self.http,
+            &self.base_url,
+            "/dev/derive-address",
+            &DeriveAddressRequest {
                 omni_account: omni_account.into(),
-            });
-        if let Some(jwt) = &self.session_jwt {
-            req = req.header("Authorization", format!("Bearer {jwt}"));
-        }
-        let resp = req
-            .send()
-            .await
-            .map_err(|e| SignerClientError::Transport(format!("POST {url}: {e}")))?;
-        let status = resp.status().as_u16();
-        let body: serde_json::Value = resp
-            .json()
-            .await
-            .map_err(|e| SignerClientError::Transport(format!("parse JSON: {e}")))?;
-
-        if status == 200 {
-            let address = body["address"]
-                .as_str()
-                .ok_or_else(|| SignerClientError::Unexpected {
-                    status,
-                    error: None,
-                    message: Some("missing 'address'".into()),
-                })?
-                .to_string();
-            let key_version = body["key_version"].as_u64().unwrap_or(0) as u8;
-            return Ok(DerivedAddress {
-                address,
-                key_version,
-            });
-        }
-        Err(map_error(status, &body))
+            },
+            self.session_jwt.as_deref(),
+        )
+        .await
     }
 
     async fn sign_eip191(
@@ -225,52 +159,17 @@ impl SignerClient for HttpSignerClient {
         omni_account: &str,
         message_bytes: &[u8],
     ) -> Result<SignedMessage, SignerClientError> {
-        let url = format!("{}/dev/sign-message", self.base_url);
-        let mut req = self
-            .http
-            .post(&url)
-            .json(&agentkeys_protocol::auth::SignMessageRequest {
+        signer_request(
+            &self.http,
+            &self.base_url,
+            "/dev/sign-message",
+            &SignMessageRequest {
                 omni_account: omni_account.into(),
                 message_hex: hex::encode(message_bytes),
-            });
-        if let Some(jwt) = &self.session_jwt {
-            req = req.header("Authorization", format!("Bearer {jwt}"));
-        }
-        let resp = req
-            .send()
-            .await
-            .map_err(|e| SignerClientError::Transport(format!("POST {url}: {e}")))?;
-        let status = resp.status().as_u16();
-        let body: serde_json::Value = resp
-            .json()
-            .await
-            .map_err(|e| SignerClientError::Transport(format!("parse JSON: {e}")))?;
-
-        if status == 200 {
-            let signature = body["signature"]
-                .as_str()
-                .ok_or_else(|| SignerClientError::Unexpected {
-                    status,
-                    error: None,
-                    message: Some("missing 'signature'".into()),
-                })?
-                .to_string();
-            let address = body["address"]
-                .as_str()
-                .ok_or_else(|| SignerClientError::Unexpected {
-                    status,
-                    error: None,
-                    message: Some("missing 'address'".into()),
-                })?
-                .to_string();
-            let key_version = body["key_version"].as_u64().unwrap_or(0) as u8;
-            return Ok(SignedMessage {
-                signature,
-                address,
-                key_version,
-            });
-        }
-        Err(map_error(status, &body))
+            },
+            self.session_jwt.as_deref(),
+        )
+        .await
     }
 
     async fn sign_eip712(
@@ -278,46 +177,48 @@ impl SignerClient for HttpSignerClient {
         omni_account: &str,
         typed_data: &TypedData,
     ) -> Result<SignedTypedData, SignerClientError> {
-        let url = format!("{}/dev/sign-typed-data", self.base_url);
-        let mut req = self.http.post(&url).json(&serde_json::json!({
-            "omni_account": omni_account,
-            "typed_data": typed_data,
-        }));
-        if let Some(jwt) = &self.session_jwt {
-            req = req.header("Authorization", format!("Bearer {jwt}"));
-        }
-        let resp = req
-            .send()
-            .await
-            .map_err(|e| SignerClientError::Transport(format!("POST {url}: {e}")))?;
-        let status = resp.status().as_u16();
-        let body: serde_json::Value = resp
-            .json()
-            .await
-            .map_err(|e| SignerClientError::Transport(format!("parse JSON: {e}")))?;
-
-        if status == 200 {
-            let pick = |k: &'static str| -> Result<String, SignerClientError> {
-                body[k]
-                    .as_str()
-                    .map(str::to_string)
-                    .ok_or_else(|| SignerClientError::Unexpected {
-                        status,
-                        error: None,
-                        message: Some(format!("missing '{k}'")),
-                    })
-            };
-            return Ok(SignedTypedData {
-                signature: pick("signature")?,
-                address: pick("address")?,
-                primary_type_hash: pick("primary_type_hash")?,
-                domain_separator: pick("domain_separator")?,
-                digest: pick("digest")?,
-                key_version: body["key_version"].as_u64().unwrap_or(0) as u8,
-            });
-        }
-        Err(map_error(status, &body))
+        signer_request(
+            &self.http,
+            &self.base_url,
+            "/dev/sign-typed-data",
+            &SignTypedDataRequest {
+                omni_account: omni_account.into(),
+                typed_data,
+            },
+            self.session_jwt.as_deref(),
+        )
+        .await
     }
+}
+
+async fn signer_request<Request: Serialize, Response: DeserializeOwned>(
+    http: &reqwest::Client,
+    base_url: &str,
+    path: &str,
+    body: &Request,
+    bearer: Option<&str>,
+) -> Result<Response, SignerClientError> {
+    let mut request = http.post(format!("{base_url}{path}")).json(body);
+    if let Some(bearer) = bearer {
+        request = request.bearer_auth(bearer);
+    }
+    let response = request
+        .send()
+        .await
+        .map_err(|error| SignerClientError::Transport(error.to_string()))?;
+    let status = response.status().as_u16();
+    let body: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|_| SignerClientError::Transport("invalid signer JSON response".into()))?;
+    if status != 200 {
+        return Err(map_error(status, &body));
+    }
+    serde_json::from_value(body).map_err(|_| SignerClientError::Unexpected {
+        status,
+        error: None,
+        message: Some("invalid signer response schema".into()),
+    })
 }
 
 /// Translate a non-2xx response body into a typed `SignerClientError`,
@@ -329,8 +230,12 @@ fn map_error(status: u16, body: &serde_json::Value) -> SignerClientError {
         (400, "invalid_omni_account") => SignerClientError::InvalidOmniAccount(message),
         (400, "invalid_message_hex") => SignerClientError::InvalidMessageHex(message),
         (400, "invalid_typed_data") => SignerClientError::InvalidTypedData(message),
-        (401, "unauthorized") => SignerClientError::Unauthorized(message),
-        (503, "signer_disabled") => SignerClientError::SignerDisabled(message),
+        (401, "unauthorized") | (403, "actor_not_authorized") => {
+            SignerClientError::Unauthorized(message)
+        }
+        (503, "signer_disabled" | "signer_auth_not_configured") => {
+            SignerClientError::SignerDisabled(message)
+        }
         (500, "internal") => SignerClientError::Internal(message),
         _ => SignerClientError::Unexpected {
             status,
@@ -348,37 +253,6 @@ fn map_error(status: u16, body: &serde_json::Value) -> SignerClientError {
     }
 }
 
-// ─── #552: device-domain client (delegate K10 custodied IN the signer) ──────
-
-/// Successful response from `/dev/derive-device` (#552): the delegate's
-/// derived K10 address, its `device_key_hash`, and a fresh `pop_sig` over the
-/// canonical agent-pop payload (computed signer-side).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DerivedDevice {
-    pub address: String,
-    pub device_key_hash: String,
-    pub pop_sig: String,
-    pub key_version: u8,
-}
-
-/// The STRUCTURED cap-PoP fields for `/dev/sign-device-cap-pop` (#552). The
-/// signer recomputes `cap_pop_payload(...)` from these itself — a caller
-/// prehash is never accepted, so the device key can only ever sign the two
-/// domain-restricted payload shapes.
-#[derive(Debug, Clone)]
-pub struct DeviceCapPopFields {
-    pub actor_omni: String,
-    pub operator_omni: String,
-    pub service: String,
-    pub op: String,
-    pub data_class: String,
-    pub client_nonce: String,
-    pub client_ts: u64,
-}
-
-/// #552 — client for the DEVICE-domain signer endpoints. The bearer J1 is
-/// passed PER CALL (not stored): the sandbox's session rotates on every
-/// resolve, and the #427 spawn-build uses the master's request bearer.
 pub struct DeviceSignerClient {
     base_url: String,
     http: reqwest::Client,
@@ -392,100 +266,142 @@ impl DeviceSignerClient {
         }
     }
 
-    async fn post_json(
-        &self,
-        path: &str,
-        body: serde_json::Value,
-        bearer: &str,
-    ) -> Result<serde_json::Value, SignerClientError> {
-        let url = format!("{}{path}", self.base_url);
-        let resp = self
-            .http
-            .post(&url)
-            .header("Authorization", format!("Bearer {bearer}"))
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| SignerClientError::Transport(format!("POST {url}: {e}")))?;
-        let status = resp.status().as_u16();
-        let body: serde_json::Value = resp
-            .json()
-            .await
-            .map_err(|e| SignerClientError::Transport(format!("parse JSON: {e}")))?;
-        if status == 200 {
-            return Ok(body);
-        }
-        let code = body["error"].as_str().unwrap_or("");
-        let msg = body["message"].as_str().unwrap_or("").to_string();
-        match code {
-            // The device endpoints' own refusals, mapped onto the caller
-            // semantics the daemon already drives retries with.
-            "actor_not_authorized" => Err(SignerClientError::Unauthorized(msg)),
-            "signer_auth_not_configured" => Err(SignerClientError::SignerDisabled(msg)),
-            _ => Err(map_error(status, &body)),
-        }
-    }
-
-    fn require_str(body: &serde_json::Value, key: &str) -> Result<String, SignerClientError> {
-        body[key]
-            .as_str()
-            .map(str::to_string)
-            .ok_or_else(|| SignerClientError::Unexpected {
-                status: 200,
-                error: None,
-                message: Some(format!("missing '{key}'")),
-            })
-    }
-
-    /// `POST /dev/derive-device`. `label` engages the master-parentage arm
-    /// (the #427 spawn-build path); `None` = the actor's own J1.
     pub async fn derive_device(
         &self,
         actor_omni: &str,
         label: Option<&str>,
         bearer: &str,
     ) -> Result<DerivedDevice, SignerClientError> {
-        let mut req = serde_json::json!({ "actor_omni": actor_omni });
-        if let Some(l) = label {
-            req["label"] = serde_json::json!(l);
-        }
-        let body = self.post_json("/dev/derive-device", req, bearer).await?;
-        Ok(DerivedDevice {
-            address: Self::require_str(&body, "address")?,
-            device_key_hash: Self::require_str(&body, "device_key_hash")?,
-            pop_sig: Self::require_str(&body, "pop_sig")?,
-            key_version: body["key_version"].as_u64().unwrap_or(0) as u8,
-        })
+        signer_request(
+            &self.http,
+            &self.base_url,
+            "/dev/derive-device",
+            &DeriveDeviceRequest {
+                actor_omni: actor_omni.into(),
+                label: label.map(str::to_owned),
+            },
+            Some(bearer),
+        )
+        .await
     }
 
-    /// `POST /dev/sign-device-cap-pop` — returns the #76 PoP signature.
     pub async fn sign_cap_pop(
         &self,
-        f: &DeviceCapPopFields,
+        fields: &DeviceCapPopFields,
         bearer: &str,
     ) -> Result<String, SignerClientError> {
-        let body = self
-            .post_json(
-                "/dev/sign-device-cap-pop",
-                serde_json::json!({
-                    "actor_omni":    f.actor_omni,
-                    "operator_omni": f.operator_omni,
-                    "service":       f.service,
-                    "op":            f.op,
-                    "data_class":    f.data_class,
-                    "client_nonce":  f.client_nonce,
-                    "client_ts":     f.client_ts,
-                }),
-                bearer,
-            )
-            .await?;
-        Self::require_str(&body, "signature")
+        let response: SignedDeviceCapPop = signer_request(
+            &self.http,
+            &self.base_url,
+            "/dev/sign-device-cap-pop",
+            fields,
+            Some(bearer),
+        )
+        .await?;
+        Ok(response.signature)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn malformed_signer_versions_are_rejected_without_defaulting_or_truncation() {
+        use axum::{extract::State, routing::post, Json, Router};
+        use serde_json::{json, Value};
+        use std::sync::{Arc, RwLock};
+
+        let valid = json!({"address":"synthetic-address", "signature":"synthetic-signature",
+            "primary_type_hash":"synthetic-hash", "domain_separator":"synthetic-domain",
+            "digest":"synthetic-digest", "device_key_hash":"synthetic-device", "pop_sig":"synthetic-proof", "key_version":1});
+        let response = Arc::new(RwLock::new(valid.clone()));
+        async fn reply(State(response): State<Arc<RwLock<Value>>>) -> Json<Value> {
+            Json(response.read().unwrap().clone())
+        }
+        let router = Router::new()
+            .route("/dev/derive-address", post(reply))
+            .route("/dev/sign-message", post(reply))
+            .route("/dev/sign-typed-data", post(reply))
+            .route("/dev/derive-device", post(reply))
+            .route("/dev/sign-device-cap-pop", post(reply))
+            .with_state(response.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+        let wallet = HttpSignerClient::new(&endpoint);
+        let device = DeviceSignerClient::new(endpoint);
+        let fields = DeviceCapPopFields {
+            actor_omni: "synthetic-owner".into(),
+            operator_omni: "synthetic-owner".into(),
+            service: "synthetic-service".into(),
+            op: "fetch".into(),
+            data_class: "memory".into(),
+            client_nonce: "synthetic-nonce".into(),
+            client_ts: 1,
+        };
+        let typed_data: TypedData =
+            serde_json::from_value(json!({"types":{}, "primaryType":"Synthetic",
+            "domain":{}, "message":{}}))
+            .unwrap();
+        for version in [
+            Some(json!(1)),
+            None,
+            Some(Value::Null),
+            Some(json!(-1)),
+            Some(json!(256)),
+            Some(json!(1.5)),
+            Some(json!("synthetic-confidential-value")),
+        ] {
+            let mut body = valid.clone();
+            match version.clone() {
+                Some(value) => body["key_version"] = value,
+                None => {
+                    body.as_object_mut().unwrap().remove("key_version");
+                }
+            }
+            *response.write().unwrap() = body;
+            let results = [
+                wallet
+                    .derive_address("synthetic-owner")
+                    .await
+                    .map(|reply| reply.key_version),
+                wallet
+                    .sign_eip191("synthetic-owner", b"synthetic-message")
+                    .await
+                    .map(|reply| reply.key_version),
+                wallet
+                    .sign_eip712("synthetic-owner", &typed_data)
+                    .await
+                    .map(|reply| reply.key_version),
+                device
+                    .derive_device("synthetic-owner", None, "synthetic-session")
+                    .await
+                    .map(|reply| reply.key_version),
+                device
+                    .sign_cap_pop(&fields, "synthetic-session")
+                    .await
+                    .map(|_| 1),
+            ];
+            for result in results {
+                if version == Some(json!(1)) {
+                    assert_eq!(result.unwrap(), 1);
+                } else {
+                    assert!(
+                        result.is_err(),
+                        "malformed version was accepted: {version:?}"
+                    );
+                    assert!(!result
+                        .unwrap_err()
+                        .to_string()
+                        .contains("synthetic-confidential-value"));
+                }
+            }
+        }
+        server.abort();
+    }
 
     #[test]
     fn map_error_recognizes_signer_disabled() {
