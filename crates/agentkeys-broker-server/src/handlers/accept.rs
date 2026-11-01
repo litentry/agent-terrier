@@ -284,6 +284,57 @@ pub fn load_accept_config() -> Result<(AcceptConfig, SigningKey), String> {
     accept_config_from_lookup(|name| std::env::var(name).ok())
 }
 
+pub async fn load_accept_build_config(
+    http: &reqwest::Client,
+) -> Result<(AcceptConfig, SigningKey), String> {
+    let (mut config, signer) = load_accept_config()?;
+    if config.gas_fees == [0; 32] {
+        let response = http
+            .post(&config.rpc_url)
+            .json(&serde_json::json!({"jsonrpc":"2.0","id":1,"method":"eth_gasPrice","params":[]}))
+            .send()
+            .await
+            .map_err(|_| "local gas quote request failed")?
+            .error_for_status()
+            .map_err(|_| "local gas quote request was rejected")?
+            .json::<serde_json::Value>()
+            .await
+            .map_err(|_| "invalid local gas quote response")?;
+        if response.get("error").is_some() {
+            return Err("local gas quote RPC failed".into());
+        }
+        let quote = response
+            .get("result")
+            .and_then(serde_json::Value::as_str)
+            .ok_or("missing local gas quote")?;
+        config.gas_fees = agentkeys_core::erc4337::quoted_gas_fees(quote)?;
+    }
+    Ok((config, signer))
+}
+
+fn configured_gas_fees(
+    profile: Option<&agentkeys_core::chain_profile::ChainProfile>,
+    rpc_url: &str,
+    chain_id: u64,
+) -> [u8; 32] {
+    if let Some(profile) = profile {
+        if profile.gas.max_fee_gwei > 0 {
+            return crate::sponsor::pack_u128_pair(
+                u128::from(profile.gas.max_priority_fee_gwei) * 1_000_000_000,
+                u128::from(profile.gas.max_fee_gwei) * 1_000_000_000,
+            );
+        }
+        if chain_id == profile.chain_id
+            && profile
+                .require_local_development(true, Some(rpc_url))
+                .is_ok()
+        {
+            return [0; 32];
+        }
+    }
+    crate::sponsor::pack_u128_pair(DEF_MAX_PRIORITY_FEE, DEF_MAX_FEE)
+}
+
 fn accept_config_from_lookup(
     lookup: impl Fn(&str) -> Option<String>,
 ) -> Result<(AcceptConfig, SigningKey), String> {
@@ -373,22 +424,7 @@ fn accept_config_from_lookup(
         DEF_PRE_VERIFICATION_GAS,
         env_profile,
     );
-    // gas_fees come from the chain's real fee market (its compiled profile, gwei→wei),
-    // with the broker DEF as the fallback for a chain with no usable profile fee
-    // (legacy/anvil maxFee=0). The old hardcoded 40 gwei is Heima's base-fee scale; on
-    // Base (~0.005 gwei base) it reserved a ~0.16 ETH UserOp prefund the paymaster
-    // deposit can't cover — a false AA31 the moment the AA13 deploy-gas was fixed.
-    let (max_priority_fee, max_fee) = resolved_profile
-        .as_ref()
-        .map(|p| (p.gas.max_priority_fee_gwei, p.gas.max_fee_gwei))
-        .filter(|&(_, max_fee_gwei)| max_fee_gwei > 0)
-        .map(|(prio_gwei, max_fee_gwei)| {
-            (
-                prio_gwei as u128 * 1_000_000_000,
-                max_fee_gwei as u128 * 1_000_000_000,
-            )
-        })
-        .unwrap_or((DEF_MAX_PRIORITY_FEE, DEF_MAX_FEE));
+    let gas_fees = configured_gas_fees(resolved_profile.as_ref(), &rpc_url, chain_id);
 
     let cfg = AcceptConfig {
         rpc_url,
@@ -403,7 +439,7 @@ fn accept_config_from_lookup(
             DEF_CALL_GAS_LIMIT,
         ),
         pre_verification_gas: u256_word(pre_verification_gas_amt),
-        gas_fees: crate::sponsor::pack_u128_pair(max_priority_fee, max_fee),
+        gas_fees,
         paymaster_verification_gas_limit: DEF_PAYMASTER_VERIFICATION_GAS,
         paymaster_post_op_gas_limit: DEF_PAYMASTER_POST_OP_GAS,
     };
@@ -641,8 +677,9 @@ pub async fn accept_build(
     }
 
     // 2. config + co-sign key from env.
-    let (cfg, broker_sk) =
-        load_accept_config().map_err(|e| aerr(StatusCode::SERVICE_UNAVAILABLE, e))?;
+    let (cfg, broker_sk) = load_accept_build_config(&state.http)
+        .await
+        .map_err(|e| aerr(StatusCode::SERVICE_UNAVAILABLE, e))?;
 
     // #427: a non-device accept binds a DELEGATE and consumes an agent slot —
     // pre-check the allowance for the loud early 409 (the contract enforces
@@ -1128,6 +1165,45 @@ pub async fn accept_submit(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_guarded_local_profiles_with_zero_fees_select_live_quotes() {
+        use agentkeys_core::chain_profile::{ChainKind, ChainProfile};
+        let mut profile = ChainProfile::load_builtin("anvil").unwrap();
+        let legacy = crate::sponsor::pack_u128_pair(DEF_MAX_PRIORITY_FEE, DEF_MAX_FEE);
+        let fees = |profile: &ChainProfile| {
+            configured_gas_fees(Some(profile), &profile.rpc.http, profile.chain_id)
+        };
+        assert_eq!(fees(&profile), [0; 32]);
+        assert_eq!(
+            configured_gas_fees(None, &profile.rpc.http, profile.chain_id),
+            legacy
+        );
+        assert_eq!(
+            configured_gas_fees(Some(&profile), "https://example.invalid", profile.chain_id),
+            legacy
+        );
+        assert_eq!(
+            configured_gas_fees(Some(&profile), &profile.rpc.http, profile.chain_id + 1),
+            legacy
+        );
+        profile.gas.max_priority_fee_gwei = 3;
+        profile.gas.max_fee_gwei = 7;
+        assert_eq!(
+            fees(&profile),
+            crate::sponsor::pack_u128_pair(3_000_000_000, 7_000_000_000)
+        );
+        profile.chain_kind = ChainKind::EthereumL1;
+        assert_eq!(
+            fees(&profile),
+            crate::sponsor::pack_u128_pair(3_000_000_000, 7_000_000_000)
+        );
+        profile.gas.max_fee_gwei = 0;
+        assert_eq!(fees(&profile), legacy);
+        profile.chain_kind = ChainKind::LocalDev;
+        profile.chain_id += 1;
+        assert_eq!(fees(&profile), legacy);
+    }
 
     fn initial_registration() -> (crate::sponsor::PackedUserOp, [u8; 32], [u8; 20], [u8; 20]) {
         use agentkeys_core::erc4337::*;

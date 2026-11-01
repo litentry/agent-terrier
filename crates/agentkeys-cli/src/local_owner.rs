@@ -568,14 +568,9 @@ pub async fn prepare(context: &CommandContext, options: &OwnerOptions) -> Result
         )
     };
     let gas_price = chain.rpc("eth_gasPrice", json!([])).await?;
-    let gas_price = u128::from_str_radix(
-        gas_price
-            .as_str()
-            .and_then(|value| value.strip_prefix("0x"))
-            .context("invalid gas quote")?,
-        16,
-    )?;
-    let gas_price = gas_price.checked_mul(2).context("gas quote overflow")?;
+    let gas_fees =
+        agentkeys_core::erc4337::quoted_gas_fees(gas_price.as_str().context("invalid gas quote")?)
+            .map_err(anyhow::Error::msg)?;
     let verification_gas = options
         .verification_gas
         .or(chain.profile.gas.verification_gas_limit)
@@ -600,7 +595,7 @@ pub async fn prepare(context: &CommandContext, options: &OwnerOptions) -> Result
                 .pre_verification_gas
                 .unwrap_or(DEFAULT_PRE_VERIFICATION_GAS),
         ),
-        gas_fees: pack_u128_pair(gas_price, gas_price),
+        gas_fees,
         paymaster_and_data: Vec::new(),
         signature: Vec::new(),
     };

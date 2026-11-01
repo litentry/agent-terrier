@@ -4,7 +4,7 @@ from pathlib import Path
 import subprocess
 import sys
 
-from . import chain, contracts, data, deployment, local_state, models, owner, services, test_lanes
+from . import agent, chain, contracts, data, deployment, local_state, models, owner, services, test_lanes
 
 
 def main():
@@ -41,6 +41,18 @@ def main():
     credential_parser.add_argument("service")
     credential_parser.add_argument("--name", required=True, help="Local owner name")
     credential_parser.add_argument("--secret-stdin", action="store_true", help="Read exact UTF-8 input for store")
+    agent_parser = commands.add_parser("agent", help="Create or archive local agents with protected development keys")
+    agent_commands = agent_parser.add_subparsers(dest="action", required=True)
+    for action in ("spawn", "archive"):
+        operation = agent_commands.add_parser(action)
+        operation.add_argument("--name", required=True, help="Existing local owner name")
+        operation.add_argument("--memory-ns", default="")
+        if action == "spawn":
+            operation.add_argument("--label", required=True)
+            operation.add_argument("--preset-id", default="")
+            operation.add_argument("--memory-inherited", action="store_true")
+        else:
+            operation.add_argument("--device-key-hash", required=True)
     owner_parser = commands.add_parser("owner", help="Real local owner registration and scope operations")
     owner_parser.add_argument("action", choices=["register", "grant", "revoke", "bind", "unbind", "login"])
     owner_parser.add_argument("--name", required=True, help="Local owner name")
@@ -75,6 +87,9 @@ def main():
             print(json.dumps(result, indent=2))
             return 0
         state = local_state.state_directory(repository)
+        if arguments.command == "agent":
+            with local_state.exclusive_lock(state / "operation.lock"):
+                return agent.execute(repository, state, arguments)
         if arguments.command == "cred":
             with local_state.exclusive_lock(state / "operation.lock"):
                 return data.credential(repository, state, arguments.action, arguments.name,

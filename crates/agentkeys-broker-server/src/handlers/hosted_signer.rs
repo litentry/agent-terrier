@@ -382,7 +382,9 @@ pub async fn build(
     Json(request): Json<HostedSignerBuildRequest>,
 ) -> Result<Json<BuildAcceptResponse>, BrokerError> {
     let omni = operator(&state, &headers).await?;
-    let (config, broker_key) = load_accept_config().map_err(BrokerError::BackendUnreachable)?;
+    let (config, broker_key) = crate::handlers::accept::load_accept_build_config(&state.http)
+        .await
+        .map_err(BrokerError::BackendUnreachable)?;
     let account = current_account(&state, &config.rpc_url, &config.registry, &omni).await?;
     let operator_nonce = operator_nonce(&state, &config.rpc_url, &config.registry, &omni).await?;
     let current_time = now()?;

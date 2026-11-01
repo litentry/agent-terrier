@@ -50,8 +50,7 @@ use agentkeys_core::erc4337::{
 
 use crate::handlers::accept::{
     addr20, aerr, bearer, call_entrypoint_nonce, call_operator_master_wallet, env_profile,
-    eth_address_has_code, eth_call, load_accept_config, norm_omni, AcceptConfig,
-    SPONSOR_WINDOW_SECS,
+    eth_address_has_code, eth_call, norm_omni, AcceptConfig, SPONSOR_WINDOW_SECS,
 };
 use crate::sponsored_accept::{assemble_register_userop, AcceptUserOpParams, BuildAcceptResponse};
 use crate::state::SharedState;
@@ -288,8 +287,9 @@ pub async fn register_build(
     }
 
     // 2. config + co-sign key (shared with accept — same drift guard + gas profile).
-    let (cfg, broker_sk) =
-        load_accept_config().map_err(|e| aerr(StatusCode::SERVICE_UNAVAILABLE, e))?;
+    let (cfg, broker_sk) = crate::handlers::accept::load_accept_build_config(&state.http)
+        .await
+        .map_err(|e| aerr(StatusCode::SERVICE_UNAVAILABLE, e))?;
     // Register is sponsored-only: the D6 collapse's premise is zero deployer txs in
     // the user path, so it has no unsponsored fallback (unlike accept).
     if cfg.paymaster.is_none() {

@@ -569,47 +569,48 @@ pub fn revoked_device_key_hashes(call_data: &[u8]) -> Vec<String> {
         .collect()
 }
 
-/// Teardown hook for the shared submit relay: after a CONFIRMED receipt, kill
-/// the sandbox of every device the batch revoked and emit one
-/// `SandboxTeardown` envelope per killed instance. Best-effort — the chain tx
-/// is already final, so failures WARN (an expired instance dies on its own
-/// timeout anyway; the delegate can no longer resolve a new one because the
-/// binding is revoked).
+/// Report cleanup separately from the already confirmed chain revocation.
 pub async fn teardown_for_confirmed_batch(
     state: &SharedState,
     session_omni: [u8; 32],
     call_data: &[u8],
-) {
+) -> Vec<agentkeys_protocol::RuntimeTeardownOutcome> {
     let revoked = revoked_device_key_hashes(call_data);
-    // #546 — the durable spawn context dies WITH the binding (bounds the
-    // K10-at-rest window), on every host — even one without sandbox config.
-    for device_key_hash in &revoked {
-        match state.spawn_context_store.delete(device_key_hash) {
+    let mut outcomes = Vec::new();
+    for device_key_hash in revoked {
+        let mut outcome = agentkeys_protocol::RuntimeTeardownOutcome {
+            device_key_hash: device_key_hash.clone(),
+            context_removed: false,
+            runtime_stopped: false,
+            error: None,
+        };
+        match state.spawn_context_store.delete(&device_key_hash) {
             Ok(true) => tracing::info!(
                 device_key_hash = %device_key_hash,
                 "#546 spawn context deleted for the revoked binding"
             ),
             Ok(false) => {}
-            Err(e) => tracing::warn!(
-                device_key_hash = %device_key_hash,
-                error = %e,
-                "#546 spawn-context delete FAILED for a revoked binding — stale row (and its \
-                 K10 secret) remains; delete it manually from spawn_contexts.sqlite"
-            ),
+            Err(error) => {
+                tracing::warn!(%device_key_hash, %error, "revoked spawn-context cleanup failed");
+                outcome.error = Some("spawn_context_delete_failed".into());
+            }
         }
-    }
-    let Some(backend) = state.sandbox.as_ref() else {
-        return;
-    };
-    for device_key_hash in revoked {
+        outcome.context_removed = outcome.error.is_none();
+        let Some(backend) = state.sandbox.as_ref() else {
+            outcome.error = Some("runtime_not_configured".into());
+            outcomes.push(outcome);
+            continue;
+        };
         match backend.kill_for_device(&device_key_hash).await {
             Ok(killed) if killed.is_empty() => {
+                outcome.runtime_stopped = true;
                 tracing::info!(
                     device_key_hash = %device_key_hash,
                     "#377 unpair teardown: no live sandbox for the revoked device (no-op)"
                 );
             }
             Ok(killed) => {
+                outcome.runtime_stopped = true;
                 for sandbox_id in killed {
                     tracing::info!(
                         device_key_hash = %device_key_hash,
@@ -636,6 +637,7 @@ pub async fn teardown_for_confirmed_batch(
                 }
             }
             Err(e) => {
+                outcome.error = Some("runtime_stop_failed".into());
                 tracing::warn!(
                     device_key_hash = %device_key_hash,
                     error = %format!("{e:#}"),
@@ -643,7 +645,9 @@ pub async fn teardown_for_confirmed_batch(
                 );
             }
         }
+        outcomes.push(outcome);
     }
+    outcomes
 }
 
 async fn emit_spawn(

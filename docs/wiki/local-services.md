@@ -1,4 +1,4 @@
-The local service launcher starts the real broker, development signer, authenticated model relay, transaction submitter and four storage workers, each with its own persistent object database. It uses the existing chain controller, signing implementation, key generators, protected state files and worker executables. It can configure the broker to use a reviewed local agent image. It does not start the model server or web console yet; full agent creation remains under integration.
+The local service launcher starts the real broker, development signer, authenticated model relay, transaction submitter and four storage workers, each with its own persistent object database. It uses the existing chain controller, signing implementation, key generators, protected state files and worker executables. It can configure the broker to use a reviewed local agent image. It does not start the model server or web console yet. Protected [agent creation and archive](./local-agents.md) use the same service group and the canonical lifecycle implementation.
 
 ## Start the services
 
@@ -117,3 +117,5 @@ The explicit qualifier starts actual contracts and all twelve service processes,
 The credential qualifier drives `terrier cred` through real owner sessions. It checks exact round-trip bytes and restart persistence, cross-owner isolation, expired/invalid/mismatched sessions, private-file permissions, missing keys, deployment mismatch, input bounds and remote endpoint refusal. Redirect and proxy controls prove no follow-on request reaches the alternate listener. Denied stores must leave the database unchanged, and error output must omit bearer and credential values.
 
 The bundler qualifier submits real P-256-signed grant and revocation operations through the supervised service. A tampered signature must produce a failed chain receipt and leave the grant unchanged; the authorized operation must then succeed. It also verifies low-funds reporting, restart persistence, remote/non-loopback refusal and key-generation non-overwrite.
+
+The [agent qualifier](./local-agents.md#explicit-qualification) submits real creation and archive operations with a reviewed Docker image. It checks protected session/file denials, cross-owner archive denial, actual runtime cleanup, retained volume data and relay revocation. It runs separately from the fast CLI transport and receipt tests.

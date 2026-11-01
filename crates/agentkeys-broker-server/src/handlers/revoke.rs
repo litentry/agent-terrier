@@ -28,7 +28,7 @@ use agentkeys_core::erc4337::{AgentRegister, ScopeGrant};
 
 use crate::handlers::accept::{
     aerr, bearer, call_entrypoint_nonce, call_operator_master_wallet, eth_address_has_code,
-    eth_call, load_accept_config, norm_omni, selector, AcceptConfig, SPONSOR_WINDOW_SECS,
+    eth_call, norm_omni, selector, AcceptConfig, SPONSOR_WINDOW_SECS,
 };
 use crate::sponsored_accept::{assemble_revoke_userop, AcceptUserOpParams, BuildAcceptResponse};
 use crate::state::SharedState;
@@ -228,8 +228,9 @@ pub async fn revoke_build(
         parse_revoke(&req).map_err(|e| aerr(StatusCode::BAD_REQUEST, e))?;
 
     // 2. config + co-sign key from env (shared with accept — same drift guard).
-    let (cfg, broker_sk) =
-        load_accept_config().map_err(|e| aerr(StatusCode::SERVICE_UNAVAILABLE, e))?;
+    let (cfg, broker_sk) = crate::handlers::accept::load_accept_build_config(&state.http)
+        .await
+        .map_err(|e| aerr(StatusCode::SERVICE_UNAVAILABLE, e))?;
 
     // 3. chain reads: the master P256Account + its EntryPoint nonce.
     let master_account =

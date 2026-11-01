@@ -226,8 +226,8 @@ pub struct GasConfig {
     /// `"eip1559"` or `"legacy"`. Anvil + some local dev chains use legacy.
     pub model: String,
     /// `maxPriorityFeePerGas` (gwei) for master UserOps. Wired into the op's
-    /// gas_fees by the broker (gwei→wei), falling back to the broker default when a
-    /// profile has no usable fee (legacy/anvil `max_fee_gwei == 0`).
+    /// gas_fees by the broker (gwei→wei). A zero maximum fee selects a live quote
+    /// only for guarded local development profiles; other profiles retain the default.
     pub max_priority_fee_gwei: u64,
     /// `maxFeePerGas` (gwei) for master UserOps — the chain's real fee ceiling, NOT
     /// a blanket value. It sizes the EntryPoint prefund reserve (× total gas), so on

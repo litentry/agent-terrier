@@ -354,9 +354,13 @@ pub(crate) async fn verified_finalization(
     let audit =
         crate::handlers::audit_emit::emit_for_confirmed_batch(operator, &packed.call_data).await;
     let lifecycle = current_lifecycle_calldata(state, config, operator, &packed.call_data).await?;
-    crate::handlers::sandbox::teardown_for_confirmed_batch(state, operator, &lifecycle).await;
-    let ceremony =
+    let teardown =
+        crate::handlers::sandbox::teardown_for_confirmed_batch(state, operator, &lifecycle).await;
+    let mut ceremony =
         crate::handlers::spawn::finalize_for_confirmed_batch(state, operator, &lifecycle).await;
+    if !teardown.is_empty() {
+        ceremony.get_or_insert_with(|| json!({}))["runtime_teardown"] = json!(teardown);
+    }
     let mut response = json!({"ok":true,"tx_hash":transaction,"block_number":chain_receipt.get("blockNumber").and_then(Value::as_str).unwrap_or(""),"user_op_hash":expected,"audit_envelope_hashes":audit});
     if let Some(ceremony) = ceremony {
         response["ceremony"] = ceremony;
@@ -608,6 +612,9 @@ mod tests {
 
     #[test]
     fn transient_ceremony_errors_are_not_completed_cache_entries() {
+        assert!(contains_finalization_error(
+            &json!({"runtime_teardown":[{"runtime_stopped":false,"error":"runtime_stop_failed"}]})
+        ));
         assert!(contains_finalization_error(
             &json!({"spawned":[{"context_recovered":false,"error":"missing context"}]})
         ));

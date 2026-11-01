@@ -16,10 +16,21 @@ use serde_json::{json, Value};
 
 fn client() -> Result<reqwest::Client> {
     reqwest::Client::builder()
+        .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(std::time::Duration::from_secs(20))
         .build()
         .context("build http client")
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("agent request failed (HTTP {0})")]
+pub(crate) struct RequestStatus(pub u16);
+
+#[derive(Debug, thiserror::Error)]
+#[error("submission outcome is unknown; inspect the operation receipt before retrying")]
+pub(crate) struct SubmissionUncertain {
+    pub user_op_hash: String,
 }
 
 /// Resolve the master `J1` bearer: explicit `session_bearer` if non-empty, else
@@ -332,19 +343,32 @@ async fn software_sign_and_submit(
     use agentkeys_backend_client::protocol::SubmitAcceptUserOpRequest;
     let assertion = software_assertion(development, k11_key_file, user_op_hash, rp_id)?;
     let submit_body = SubmitAcceptUserOpRequest { user_op, assertion };
+    let uncertain = || SubmissionUncertain {
+        user_op_hash: user_op_hash.to_owned(),
+    };
     let resp = client()?
         .post(format!("{base}{submit_path}"))
         .bearer_auth(bearer)
         .json(&submit_body)
         .send()
         .await
-        .with_context(|| format!("POST {submit_path}"))?;
+        .map_err(|_| uncertain())?;
     let status = resp.status();
     let text = resp.text().await.unwrap_or_default();
-    if !status.is_success() {
-        return Err(anyhow!("submit failed: HTTP {status}: {text}"));
+    if status.is_server_error() {
+        return Err(uncertain().into());
     }
-    serde_json::from_str(&text).with_context(|| format!("parse submit: {text}"))
+    if !status.is_success() {
+        return Err(RequestStatus(status.as_u16()).into());
+    }
+    let receipt: Value = serde_json::from_str(&text).map_err(|_| uncertain())?;
+    if !receipt["user_op_hash"]
+        .as_str()
+        .is_some_and(|hash| hash.eq_ignore_ascii_case(user_op_hash))
+    {
+        return Err(uncertain().into());
+    }
+    Ok(receipt)
 }
 
 /// `agentkeys agent spawn` — the HEADLESS #427 delegate spawn: ONE ceremony,
@@ -397,9 +421,7 @@ pub async fn agent_spawn(
     let status = resp.status();
     let text = resp.text().await.unwrap_or_default();
     if !status.is_success() {
-        // The allowance 409 rides through verbatim — it already names the
-        // quota + the actions (#425 loud-and-actionable acceptance).
-        return Err(anyhow!("spawn build failed: HTTP {status}: {text}"));
+        return Err(RequestStatus(status.as_u16()).into());
     }
     let built: BuildSpawnUserOpResponse =
         serde_json::from_str(&text).with_context(|| format!("parse build: {text}"))?;
@@ -489,7 +511,7 @@ pub async fn agent_archive(
     let status = resp.status();
     let text = resp.text().await.unwrap_or_default();
     if !status.is_success() {
-        return Err(anyhow!("archive build failed: HTTP {status}: {text}"));
+        return Err(RequestStatus(status.as_u16()).into());
     }
     let built: BuildArchiveUserOpResponse =
         serde_json::from_str(&text).with_context(|| format!("parse build: {text}"))?;
@@ -528,7 +550,7 @@ pub async fn agent_archive(
 
 /// The J1 bearer's own `agentkeys.omni_account` claim — the operator identity
 /// the broker authorizes the ceremony under.
-fn operator_omni_from_bearer(bearer: &str) -> Result<String> {
+pub(crate) fn operator_omni_from_bearer(bearer: &str) -> Result<String> {
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use base64::Engine as _;
     let payload_b64 = bearer

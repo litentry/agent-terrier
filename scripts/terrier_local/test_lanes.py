@@ -34,7 +34,8 @@ RUST_COMPONENTS = {
                ("signer-startup", "agentkeys-mock-server", "--test", "local_signer_startup", "")],
     "daemon": [("daemon", "agentkeys-daemon", "--bin", "agentkeys-daemon", "")],
     "storage": [("storage", "agentkeys-local-store", "--lib", None, "")],
-    "cli": [("cli", "agentkeys-cli", "--lib", None, "")],
+    "cli": [("cli", "agentkeys-cli", "--lib", None, ""),
+            ("cli-agent-transport", "agentkeys-cli", "--test", "local_agent_transport", "")],
 }
 SOURCE_COMMANDS = (
     ("privacy", ["python3", "scripts/check-public.py"]),
