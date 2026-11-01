@@ -54,14 +54,19 @@ class AffectedTests(unittest.TestCase):
     def test_unknown_or_invalid_inputs_never_produce_an_empty_pass(self):
         root = Path("/synthetic/source")
         for paths in ([], ["unknown"], ["../README.md"], ["/README.md"], ["./README.md"],
-                      ["docs//page.md"], ["docs/../README.md"], [None], ["docs/page\n.md"],
-                      ["crates/agentkeys-chain/src/Example.sol"], ["provisioner-scripts/new.js"]):
+                      ["docs//page.md"], ["docs/../README.md"], [None], ["docs/page\n.md"]):
             with self.subTest(paths=paths), self.assertRaises(ValueError):
                 affected.select(root, paths, workspace(root))
         with self.assertRaises(ValueError):
             test_lanes.run(root, "affected", ["ui"], plan=True, changed_files=["README.md"])
         with self.assertRaises(ValueError):
             test_lanes.run(root, "core", [], plan=True, changed_files=["README.md"])
+
+    def test_contract_and_provisioner_paths_select_fast_canonical_components(self):
+        root = Path("/synthetic/source")
+        plan = affected.select(root, ["crates/agentkeys-chain/src/Example.sol", "provisioner-scripts/new.js"], workspace(root))
+        self.assertEqual(plan["components"], ["contracts", "provisioner"])
+        self.assertEqual(plan["rust_suites"], [])
 
     def test_json_input_has_a_required_array_shape(self):
         with tempfile.TemporaryDirectory() as directory:

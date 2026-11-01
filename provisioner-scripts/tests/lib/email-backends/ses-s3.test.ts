@@ -174,14 +174,7 @@ describe("ses-s3 backend", () => {
     expect(code).toBe("345678");
   });
 
-  // Regression guard: Stage 6 demo (2026-04-21) discovered OpenRouter/Clerk
-  // verification emails arrive From "OpenRouter <notifications@openrouter.ai>",
-  // not from a clerk.* or noreply@ sender. The scraper's magic-link branch must
-  // accept this sender AND correctly extract a quoted-printable-encoded URL.
-  // A prior regex only matched /noreply|clerk|accounts/ and silently timed out
-  // for 90s on every run. This test uses the exact observed From header plus a
-  // realistic Clerk-style QP-encoded HTML body so regex drift can't slip past.
-  describe("regression — OpenRouter magic-link verification (real-world From + QP body)", () => {
+  describe("synthetic magic-link verification", () => {
     // Exact regexes as used in openrouter-cdp.ts magic-link branch. If those
     // diverge, this test catches it.
     const MAGIC_LINK_FROM = /@openrouter\.ai|clerk/i;
@@ -190,12 +183,9 @@ describe("ses-s3 backend", () => {
     const MAGIC_LINK_URL =
       /(https:\/\/[^\s<>"'\)]*(?:clerk|\/verify|ticket=|verification)[^\s<>"'\)]*)/i;
 
-    const REAL_FROM = "OpenRouter <notifications@openrouter.ai>";
-    // Real subject observed on 2026-04-21; NOT "Verify..." — must match anyway.
-    const REAL_SUBJECT = "Your sign up link";
-    // Quoted-printable HTML body as Clerk/SendGrid actually emits: soft-wrap at
-    // 76 chars (=\n), =3D for "=", =2F for "/", etc.
-    const REAL_QP_BODY = [
+    const SAMPLE_FROM = "OpenRouter <notifications@openrouter.ai>";
+    const SAMPLE_SUBJECT = "Your sign up link";
+    const SAMPLE_QP_BODY = [
       "Content-Type: text/html; charset=utf-8",
       "Content-Transfer-Encoding: quoted-printable",
       "",
@@ -206,15 +196,15 @@ describe("ses-s3 backend", () => {
       "</body></html>",
     ].join("\r\n");
 
-    const realVerifyEml = [
-      `From: ${REAL_FROM}`,
-      `Subject: ${REAL_SUBJECT}`,
+    const sampleVerificationEmail = [
+      `From: ${SAMPLE_FROM}`,
+      `Subject: ${SAMPLE_SUBJECT}`,
       `MIME-Version: 1.0`,
-      REAL_QP_BODY,
+      SAMPLE_QP_BODY,
     ].join("\r\n");
 
     it("accepts notifications@openrouter.ai and extracts the Clerk URL", async () => {
-      const s3 = makeMockS3([realVerifyEml]);
+      const s3 = makeMockS3([sampleVerificationEmail]);
 
       const url = await fetchViaSesS3(
         {
@@ -233,7 +223,7 @@ describe("ses-s3 backend", () => {
 
     it("skips non-verify emails from the same sender", async () => {
       const marketingEml = buildEml(
-        REAL_FROM,
+        SAMPLE_FROM,
         "Weekly credit summary from OpenRouter",
         "You used 1,234 credits this week."
       );
@@ -281,10 +271,6 @@ describe("ses-s3 backend", () => {
       expect(MAGIC_LINK_SUBJECT.test(subject)).toBe(false);
     });
 
-    // Stage 6 demo (2026-04-21): bucket accumulated verification emails across
-    // runs. Clerk tokens expire in ~10 min; matching an old email makes
-    // page.goto() land on an "expired link" page and the scraper times out on
-    // waitForURL. Backend must prefer fresh emails and reject stale ones.
     it("rejects verification emails older than freshnessGraceMs (prior-run leftovers)", async () => {
       const staleEml = [
         `From: OpenRouter <notifications@openrouter.ai>`,
@@ -346,24 +332,20 @@ describe("ses-s3 backend", () => {
       expect(url).not.toContain("STALE_OLD_TOKEN");
     });
 
-    // Real body captured from a live OpenRouter verification email (2026-04-21):
-    // the plain-text multipart part HTML-encodes `&` as `&amp;` inside the URL.
-    // This test verifies the backend extracts the full raw URL including `&amp;`;
-    // the scraper is responsible for decoding entities before page.goto().
     it("extracts URLs that contain &amp; (HTML-entity-encoded) from plain-text body", async () => {
-      const realWorldBody = [
+      const sampleBody = [
         "Content-Type: text/plain; charset=us-ascii",
         "",
-        "Use the following link to sign up to OpenRouter: https://clerk.openrouter.ai/v1/verify?_clerk_js_version=5.125.9&amp;token=eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJleHAiOjE3NzY3NjIyMjR9.abc123",
+        "Use the following link to sign up to OpenRouter: https://clerk.openrouter.ai/v1/verify?_clerk_js_version=test-client&amp;token=synthetic-verification-token",
         "",
-        "This link will expire in 10 minutes.",
+        "Synthetic verification message.",
       ].join("\r\n");
 
       const eml = [
         `From: OpenRouter <notifications@openrouter.ai>`,
         `Subject: Your sign up link`,
         `MIME-Version: 1.0`,
-        realWorldBody,
+        sampleBody,
       ].join("\r\n");
 
       const s3 = makeMockS3([eml]);
@@ -379,13 +361,12 @@ describe("ses-s3 backend", () => {
       );
 
       expect(url).toContain("https://clerk.openrouter.ai/v1/verify");
-      expect(url).toContain("_clerk_js_version=5.125.9");
+      expect(url).toContain("_clerk_js_version=test-client");
       // Must capture past the &amp; boundary — this is the bug-regression guard.
-      expect(url).toContain("token=eyJ");
-      expect(url).toContain("abc123");
+      expect(url).toContain("token=synthetic-verification-token");
     });
 
-    it("ignores mixed bucket noise and returns only the real verify URL", async () => {
+    it("ignores mixed bucket noise and returns only the matching verification URL", async () => {
       const emls = [
         buildEml(
           "Amazon Web Services <no-reply-aws@amazon.com>",
@@ -393,16 +374,16 @@ describe("ses-s3 backend", () => {
           "ses notification"
         ),
         buildEml(
-          "Admin Wildmeta <agent@wildmeta.ai>",
+          "Example Service <operator@example.net>",
           "Internal note",
           "unrelated"
         ),
         buildEml(
-          REAL_FROM,
+          SAMPLE_FROM,
           "Weekly credit summary",
           "Not a verify email."
         ),
-        realVerifyEml,
+        sampleVerificationEmail,
       ];
       const s3 = makeMockS3(emls);
 

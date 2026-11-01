@@ -12,7 +12,7 @@ import time
 
 from . import contracts, affected
 
-COMPONENTS = ("protocol", "runtime", "broker", "signer", "relay", "bundler", "daemon", "storage", "cli", "ui", "display", "dsh", "managed")
+COMPONENTS = ("protocol", "runtime", "broker", "signer", "relay", "bundler", "daemon", "storage", "cli", "ui", "display", "dsh", "managed", "contracts", "provisioner", "chain", "services", "agents")
 RUNTIME_SUITE = ("runtime", "agentkeys-runtime", "--lib", None, "")
 CORE = (
     ("protocol", "agentkeys-protocol", "--lib", None, ""),
@@ -39,6 +39,11 @@ RUST_COMPONENTS = {
             ("cli-agent-transport", "agentkeys-cli", "--test", "local_agent_transport", "")],
 }
 QUALIFICATIONS = {
+    "contracts": (),
+    "provisioner": (),
+    "chain": ("qualify_local_chain.py", "qualify_local_signing.py", "qualify_local_binding.py", "qualify_local_owner.py", "qualify_local_login.py", "qualify_local_bundler.py"),
+    "services": ("qualify_local_services.py",),
+    "agents": ("qualify_local_agents.py",),
     "ui": ("qualify_public_web.py",),
     "storage": (
         "qualify_local_storage.py", "qualify_local_credentials.py", "qualify_local_config.py",
@@ -47,6 +52,7 @@ QUALIFICATIONS = {
     ),
 }
 QUALIFICATION_RUST = {
+    "contracts": [], "provisioner": [], "chain": [], "services": [], "agents": [],
     "ui": [],
     "storage": [*RUST_COMPONENTS["storage"],
                 ("worker-authority", "agentkeys-worker-creds", "--test", "local_storage", "")],
@@ -101,6 +107,16 @@ def rust_counts(result, output):
     return result
 
 
+def contract_counts(result, output):
+    matches = re.findall(r"^Suite result: (?:ok|FAILED)\. (\d+) passed; (\d+) failed; (\d+) skipped;", output, re.MULTILINE)
+    counts = {name: sum(int(row[index]) for row in matches)
+              for index, name in enumerate(("passed", "failed", "ignored"))}
+    result["tests"] = counts
+    if result["status"] == "passed" and (not counts["passed"] or counts["failed"]):
+        result["status"] = "empty-or-failed-suite"
+    return result
+
+
 def python_counts(result, output):
     totals = re.findall(r"^Ran (\d+) tests? in ", output, re.MULTILINE)
     skipped = re.findall(r"^OK \(skipped=(\d+)\)", output, re.MULTILINE)
@@ -113,6 +129,8 @@ def python_counts(result, output):
 
 
 def selection(lane, components):
+    if lane != "qualification" and set(components) & {"chain", "services", "agents"}:
+        raise ValueError("chain, services and agents require explicit qualification")
     if lane == "qualification":
         if not components or any(component not in QUALIFICATIONS for component in components):
             raise ValueError("qualification requires a supported component: " + ", ".join(QUALIFICATIONS))
@@ -145,11 +163,13 @@ def run(repository, lane, components, online=False, report_path=None, plan=False
             if not any(existing[1:] == suite[1:] for existing in rust):
                 rust.append(suite)
     builds = affected_plan["rust_builds"] if affected_plan else []
-    selected = [name + "-compile" for name, _ in builds] + [name for name, *_ in rust] + [value for value in components if value in ("ui", "display", "dsh", "managed")]
+    selected = [name + "-compile" for name, _ in builds] + [name for name, *_ in rust] + [value for value in components if value in ("ui", "display", "dsh", "managed", "contracts", "provisioner")]
     if lane in ("source", "core", "affected"):
         selected = [name for name, _ in SOURCE_COMMANDS] + selected
     qualification_scripts = list(dict.fromkeys(script for component in components for script in QUALIFICATIONS.get(component, ()))) if lane == "qualification" else []
     selected += [Path(script).stem for script in qualification_scripts]
+    if lane == "qualification" and "provisioner" in components:
+        selected.append("provisioner-browser")
     if plan:
         return {"lane": lane, "selected": selected, "downloads": online, "affected": affected_plan}, 0
     if report_path:
@@ -165,11 +185,13 @@ def run(repository, lane, components, online=False, report_path=None, plan=False
     diagnostics = Path(tempfile.mkdtemp(prefix="terrier-tests-"))
     checks = []
 
-    def check(name, phase, command, directory=repository, rust_test=False, extra_environment=None, python_test=False):
+    def check(name, phase, command, directory=repository, rust_test=False, extra_environment=None, python_test=False, contract_test=False):
         log_path = diagnostics / f"{len(checks):02d}-{name}.log"
         result = execute(command, directory, log_path, extra_environment=extra_environment)
         if rust_test:
             rust_counts(result, log_path.read_text(errors="replace"))
+        if contract_test:
+            contract_counts(result, log_path.read_text(errors="replace"))
         if python_test:
             python_counts(result, log_path.read_text(errors="replace"))
         result.update(name=name, phase=phase, log=log_path.name)
@@ -209,7 +231,16 @@ def run(repository, lane, components, online=False, report_path=None, plan=False
             continue
         executable, directory = executables[0]
         check(name, "execution", [executable, test_filter], directory, rust_test=True)
+    qualification_environment = {name: os.environ[name] for name in ("AGENT_TERRIER_CACHE_DIR", "AGENT_TERRIER_SOLC", "AGENT_TERRIER_FORGE") if name in os.environ}
     for component in dict.fromkeys(components):
+        if component == "contracts":
+            build_command = [sys.executable, "terrier", "contracts", "build"]
+            if not online:
+                build_command.append("--offline")
+            built, _ = check("contracts-build", "build", build_command, extra_environment=qualification_environment)
+            if built["status"] == "passed":
+                check("contracts", "execution", [sys.executable, "terrier", "contracts", "test", "--offline"],
+                      extra_environment=qualification_environment, contract_test=True)
         if component == "managed":
             build, log_path = check("managed-binaries", "build", ["cargo", "build", "--offline", "--locked",
                 "-p", "agentkeys-runtime", "-p", "agentkeys-daemon", "--bins", "--message-format=json"])
@@ -233,15 +264,18 @@ def run(repository, lane, components, online=False, report_path=None, plan=False
                 check("managed", "execution", ["node", "--test", "packages/agent-terrier-runtime/managed.test.mjs"],
                     extra_environment={"AGENT_TERRIER_TEST_RUNTIME_BINARY": executables["agent-terrier-runtime"],
                         "AGENT_TERRIER_TEST_DAEMON_BINARY": executables["agentkeys-daemon"]})
-        if component in ("ui", "display", "dsh"):
-            directory = repository / {"ui": "apps/parent-control", "display": "apps/device-display", "dsh": "packages"}[component]
+        if component in ("ui", "display", "dsh", "provisioner"):
+            directory = repository / {"ui": "apps/parent-control", "display": "apps/device-display", "dsh": "packages", "provisioner": "provisioner-scripts"}[component]
             if component == "display":
                 check("display-routes", "build", ["npm", "run", "generate-routes"], directory)
             check(component + "-types", "build", ["npm", "run", "typecheck"], directory)
             if component == "dsh":
                 check(component + "-build", "build", ["npm", "run", "build"], directory)
             check(component, "execution", ["npm", "test"], directory)
-    qualification_environment = {name: os.environ[name] for name in ("AGENT_TERRIER_CACHE_DIR", "AGENT_TERRIER_SOLC", "AGENT_TERRIER_FORGE") if name in os.environ}
+            if component == "provisioner" and lane == "qualification":
+                check("provisioner-browser", "execution", ["npm", "run", "test:browser"], directory)
+    if lane == "qualification" and "agents" in components:
+        qualification_environment.update({name: os.environ[name] for name in ("AGENT_TERRIER_TEST_AGENT_IMAGE", "AGENT_TERRIER_TEST_DOCKER_SOCKET") if name in os.environ})
     for script in qualification_scripts:
         check(Path(script).stem, "execution", [sys.executable, "scripts/tests/" + script],
               extra_environment=qualification_environment, python_test=True)

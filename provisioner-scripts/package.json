@@ -4,9 +4,11 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "vitest run",
+    "test": "vitest run src tests/lib",
     "test:watch": "vitest",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test:browser": "vitest run tests/scrapers tests/patterns",
+    "test:all": "vitest run"
   },
   "dependencies": {
     "playwright": "^1.49.0",

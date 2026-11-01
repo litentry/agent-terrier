@@ -37,10 +37,10 @@ Agent Terrier local development tools
 | --- | --- | --- | --- |
 | -h, --help | no |  | show this help message and exit |
 | lane | yes | source, core, focused, affected, qualification |  |
-| --component | no | protocol, runtime, broker, signer, relay, bundler, daemon, storage, cli, ui, display, dsh, managed |  |
+| --component | no | protocol, runtime, broker, signer, relay, bundler, daemon, storage, cli, ui, display, dsh, managed, contracts, provisioner, chain, services, agents |  |
 | --changed-file | no |  | Changed repository-relative path; include old and new paths for renames |
 | --changed-files-json | no |  | JSON array of changed repository-relative paths |
-| --online | no |  | Explicitly fetch Cargo dependencies before Rust tests |
+| --online | no |  | Explicitly prepare selected Rust/contract dependencies |
 | --report | no |  | New JSON report path outside the checkout |
 | --plan | no |  | Print selection without running tools |
 
