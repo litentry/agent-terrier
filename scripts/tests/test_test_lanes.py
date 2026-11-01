@@ -1,5 +1,6 @@
 import errno
 import io
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -129,6 +130,76 @@ class TestLaneExecutionTests(unittest.TestCase):
             self.assertIn(f"Private diagnostic logs: {diagnostics}", output.getvalue())
             self.assertEqual((diagnostics / "00-probe.log").read_text(), "synthetic diagnostic")
             self.assertFalse((root / "report.json").exists())
+
+    def test_batched_targets_bind_package_manifest_kind_and_name(self):
+        repository = Path("/synthetic/source")
+        packages = [{"id": name + "-id", "name": name, "manifest_path": str(repository / name / "Cargo.toml")}
+                    for name in ("first", "second")]
+        metadata = {"workspace_members": [package["id"] for package in packages], "packages": packages}
+        def artifact(package, kind, name):
+            return {"reason": "compiler-artifact", "package_id": package["id"],
+                    "manifest_path": package["manifest_path"], "profile": {"test": True},
+                    "target": {"kind": [kind], "name": name}, "executable": "/synthetic/" + package["name"] + "-" + kind}
+        first = artifact(packages[0], "test", "same-name")
+        second = artifact(packages[1], "test", "same-name")
+        library = artifact(packages[0], "lib", "custom-library-name")
+        suites = [("selected", "first", "--test", "same-name", "one_test"),
+                  ("library", "first", "--lib", None, "")]
+        output = lambda values: "\n".join(json.dumps(value) for value in values)
+        selected = test_lanes.rust_test_executables(repository, metadata, output([first, second, library]), suites)
+        self.assertEqual(selected, {"selected": ("/synthetic/first-test", repository / "first"),
+                                    "library": ("/synthetic/first-lib", repository / "first")})
+        for artifacts in ([second, library], [first, first, library],
+                          [dict(first, manifest_path="/outside/Cargo.toml"), library],
+                          [dict(first, profile={"test": False}), library]):
+            with self.assertRaisesRegex(ValueError, "missing or ambiguous"):
+                test_lanes.rust_test_executables(repository, metadata, output(artifacts), suites)
+
+    def test_batch_executes_only_selected_suites_and_preserves_filters(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repository = Path(directory).resolve()
+            manifest = str(repository / "package/Cargo.toml")
+            package = {"name": "package", "id": "package-id", "manifest_path": manifest}
+            metadata = {"workspace_members": ["package-id"], "packages": [package]}
+            suites = [("filtered", "package", "--lib", None, "boundary::"),
+                      ("integration", "package", "--test", "boundary", "")]
+            commands = []
+            def execute(command, directory, log_path, **options):
+                commands.append((command, directory))
+                if command[:2] == ["cargo", "metadata"]:
+                    output = json.dumps(metadata)
+                elif command[:2] == ["cargo", "test"]:
+                    output = "\n".join(json.dumps({"reason": "compiler-artifact", "package_id": "package-id",
+                        "manifest_path": manifest, "profile": {"test": True}, "target": {"name": name, "kind": [kind]},
+                        "executable": str(repository / name)}) for kind, name in
+                        [("lib", "library"), ("test", "boundary"), ("test", "unselected")])
+                else:
+                    output = "test result: ok. 1 passed; 0 failed; 0 ignored;"
+                log_path.write_text(output)
+                return {"status": "passed", "exit_code": 0, "seconds": 0}
+            with patch.object(test_lanes, "selection", return_value=suites), \
+                    patch.object(test_lanes, "execute", side_effect=execute):
+                report, status = test_lanes.run(repository, "focused", ["protocol"])
+            self.assertEqual(status, 0)
+            builds = [command for command, _ in commands if command[:2] == ["cargo", "test"]]
+            self.assertEqual(len(builds), 1)
+            self.assertIn("--lib", builds[0])
+            self.assertEqual(builds[0][-2:], ["--test", "boundary"])
+            executed = [(command, directory) for command, directory in commands if command[0] != "cargo"]
+            self.assertEqual(executed, [([str(repository / "library"), "boundary::"], repository / "package"),
+                                       ([str(repository / "boundary"), ""], repository / "package")])
+            self.assertEqual(sum(check.get("tests", {}).get("passed", 0) for check in report["checks"]), 2)
+            commands.clear()
+            plan = {"components": [], "rust_suites": [], "rust_builds": [], "qualification_only": ["integration"]}
+            with patch.object(test_lanes, "selection", return_value=suites), \
+                    patch.object(test_lanes, "SOURCE_COMMANDS", ()), \
+                    patch.object(test_lanes.affected, "select", return_value=plan), \
+                    patch.object(test_lanes, "execute", side_effect=execute):
+                report, status = test_lanes.run(repository, "affected", [], changed_files=["synthetic"])
+            self.assertEqual(status, 0)
+            self.assertIn("integration-compile", report["selected"])
+            self.assertEqual([command for command, _ in commands if command[0] != "cargo"],
+                             [[str(repository / "library"), "boundary::"]])
 
     def test_child_does_not_inherit_host_provider_credentials(self):
         with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {"BROKER_PRIVATE_CANARY": "synthetic"}):

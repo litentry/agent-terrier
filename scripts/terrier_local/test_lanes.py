@@ -151,6 +151,50 @@ def selection(lane, components):
     return rust
 
 
+
+def rust_build_command(suites):
+    command = ["cargo", "test", "--offline", "--locked", "--no-run", "--message-format=json"]
+    for package in dict.fromkeys(suite[1] for suite in suites):
+        command.extend(["-p", package])
+    for target, target_name in dict.fromkeys((suite[2], suite[3]) for suite in suites):
+        command.append(target)
+        if target_name:
+            command.append(target_name)
+    return command
+
+
+def rust_test_executables(repository, metadata, output, suites):
+    members = set(metadata["workspace_members"])
+    packages = {package["name"]: package for package in metadata["packages"] if package["id"] in members}
+    artifacts = []
+    for line in output.splitlines():
+        try:
+            message = json.loads(line)
+        except ValueError:
+            continue
+        if (isinstance(message, dict) and message.get("reason") == "compiler-artifact"
+                and message.get("profile", {}).get("test") and message.get("executable")):
+            artifacts.append(message)
+    selected = {}
+    for name, package, target, target_name, _ in suites:
+        owner = packages.get(package)
+        if not owner:
+            raise ValueError("Selected test package is not a workspace member")
+        manifest = Path(owner["manifest_path"])
+        if not manifest.is_absolute() or repository not in manifest.parents:
+            raise ValueError("Selected test manifest is outside the repository")
+        kinds = {"lib", "rlib", "cdylib", "staticlib", "dylib", "proc-macro"} if target == "--lib" else {target.removeprefix("--")}
+        matches = [artifact for artifact in artifacts
+                   if artifact.get("package_id") == owner["id"]
+                   and artifact.get("manifest_path") == str(manifest)
+                   and kinds & set(artifact.get("target", {}).get("kind", []))
+                   and (target_name is None or artifact.get("target", {}).get("name") == target_name)]
+        if len(matches) != 1:
+            raise ValueError("Selected test executable is missing or ambiguous: " + name)
+        selected[name] = (matches[0]["executable"], manifest.parent)
+    return selected
+
+
 def run(repository, lane, components, online=False, report_path=None, plan=False, changed_files=None):
     affected_plan = None
     if lane == "affected":
@@ -210,9 +254,12 @@ def run(repository, lane, components, online=False, report_path=None, plan=False
         setup, _ = check("dependencies", "setup", ["cargo", "fetch", "--locked"])
         if setup["status"] != "passed":
             rust, builds = [], []
+    metadata = None
     if lane in ("source", "core", "affected", "regression"):
         for name, command in SOURCE_COMMANDS:
-            check(name, "execution", command, python_test=name == "python")
+            result, log_path = check(name, "execution", command, python_test=name == "python")
+            if name == "closure" and result["status"] == "passed":
+                metadata = json.loads(log_path.read_text())
     if lane == "regression" and all(result["status"] == "passed" for result in checks):
         command = ["cargo", "test", "--offline", "--locked", "--workspace", "--all-targets"]
         built, _ = check("workspace-native-build", "build", command + ["--no-run"], timeout_seconds=REGRESSION_TIMEOUT_SECONDS)
@@ -220,29 +267,25 @@ def run(repository, lane, components, online=False, report_path=None, plan=False
             check("workspace-native", "execution", command, rust_test=True, timeout_seconds=REGRESSION_TIMEOUT_SECONDS)
     for package, binary in builds:
         check(package + "-compile", "build", ["cargo", "check", "--offline", "--locked", "-p", package, "--bin", binary])
-    for name, package, target, target_name, test_filter in rust:
-        command = ["cargo", "test", "--offline", "--locked", "-p", package, target]
-        if target_name:
-            command.append(target_name)
-        build, log_path = check(name + "-build", "build", command + ["--no-run", "--message-format=json"])
-        if build["status"] != "passed" or name in qualification_only:
-            continue
-        executables = []
-        for line in log_path.read_text(errors="replace").splitlines():
-            try:
-                message = json.loads(line)
-            except ValueError:
-                continue
-            if (isinstance(message, dict) and message.get("reason") == "compiler-artifact" and message.get("profile", {}).get("test")
-                    and message.get("executable")):
-                manifest = Path(message.get("manifest_path", "")).parent
-                if manifest.is_absolute() and repository in manifest.parents:
-                    executables.append((message["executable"], manifest))
-        if len(executables) != 1:
-            build["status"] = "missing-test-executable"
-            continue
-        executable, directory = executables[0]
-        check(name, "execution", [executable, test_filter], directory, rust_test=True)
+    if rust:
+        if metadata is None:
+            resolved, log_path = check("native-metadata", "build",
+                ["cargo", "metadata", "--offline", "--locked", "--no-deps", "--format-version", "1"])
+            if resolved["status"] == "passed":
+                metadata = json.loads(log_path.read_text())
+        if metadata is not None:
+            built, log_path = check("selected-native-build", "build", rust_build_command(rust))
+            if built["status"] == "passed":
+                try:
+                    executables = rust_test_executables(repository, metadata, log_path.read_text(errors="replace"), rust)
+                except ValueError as error:
+                    built["status"] = "missing-test-executable"
+                    built["error"] = str(error)
+                else:
+                    for name, _, _, _, test_filter in rust:
+                        if name not in qualification_only:
+                            executable, directory = executables[name]
+                            check(name, "execution", [executable, test_filter], directory, rust_test=True)
     qualification_environment = {name: os.environ[name] for name in ("AGENT_TERRIER_CACHE_DIR", "AGENT_TERRIER_SOLC", "AGENT_TERRIER_FORGE") if name in os.environ}
     for component in dict.fromkeys(components):
         if component == "contracts":
