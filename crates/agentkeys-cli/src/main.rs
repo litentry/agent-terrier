@@ -1956,6 +1956,7 @@ async fn main() {
                         k11_key_file,
                         rp_id,
                         session_bearer,
+                        None,
                     )
                     .await
                 }
@@ -1984,6 +1985,7 @@ async fn main() {
                         k11_key_file,
                         rp_id,
                         session_bearer,
+                        None,
                     )
                     .await
                 }

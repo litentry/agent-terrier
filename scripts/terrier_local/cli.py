@@ -43,16 +43,19 @@ def main():
     credential_parser.add_argument("--secret-stdin", action="store_true", help="Read exact UTF-8 input for store")
     agent_parser = commands.add_parser("agent", help="Create or archive local agents with protected development keys")
     agent_commands = agent_parser.add_subparsers(dest="action", required=True)
-    for action in ("spawn", "archive"):
+    for action in ("spawn", "archive", "receipt"):
         operation = agent_commands.add_parser(action)
         operation.add_argument("--name", required=True, help="Existing local owner name")
-        operation.add_argument("--memory-ns", default="")
+        if action != "receipt":
+            operation.add_argument("--memory-ns", default="")
         if action == "spawn":
             operation.add_argument("--label", required=True)
             operation.add_argument("--preset-id", default="")
             operation.add_argument("--memory-inherited", action="store_true")
-        else:
+        elif action == "archive":
             operation.add_argument("--device-key-hash", required=True)
+        else:
+            operation.add_argument("--user-op-hash", required=True)
     owner_parser = commands.add_parser("owner", help="Real local owner registration and scope operations")
     owner_parser.add_argument("action", choices=["register", "grant", "revoke", "bind", "unbind", "login"])
     owner_parser.add_argument("--name", required=True, help="Local owner name")

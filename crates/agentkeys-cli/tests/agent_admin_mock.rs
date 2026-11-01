@@ -25,6 +25,8 @@ struct Seen {
     bad_chain: std::sync::atomic::AtomicBool,
     bad_hash: std::sync::atomic::AtomicBool,
     bad_entry_point: std::sync::atomic::AtomicBool,
+    lose_submit_response: std::sync::atomic::AtomicBool,
+    operation_directory: Mutex<Option<std::path::PathBuf>>,
 }
 
 fn packed_user_op() -> agentkeys_core::erc4337::PackedUserOp {
@@ -109,7 +111,7 @@ async fn mock_broker(seen: Arc<Seen>) -> String {
                 record(State(s.clone()), "spawn/build", b.clone()).await;
                 Json(json!({
                     "user_op": user_op(), "user_op_hash": claimed_hash(&s), "entry_point": format!("0x{:040x}", if s.bad_entry_point.load(std::sync::atomic::Ordering::SeqCst) { 3 } else { 2 }),
-                    "chain_id": if s.bad_chain.load(std::sync::atomic::Ordering::SeqCst) { 1 } else { local_chain_id() }, "actor_omni": CHILD, "device_key_hash": DKH,
+                    "chain_id": if s.bad_chain.load(std::sync::atomic::Ordering::SeqCst) { 1 } else { local_chain_id() }, "actor_omni": CHILD.trim_start_matches("0x"), "device_key_hash": DKH,
                     "chat_channel_id": "opchat-probe", "memory_ns": "app-probe", "memory_inherited": false,
                     "services": ["channel-pub:opchat-probe", "channel-sub:opchat-probe", "knowledge:app-probe"],
                     "slots_used": 1, "slots_total": 3
@@ -119,7 +121,13 @@ async fn mock_broker(seen: Arc<Seen>) -> String {
         .route(
             "/v1/agent/spawn/submit",
             post(|State(s): State<Arc<Seen>>, Json(b): Json<Value>| async move {
+                if let Some(directory) = s.operation_directory.lock().unwrap().as_ref() {
+                    assert!(directory.join(format!("{}.json", operation_hash())).is_file());
+                }
                 record(State(s.clone()), "spawn/submit", b).await;
+                if s.lose_submit_response.load(std::sync::atomic::Ordering::SeqCst) {
+                    return Json(json!({"error":"synthetic-private-submission-response"}));
+                }
                 Json(json!({ "ok": true, "user_op_hash": claimed_hash(&s), "tx_hash": "0x9b10", "block_number": "0x1" }))
             }),
         )
@@ -138,6 +146,13 @@ async fn mock_broker(seen: Arc<Seen>) -> String {
             post(|State(s): State<Arc<Seen>>, Json(b): Json<Value>| async move {
                 record(State(s.clone()), "archive/submit", b).await;
                 Json(json!({ "ok": true, "user_op_hash": claimed_hash(&s), "tx_hash": "0x9b11", "block_number": "0x2" }))
+            }),
+        )
+        .route(
+            "/v1/accept/receipt",
+            post(|State(s): State<Arc<Seen>>, Json(b): Json<Value>| async move {
+                record(State(s.clone()), "accept/receipt", b).await;
+                Json(json!({"ok":true,"pending":true,"user_op_hash":claimed_hash(&s)}))
             }),
         )
         .route(
@@ -246,13 +261,14 @@ async fn spawn_and_archive_sign_with_the_software_passkey_and_submit() {
         &key,
         "localhost",
         &bearer(),
+        None,
     )
     .await
     .expect("spawn");
     let v: Value = serde_json::from_str(&out).unwrap();
     assert_eq!(v["spawned"], true);
     assert_eq!(v["label"], "probe");
-    assert_eq!(v["actor_omni"], CHILD);
+    assert_eq!(v["actor_omni"], CHILD.trim_start_matches("0x"));
     assert_eq!(v["device_key_hash"], DKH);
     assert_eq!(v["user_op_hash"], operation_hash());
     let out = agent_admin::agent_archive(
@@ -264,6 +280,7 @@ async fn spawn_and_archive_sign_with_the_software_passkey_and_submit() {
         &key,
         "localhost",
         &bearer(),
+        None,
     )
     .await
     .expect("archive");
@@ -402,6 +419,7 @@ async fn software_signing_rejects_foreign_chain_and_tampered_hash_before_key_acc
             "must-not-be-read.pem",
             "localhost",
             &bearer(),
+            None,
         )
         .await
         .unwrap_err();
@@ -427,11 +445,136 @@ async fn software_signing_rejects_remote_service_before_network_or_key_access() 
         "must-not-be-read.pem",
         "localhost",
         &bearer(),
+        None,
     )
     .await
     .unwrap_err();
     assert!(
         error.to_string().contains("loopback HTTP service"),
         "{error}"
+    );
+}
+
+#[tokio::test]
+async fn lost_submission_response_is_recovered_without_signing_or_resubmitting() {
+    use agentkeys_cli::agent_operation::{AgentOperationJournal, AgentOperationRecord};
+    use agentkeys_core::protected_file;
+    use std::os::unix::fs::PermissionsExt;
+
+    let seen = Arc::new(Seen::default());
+    let base = mock_broker(seen.clone()).await;
+    let directory = tempfile::tempdir().unwrap();
+    let key = software_key(&directory);
+    let key_contents = std::fs::read_to_string(&key).unwrap();
+    *seen.operation_directory.lock().unwrap() = Some(directory.path().to_owned());
+    seen.lose_submit_response
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let journal = AgentOperationJournal {
+        directory: directory.path(),
+        operator_omni: OPERATOR,
+        broker_url: &base,
+        request_device_key_hash: DKH,
+    };
+    let error = agent_admin::agent_spawn(
+        &development_signing(),
+        &base,
+        "probe",
+        "chef",
+        "",
+        false,
+        &key,
+        "localhost",
+        &bearer(),
+        Some(&journal),
+    )
+    .await
+    .unwrap_err();
+    assert!(error.to_string().contains("outcome is unknown"));
+    assert!(!error.to_string().contains("synthetic-private"));
+    let path = directory.path().join(format!("{}.json", operation_hash()));
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    assert!(!text.contains(&bearer()) && !text.contains(&key_contents));
+    let original: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(original["build"]["user_op"]["signature"], "0x");
+    std::fs::remove_file(&key).unwrap();
+    let record =
+        AgentOperationRecord::load(path.to_str().unwrap(), &journal, &development_signing())
+            .unwrap();
+    assert_eq!(
+        agent_admin::agent_receipt(&development_signing(), &base, &bearer(), &record)
+            .await
+            .unwrap()["pending"],
+        true
+    );
+    {
+        let requests = seen.posts.lock().unwrap();
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|(route, _)| route.ends_with("submit"))
+                .count(),
+            1
+        );
+        let request = &requests
+            .iter()
+            .find(|(route, _)| route == "accept/receipt")
+            .unwrap()
+            .1;
+        assert!(request.get("assertion").is_none());
+        assert_eq!(request["user_op"]["signature"], "0x");
+    }
+    for (field, value) in [
+        ("version", json!(999)),
+        ("development_only", json!(false)),
+        ("operator_omni", json!(CHILD)),
+        ("broker_url", json!("http://127.0.0.1:1")),
+        ("request_device_key_hash", json!(CHILD)),
+    ] {
+        let mut changed = original.clone();
+        changed[field] = value;
+        protected_file::replace_atomic(&path, &serde_json::to_vec(&changed).unwrap()).unwrap();
+        assert!(AgentOperationRecord::load(
+            path.to_str().unwrap(),
+            &journal,
+            &development_signing()
+        )
+        .is_err());
+    }
+    let mut changed = original.clone();
+    changed["build"]["user_op"]["call_data"] = json!("0x01");
+    protected_file::replace_atomic(&path, &serde_json::to_vec(&changed).unwrap()).unwrap();
+    assert!(
+        AgentOperationRecord::load(path.to_str().unwrap(), &journal, &development_signing())
+            .is_err()
+    );
+    protected_file::replace_atomic(&path, text.as_bytes()).unwrap();
+    let error = agent_admin::agent_spawn(
+        &development_signing(),
+        &base,
+        "probe",
+        "chef",
+        "",
+        false,
+        &key,
+        "localhost",
+        &bearer(),
+        Some(&journal),
+    )
+    .await
+    .unwrap_err();
+    assert!(error.to_string().contains("save protected operation"));
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+    assert_eq!(
+        seen.posts
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(route, _)| route.ends_with("submit"))
+            .count(),
+        1
     );
 }

@@ -5,6 +5,7 @@ use agentkeys_core::device_crypto::DeviceKey;
 use anyhow::{anyhow, ensure, Context, Result};
 use serde_json::{json, Value};
 
+use crate::agent_operation::{AgentOperationJournal, AgentOperationRecord};
 use crate::{agent_admin, local_data, CommandContext};
 
 #[derive(clap::Args)]
@@ -21,6 +22,8 @@ pub struct AgentOptions {
     pub broker_url: String,
     #[arg(long)]
     pub key_file: String,
+    #[arg(long)]
+    pub operations_dir: String,
     #[arg(long, default_value = "localhost")]
     pub rp_id: String,
 }
@@ -42,6 +45,10 @@ pub enum AgentAction {
         device_key_hash: String,
         #[arg(long, default_value = "")]
         memory_ns: String,
+    },
+    Receipt {
+        #[arg(long)]
+        operation_file: String,
     },
 }
 
@@ -130,7 +137,7 @@ fn receipt(action: &str, response: &Value) -> Value {
     json!({"development_only":true, "action":action, "complete":complete,
         "chain_confirmed":confirmed, "pending":pending, "tx_hash":transaction,
         "user_op_hash":operation, "block_number":block, "device_key_hash":device,
-        "actor_omni":hash(&response["actor_omni"]), "relay_ready":relay_ready,
+        "actor_omni":response["actor_omni"].as_str().and_then(|actor| hash(&json!(agentkeys_backend_client::protocol::normalize_omni_0x(actor)))), "relay_ready":relay_ready,
         "runtime_ready":runtime_ready, "runtime_stopped":runtime_stopped,
         "context_removed":context_removed, "resources_kept":resources_kept})
 }
@@ -164,6 +171,13 @@ pub async fn execute(context: &CommandContext, options: &AgentOptions) -> Result
             .eq_ignore_ascii_case(options.operator_omni.trim_start_matches("0x")),
         "session bearer belongs to another owner"
     );
+    let request_device_key_hash = key.device_key_hash()?;
+    let journal = AgentOperationJournal {
+        directory: std::path::Path::new(&options.operations_dir),
+        operator_omni: &options.operator_omni,
+        broker_url: &options.broker_url,
+        request_device_key_hash: &request_device_key_hash,
+    };
     let (action, result) = match &options.action {
         AgentAction::Spawn {
             label,
@@ -191,6 +205,7 @@ pub async fn execute(context: &CommandContext, options: &AgentOptions) -> Result
                     &options.key_file,
                     &options.rp_id,
                     bearer,
+                    Some(&journal),
                 )
                 .await,
             )
@@ -214,9 +229,22 @@ pub async fn execute(context: &CommandContext, options: &AgentOptions) -> Result
                     &options.key_file,
                     &options.rp_id,
                     bearer,
+                    Some(&journal),
                 )
                 .await,
             )
+        }
+        AgentAction::Receipt { operation_file } => {
+            let record = AgentOperationRecord::load(operation_file, &journal, &development)?;
+            let result =
+                agent_admin::agent_receipt(&development, &options.broker_url, bearer, &record)
+                    .await
+                    .and_then(|mut response| {
+                        response["device_key_hash"] = json!(record.device_key_hash);
+                        response["actor_omni"] = json!(record.actor_omni);
+                        Ok(serde_json::to_string(&response)?)
+                    });
+            (record.action.name(), result)
         }
     };
     let response: Value = match result {
@@ -258,6 +286,11 @@ mod tests {
     #[test]
     fn partial_spawn_keeps_transaction_identity_without_echoing_backend_errors() {
         let mut response = confirmed();
+        response["actor_omni"] = json!("55".repeat(32));
+        assert_eq!(
+            receipt("spawn", &response)["actor_omni"],
+            format!("0x{}", "55".repeat(32))
+        );
         response["ceremony"] = json!({"spawned":[{"device_key_hash":response["device_key_hash"],
             "gate":{"status":"provisioned","error":null},
             "sandbox":{"status":"running","sandbox_id":"44".repeat(32),"error":null}}]});
