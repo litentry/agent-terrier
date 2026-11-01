@@ -1,4 +1,4 @@
-//! Typed sessions (owner decision 2026-09-23): the closed vocabulary of what
+//! Typed sessions: the closed vocabulary of what
 //! one agent turn sees of the conversation around it, the default window per
 //! trigger TYPE, the typed reset marker, and the daemon → bridge session
 //! request.

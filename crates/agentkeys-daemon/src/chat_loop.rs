@@ -688,7 +688,7 @@ async fn run(cfg: ChatLoopConfig) {
             }
         });
     }
-    // The ANCHOR (owner decision 2026-09-22): the bound channels live in the
+    // The bound channels live in the
     // broker's durable spawn context — never baked into the image, never
     // frozen in this instance. The loop re-reads it and re-sources itself, so
     // a rebind lands without any restart even when the live push above never

@@ -1,57 +1,12 @@
-//! OpenViking engine adapter — plan `docs/plan/agentkeys-memory-design.md` §6a,
-//! integration shape `docs/plan/issue-566-openviking-native-memory-provider.md`.
+//! Optional OpenViking ingestion adapter for already-authorized canonical memory.
 //!
-//! OpenViking (`volcengine/OpenViking`) is a self-hosted context database. Since
-//! #566 it is the AI runtime's FIRST-CLASS native memory provider (under dsh via
-//! the official openviking memory plugin), and AgentKeys' gate bound moved to
-//! INGEST-time: this crate's consumer is the daemon's distribution mirror,
-//! which may only write what `canonical-get` returned (the memory worker
-//! enforces per-namespace authorization on every fetch). AgentKeys still STORES
-//! (K3-encrypted S3/TOS) + GATES (cap / scope / namespace / audit); the engine
-//! holds a sandbox-local, rebuilt-on-respawn index of the authorized slice plus
-//! the agent's own working memory.
+//! The daemon mirror supplies each namespace's current authorized items. Reconciliation
+//! writes resource directories under `viking://resources/<namespace>/<item>`, including
+//! abstract/overview sidecars, and deletes items absent from that supplied set.
+//! The caller owns authorization and retry policy; this client does not grant access.
 //!
-//! **Where the mirror files things (2026-09-18).** OpenViking's own vocabulary:
-//! `resources/` is "knowledge and rules" (static, user-added), `memories/` is
-//! "the agent's cognition" (extracted from its sessions into fixed category
-//! folders). The runtime's per-step context recall draws ONLY from those
-//! category folders plus resources and skills; the previous layout
-//! (`memories/<ns>/mem_<hash>.md`) sat in an unowned folder the recall never
-//! searched, so household knowledge was findable by a tool but never
-//! auto-recalled (measured on the live image). Every canonical item is now a
-//! resource directory:
-//!
-//!   viking://resources/<ns>/<item>/.abstract.md   L0 — the item's title + preview head (≤256 chars)
-//!   viking://resources/<ns>/<item>/.overview.md   L1 — the item's preview (or body head) (≤4000 chars)
-//!   viking://resources/<ns>/<item>/<item>.md      L2 — the body
-//!
-//! The sidecars matter because the sandbox engine runs WITHOUT the summarizing
-//! model (`start-openviking.sh`: search/rank only), so nothing generates them —
-//! the owner-curated title and preview of the git-style knowledge item are the
-//! L0/L1 the recall shows (measured: overview text at detail `overview`, score
-//! above the plugin's 0.35 threshold; an empty abstract gives a bare URI below it).
-//!
-//! Wire contract, verified against a live `openviking-server` 0.4.16:
-//!
-//!   base    http://127.0.0.1:1933  (OPENVIKING_ENDPOINT)
-//!   headers X-OpenViking-Actor-Peer / -Account / -User, plus X-API-Key +
-//!           `Authorization: Bearer <key>` when OPENVIKING_API_KEY is set
-//!   GET    /health                                    -> 200 when up
-//!   POST   /api/v1/content/write {uri, content, mode} -> mode create | replace
-//!          (a plain write creates the item directory; an existing sidecar
-//!          takes `replace`; the accepted modes are replace/append/create/upsert)
-//!   DELETE /api/v1/fs?uri=<dir>&recursive=true        -> remove one item directory
-//!   error envelope: HTTP >= 400, or {status:"error", error:{code,message}}
-//!
-//! The QUERY side is deliberately absent: reading is the AGENT's job through
-//! its native provider (the memory plugin's recall + `mcp__openviking__*` tools).
-//!
-//! SAFETY — the gate bounds visibility at INGEST:
-//! [`OpenVikingClient::reconcile_items`] only ever writes gate-authorized items
-//! and delete-throughs items the gate no longer returns (revocation self-heals;
-//! a fresh sandbox rebuilds from canonical). OpenViking can rank but can never
-//! WIDEN visibility, and it is never load-bearing — engine down ⇒ the agent
-//! falls back to its built-in memory; the mirror retries next pass.
+//! The public runtime does not yet compose an OpenViking server or retrieval plugin.
+//! See `docs/wiki/local-models.md` for the qualified local model capabilities.
 
 pub mod server_config;
 

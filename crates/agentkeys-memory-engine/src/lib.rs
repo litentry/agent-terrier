@@ -1,23 +1,11 @@
-//! Pluggable memory-engine seam — plan `docs/plan/agentkeys-memory-design.md`
-//! §6a, arch.md §22 "Memory engine" axis.
+//! Deterministic selection over already-authorized memory lines.
 //!
-//! The engine runs CALLER-SIDE over already-gate-authorized memory lines —
-//! never inside the worker, never with an LLM in the gate. `select` is the
-//! load-bearing call: passive `pre_llm_call` injection passes `query = None`
-//! plus a budget (which lines to inject when a namespace grows large); a
-//! future `memory.search` tool passes `query = Some(..)`.
-//!
-//! External engines (OpenViking, Holographic, mem0-self-hosted, …) implement
-//! this same trait — that is the compatibility seam (plan §6a.4): swap the
-//! engine, hold store + gate + delivery constant. The two engines shipped
-//! here are deterministic and need no external service.
+//! The caller supplies the query, candidate lines and budget. Selection does no I/O
+//! and cannot widen the candidate set; authorization remains with the storage gate.
 
 use std::collections::HashSet;
 
-/// One unit the engine ranks/selects over. In the v0 single-blob store a line
-/// is a `\n`-split segment of a namespace blob; under the future per-line store
-/// (plan M1) it maps 1:1 to a stored line. `seq` is blob position — higher is
-/// later, treated as more recent for recency ranking.
+/// A nonempty line from a namespace blob. Higher `seq` means later in the blob.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemoryLine {
     pub text: String,

@@ -1,4 +1,4 @@
-//! The ANCHOR (owner decision 2026-09-22): a delegate's bound channels live in
+//! A delegate's bound channels live in
 //! a context DOCUMENT on the memory plane (the app's own namespace) whose hash
 //! is SEALED on chain — `appendRoot(operator, keccak(doc), version)` on the
 //! audit contract, inside the same batch the owner signs for the install /

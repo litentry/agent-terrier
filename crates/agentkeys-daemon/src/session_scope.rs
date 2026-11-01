@@ -1,5 +1,4 @@
-//! Typed sessions — the daemon half (owner decision 2026-09-23; vocabulary in
-//! `agentkeys-protocol`'s `session_window`). Pure: which session one trigger
+//! Session selection using `agentkeys-protocol::session_window`: which session one trigger
 //! runs in, who may reset what, the window a lost session held (rebuilt from
 //! the feed), and the card a tap was made on. The chat loop does the I/O.
 

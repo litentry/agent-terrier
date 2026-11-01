@@ -38,3 +38,9 @@ The checked-in Solidity files are the source of truth. Terrier prepares a genera
 `AGENT_TERRIER_CACHE_DIR` selects the cache directory; otherwise Terrier uses `XDG_CACHE_HOME/agent-terrier` or the home directory's `.cache/agent-terrier`. Build directories are isolated by checkout and locked while in use. Cleanup during synchronization removes stale source files only inside a marked build directory. Symlinks, unowned directories and unsafe dependency archives are refused.
 
 The commands do not load deployment settings or wallet credentials from the shell, and they do not deploy contracts. Development signing and persistent local-chain startup use the separate [local chain](./local-chain.md) and [owner](./local-owner.md) commands. The [managed application qualifier](./local-models.md#managed-application-qualification) exercises real deployment and agent use; full release acceptance remains open.
+
+## Development registration boundary
+
+First-owner registration rejects ordinary wallet callers and accepts a contract caller. That check does not attest the caller’s account implementation or ownership of the supplied operator identity. Use a trusted local chain for development; this path is not qualified for permissionless production enrollment.
+
+Contract source version `0.5.1` cleans inherited comments without changing contract logic. The source version advances because Solidity metadata changes with source text. An existing deployment with an older version still requires an explicit migration or reset decision; it is not redeployed automatically.

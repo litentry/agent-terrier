@@ -1,26 +1,12 @@
-//! #566 — the delegate-side DISTRIBUTION MIRROR (arch §17.6 `context flows`,
-//! plan `docs/plan/issue-566-openviking-native-memory-provider.md`).
+//! Optional delegate-side mirror of authorized canonical memory into OpenViking.
 //!
-//! The delegate runtime consumes OpenViking as its first-class native memory provider
-//! (`memory.provider: openviking`, in-sandbox engine on :1933). The AgentKeys
-//! bound is enforced at INGEST-time: this mirror is the only writer of
-//! canonical-derived content into the engine, and it can only write what
-//! `canonical-get` returns — the memory worker re-verifies the cap + namespace
-//! on every fetch, so the engine's corpus is always ⊆ (the delegate's own
-//! working memory ∪ gate-authorized canonical slices).
+//! Each pass probes candidate namespaces through `canonical-get`. A successful fetch
+//! reconciles the returned items; 403 reconciles to empty, removing revoked content.
+//! An expired session triggers resolution on a later pass. Transient errors retain
+//! previously mirrored data until a successful reconciliation. Engine unavailability
+//! is reported and retried without blocking the chat loop.
 //!
-//! Namespace discovery is PROBE-based (no broker involvement, D2-stateless):
-//! each pass attempts `canonical-get` for every candidate namespace; the
-//! worker's verdict is the authz truth —
-//!   200  -> reconcile the namespace onto the returned lines,
-//!   403  -> the grant is absent/revoked -> reconcile onto EMPTY
-//!           (delete-through: mirrored content leaves the index this pass),
-//!   401  -> the delegate session expired -> re-resolve and retry next pass,
-//!   else -> transient -> leave the index untouched (durable truth is never
-//!           here; a fresh sandbox rebuilds from canonical).
-//!
-//! Never load-bearing: engine down ⇒ log-once + retry next interval; the agent
-//! falls back to its built-in memory and chat is unaffected.
+//! This adapter is not yet composed into the public agent image's memory journey.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};

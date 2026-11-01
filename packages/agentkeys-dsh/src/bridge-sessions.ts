@@ -1,6 +1,5 @@
 /**
  * @module @agentkeys/dsh-suite/bridge-sessions — typed sessions on the bridge
- * (owner decision 2026-09-23).
  *
  * The daemon names the session every turn runs in (the `session` field of a
  * `/v1/chat` body; one owner: agentkeys-protocol `session_window.rs`, shared

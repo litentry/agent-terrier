@@ -1,9 +1,6 @@
 //! Host-agnostic broker HTTP client for the master control plane.
 //!
-//! W0/X0 of `docs/plan/web-flow/wire-real-paths.md`: one typed broker client
-//! that the daemon ui-bridge, the WASM `CoreBackend` (web), and the mobile
-//! UniFFI shell all share — so the browser/phone never re-implement broker
-//! calls in TypeScript/Swift (the "consistency is structural" rule).
+//! Native and WASM hosts share this typed client and the protocol wire types.
 //!
 //! Scope: the pairing (arch.md §10.2 method A, master-side) + cap-mint
 //! endpoints the web wiring proxies. The email/OAuth/SIWE auth flow lives in

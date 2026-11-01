@@ -52,7 +52,7 @@ pub enum CapMintOp {
     /// distribution). Mints `CapOp::CanonicalFetch`/`DataClass::Memory` at
     /// `/v1/cap/memory-canonical-get`; `op_str` is `"canonical_fetch"` so the
     /// K10 cap-PoP preimage matches the worker's `check_op`. Distinct from
-    /// `MemoryGet` (own working memory) — see docs/plan/master-hub-topology.md §6a.
+    /// `MemoryGet` (own working memory).
     MemoryCanonicalGet,
     /// #339 P2 — delegated APPEND to the master's absorption INBOX (master-hub
     /// absorption / "push"). Mints `CapOp::Append`/`DataClass::Memory` at
@@ -60,7 +60,7 @@ pub enum CapMintOp {
     /// learning into `bots/<operator>/inbox/<delegate>/…` (staging, NOT
     /// canonical); the master curates it into canonical later. Gated by a
     /// **distinct** on-chain `proposal:<ns>` grant — NEVER the `knowledge:<ns>` read
-    /// grant (`readOnly` is a dead flag) — see docs/plan/master-hub-topology.md §6b/§8.
+    /// grant (`readOnly` does not distinguish these operations).
     MemoryAppend,
     /// #201 config data class — master-only taxonomy/config object. A third
     /// `DataClass::Config` with its own bucket + IAM role (arch.md §17.2); the
@@ -529,8 +529,7 @@ impl ChannelEventKind {
 }
 
 /// #693 — the launch / pull lifecycle a delegate publishes on its own feeds
-/// (`ChannelEventKind::Lifecycle`, JSON body; `docs/plan/knowledge-repository.md`
-/// §8): `booting` → `restoring` (checkpoint) → `syncing` (k of n namespaces)
+/// (`ChannelEventKind::Lifecycle`, JSON body): `booting` → `restoring` (checkpoint) → `syncing` (k of n namespaces)
 /// → `ready`; `degraded` when the engine is down or a pull failed (chat still
 /// answers — the mirror is never load-bearing); `pulling` while a periodic
 /// pass runs. Counts and milliseconds only — never a line of knowledge.
@@ -3200,7 +3199,7 @@ pub fn service_knowledge(namespace: &str) -> String {
 /// keccak("knowledge:travel")`, so granting a delegate read of `knowledge:travel`
 /// does NOT let it push to `proposal:travel` (and vice-versa). The asymmetry that
 /// `readOnly` should carry on-chain but doesn't is carried by this separate
-/// service name instead — see docs/plan/master-hub-topology.md §5/§6b.
+/// service name instead.
 pub fn service_proposal(namespace: &str) -> String {
     format!("proposal:{namespace}")
 }

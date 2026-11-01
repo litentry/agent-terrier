@@ -1,37 +1,9 @@
 /**
- * @module @agentkeys/dsh-suite/presets — the grant view compiled into each
- * agent's TOOL SCHEMA (plan docs/plan/dsh-plugin-abstraction.md PR 2; spec
- * §4.2 "mount / call class": an ungranted class is ABSENT from the model's
- * schema, not merely refused). The guard stays the monotonic backstop for a
- * call that reaches the pipeline anyway; this plugin makes the ordinary case
- * cheaper and quieter — no tokens spent on tools the delegate cannot use, no
- * deny round-trips, and the deployment's hidden tools (`remember`, #726) go
- * out of view the same way.
- *
- * Mechanism: on `agent/created` the plugin reads the grant view (the same
- * `GET /v1/sandbox/self/grants` the guard reads — a cache of chain state,
- * never authority, D1) and calls `agent.ctx.tools.restrict({ deny })` per
- * name (dsh refuses unknown names, so one call per name, each failure
- * contained). It re-projects on `tools/change` (a tool registered later —
- * the daemon-advertised verbs arrive after boot) and on the grant refresh
- * cadence, so a grant ceremony mounts or unmounts a class live, with no
- * restart (spec §4.2's "revocation = live unmount"). Restrictions intersect
- * in dsh, so each re-projection lifts the previous set first.
- *
- * What is hidden (`deniedTools`, pure): hidden tools; every tool of a
- * `tool:<class>` the delegate lacks; an advertised verb whose grant family
- * it lacks; unmapped tools (deny-by-absence, invariant 2). While the grant
- * view is unavailable every classed / advertised tool is hidden — fail
- * closed, like the guard.
- *
- * Reach (measured on the image smoke, 2026-09-24): `restrict` masks GLOBAL
- * registrations only — dsh-base's tools and the daemon-advertised verbs.
- * A tool registered through an agent's own scope (the OpenViking MCP tools
- * `mcp__openviking__*`, dsh-schedule's reminders) is not in the global list
- * and `restrict` refuses its name, so it stays visible; the guard's verdict
- * is the enforcement there (`remember` is refused at call time, #726). The
- * projection log names what it could not mask so the gap is never silent.
- * NO default export (dsh postmortem 0001).
+ * @module @agentkeys/dsh-suite/presets
+ * Projects the current grant view into the model's visible tool schema. Missing
+ * grants hide tools; the call-time guard remains an independent enforcement point.
+ * Projection refreshes on tool changes and the grant refresh cadence. Failures to
+ * mask a registered tool are reported, never treated as authorization.
  */
 import type { Context } from '@deepseek-ai/cordis';
 import z from '@deepseek-ai/schemastery';

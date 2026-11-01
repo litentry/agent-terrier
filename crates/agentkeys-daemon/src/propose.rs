@@ -2,8 +2,7 @@
 //! leg): an agent-INVOKED "propose to my owner" verb that pushes ONE
 //! working-memory learning into the master's staging inbox for curated merge.
 //! In the sandbox the agent calls its `propose_to_owner` tool — a verb the
-//! daemon ADVERTISES and serves at `POST /v1/sandbox/self/propose` (2026-09-24,
-//! plan `docs/plan/dsh-plugin-abstraction.md`); an operator or a `tool:code`
+//! daemon advertises at `POST /v1/sandbox/self/propose`; an operator or a `tool:code`
 //! delegate runs `agentkeys-daemon --propose-once` with the text on stdin; the
 //! approval answerer files its runtime ask (spec §4.4) through the same route.
 //! Every entry runs `SelfBackend::propose` → [`propose_once`]. The daemon signs

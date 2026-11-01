@@ -17,6 +17,7 @@ FORBIDDEN_DIRECTORIES = {
 }
 FORBIDDEN_SUFFIXES = {".pem", ".key", ".p12", ".keystore", ".sqlite", ".sqlite3"}
 RULES = {
+    "internal-documentation-reference": re.compile(r"docs[/]plan[/]"),
     "private-key": re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH |ENCRYPTED )?PRIVATE KEY-----"),
     "access-token": re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{40,})\b"),
     "cloud-access-key": re.compile(r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b"),

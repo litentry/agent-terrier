@@ -68,6 +68,13 @@ class PublicContentsTests(unittest.TestCase):
             self.assertEqual(self.check_text("public helper and a local deployment")["findings"], [])
             self.assertEqual(self.check_text("privatebackend library")["findings"], [])
 
+    def test_internal_plan_references_are_denied_without_echoing_titles(self):
+        reference = "docs/" + "plan/" + "synthetic-private-project.md"
+        report = self.check_text("comment " + reference)
+        self.assertEqual(report["findings"], [{"path": "example.txt", "rule": "internal-documentation-reference", "line": 1}])
+        self.assertNotIn("synthetic-private-project", json.dumps(report))
+        self.assertEqual(self.check_text("docs/wiki/local-agents.md")["findings"], [])
+
     def test_rejects_private_key_without_printing_it(self):
         canary = "-----BEGIN " + "PRIVATE KEY-----\n" + "synthetic-test-material"
         report = self.check_text(canary)

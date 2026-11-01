@@ -1,50 +1,10 @@
-//! #722 / household channels — the Jev router tier (#689 leg 1): one WeChat
-//! thread, and each plain message finds the CHANNEL it belongs on. The
-//! decision model (Kev or TypeSafe's Jev — the same API — reached ONLY through
-//! the model gate's `/v1/systemone` relay; the contact gate holds a `gk_`
-//! relay key, never a vendor key) answers typed questions over the member's
-//! own channels: which
-//! channel (`destination`), whether it continues their last conversation
-//! (`continues`), and, on a channel several apps are bound to, which app
-//! (`addressee:<channel>`). The option set is built from the channel documents
-//! that list the member with `speak` and nothing else (owner direction
-//! 2026-09-26: the router reads channel documents only — never an app's
-//! template), so the model cannot name a channel the member is not on (D10 by
-//! construction; [`verdict_from`] re-checks the answer anyway).
+//! Model-assisted channel routing for messages from a known member.
 //!
-//! Owner rules (2026-09-23, recorded in #689 + the plan):
-//! - **Unsure → ask the person.** Below the threshold the member gets a
-//!   numbered ask naming the top channels; their reply delivers the ORIGINAL
-//!   message ([`PendingAsk`], memory-only, TTL). Never a below-threshold route.
-//! - **The last channel is context, not a rule.** A continuation («再来一个»,
-//!   «好的», «那明天呢») stays on it; a message with its own content goes
-//!   where the content points.
-//! - **Gate down / no key / malformed → today's deterministic tier**, visibly.
-//!
-//! Tuned on Kev-9B (the self-hosted System One server), 2026-09-24, on 60
-//! labeled Chinese household messages, checked once on 42 held-out ones, each
-//! also re-asked with a WRONG previous conversation (a new request must not be
-//! pulled into the last one):
-//! - The `destination` Choice sees the message only — never the last
-//!   conversation. Putting it in the shared state pulled borderline new
-//!   requests into the previous conversation, and so did any code-side weight.
-//! - A separate `continues` yes/no carries the last conversation in ITS OWN
-//!   instructions (so the destination question cannot read it).
-//! - Each option is a compact Chinese line; the instructions stay English
-//!   (the model's training format).
-//! - A pick routes when its probability ≥ 0.5 and strictly beats the
-//!   runner-up; a follow-up stays when `continues` ≥ 0.7 and the destination
-//!   does not point clearly elsewhere; anything else asks.
-//!
-//! Harness + numbers: `docs/plan/issue-689-household-small-model.md` §9.
-//!
-//! The stack offers one or more models (`AGENTKEYS_WEIXIN_ROUTER_MODELS`, the
-//! default first); the household picks the one that routes in the console,
-//! and compare mode asks every other offered model the same request off the
-//! turn's path — recorded for the route tab, never acted on ([`active_models`],
-//! [`comparison_answer`]).
-//!
-//! Everything that decides is pure (unit-tested); only [`JevClient`] does I/O.
+//! Candidates come from channel documents granting that member speaking access.
+//! The relay classifies destination and conversation continuation separately.
+//! Low-confidence choices ask the sender; malformed or unavailable model responses
+//! use the explicit deterministic fallback. `verdict_from` validates model choices
+//! against the candidate set before dispatch.
 
 use std::collections::BTreeMap;
 use std::time::Duration;

@@ -1,6 +1,5 @@
-//! The daemon-ADVERTISED actions of this delegate (2026-09-24 — plan
-//! `docs/plan/dsh-plugin-abstraction.md` PR 1): the verbs the dsh suite
-//! registers as tools from `GET /v1/sandbox/self/actions`, and the ONE
+//! The daemon advertises delegate tools at `GET /v1/sandbox/self/actions`.
+//! This module owns the shared
 //! publish core behind both `agentkeys-daemon --publish-once` and
 //! `POST /v1/sandbox/self/publish`. The daemon is the one owner of "which
 //! slots may this delegate publish to" (the spawn's bound channels, the live

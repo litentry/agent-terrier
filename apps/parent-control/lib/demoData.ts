@@ -1,7 +1,7 @@
 // Config + the one allowed mock (audit tx-decode, tracked in GH #153).
 // ALL fabricated user data (actors, audit events, memory, pairing requests,
 // vault) was removed — the app is now driven entirely by the lib/client seam
-// (real daemon data, empty states otherwise). See docs/plan/web-flow/issue-9step-flow.md.
+// (real daemon data, empty states otherwise).
 
 import type { CeremonyStep, ChainProfile } from '@/app/_components/types';
 

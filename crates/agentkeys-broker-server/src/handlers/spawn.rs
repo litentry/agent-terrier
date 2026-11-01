@@ -531,7 +531,7 @@ pub(crate) async fn call_agent_slots(
 
 /// THE spawn template (#425 S2) — the ONLY grants a spawn ever mints: the
 /// delegate's duplex operator-chat channel pair + its memory namespace +
-/// (owner decision, 2026-09-01, #653 follow-up) `tool:web` — web search/fetch
+/// `tool:web` — web search/fetch
 /// is a product-default capability for new delegates; the owner unticks it in
 /// the permission editor like any other grant. Presets are content, never
 /// authority (#428): nothing a preset suggests is added here; suggestions
@@ -1340,7 +1340,7 @@ mod tests {
     fn spawn_template_is_exactly_chat_pair_plus_memory_ns_plus_web() {
         // #428 nothing-auto-granted negative: the template is EXACTLY the
         // duplex opchat pair + the memory namespace + the default `tool:web`
-        // capability (owner decision 2026-09-01) — a preset (or any other
+        // capability — a preset (or any other
         // input) can never widen it without changing this pinned set.
         assert_eq!(
             spawn_template_services("opchat-watchdog", "watchdog"),

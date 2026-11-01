@@ -1,7 +1,6 @@
 /**
  * @module @agentkeys/dsh-suite/actions — the daemon-ADVERTISED verbs as tools
- * (plan docs/plan/dsh-plugin-abstraction.md PR 1; spec §4.2 "Advertised
- * actions"): `GET /v1/sandbox/self/actions` names the verbs this delegate
+ * from `GET /v1/sandbox/self/actions`, which names the verbs this delegate
  * may call (`publish_to_slot`, `propose_to_owner`), worded by the daemon with
  * the slots THIS install bound and the app's own namespace; this plugin
  * registers one tool per entry and runs each call as ONE bearer-gated

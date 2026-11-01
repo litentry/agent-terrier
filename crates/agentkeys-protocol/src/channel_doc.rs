@@ -1,5 +1,4 @@
-//! The household channel document (owner direction 2026-09-26; plan
-//! `docs/plan/household-channels.md`). A channel is the unit of context: what
+//! The household channel document. A channel is the unit of context: what
 //! it is for, who is in it, and which apps are bound to it and why. The contact
 //! gate's router reads nothing else; the console edits it; every write is live
 //! — no redeploy, no Touch ID — because a document grants nothing: the on-chain

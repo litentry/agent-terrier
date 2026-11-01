@@ -535,7 +535,7 @@ async fn mint_cap(
         return Err(CapError::OperatorMismatch);
     }
 
-    // Single-vault master-sovereign credentials (docs/plan/single-vault-credentials.md):
+    // Credentials have one owner vault:
     // cred-STORE mints are MASTER-SELF ONLY. Scope is service-granular, so a
     // cred:<svc> FETCH grant would otherwise also authorize delegated STORE
     // mints — the #228 shadowing hole. Hard route-level gate (config's soft
@@ -638,7 +638,7 @@ async fn mint_cap(
     })
 }
 
-/// Single-vault gate (layer 1 — docs/plan/single-vault-credentials.md): a
+/// A
 /// credentials STORE cap may only be minted master-self (`actor == session
 /// operator`). Every credential lives in the operator's vault; agents fetch
 /// delegated but never self-store (the #228 agent-own vault is removed, which
@@ -1090,7 +1090,7 @@ mod tests {
 
     #[test]
     fn cred_store_mint_is_master_self_only() {
-        // Single-vault (docs/plan/single-vault-credentials.md): a delegated
+        // A delegated
         // cred-STORE mint is a hard 403 — the route-level gate that closes
         // the #228 shadowing hole. Same actor delegated FETCH and delegated
         // memory PUT stay mintable (scope-gated as before).

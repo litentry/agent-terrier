@@ -1,6 +1,4 @@
-//! The daemon-ADVERTISED actions of a sandbox delegate (2026-09-24 — plan
-//! `docs/plan/dsh-plugin-abstraction.md` PR 1; spec `delegate-runtime-dsh.md`
-//! §4.2 "Advertised actions").
+//! Shared wire contract for daemon-advertised delegate actions.
 //!
 //! The in-pod `agentkeys-daemon` owns the delegate's verbs — `publish_to_slot`
 //! (one event to a bound pub slot) and `propose_to_owner` (one learning into

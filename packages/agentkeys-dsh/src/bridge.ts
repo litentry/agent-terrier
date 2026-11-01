@@ -17,11 +17,11 @@
  * (`AGENTKEYS_BRIDGE_TOKEN`, #715 — fail-closed when unset); the mgmt surface
  * keeps its own `AGENTKEYS_SANDBOX_MGMT_TOKEN`.
  *
- * Typed sessions (owner decision 2026-09-23): a `/v1/chat` body that names a
+ * Typed sessions: a `/v1/chat` body that names a
  * `session` runs in that session — a throwaway one for `none` / `event`, the
  * open one for its `thread` / `conversation` key. The POLICY (the index in
  * DSH_HOME, idle expiry, reset scopes, retention, the `onEnded` hook) is the
- * `agentkeysSessions` service (sessions.ts, plan dsh-plugin-abstraction PR 2);
+ * `agentkeysSessions` service (sessions.ts);
  * this plugin is transport plus the live agent handles. A body without a
  * session runs in the legacy resident session, kept for the direct callers
  * that carry no feed (the ESP32 client, the broker's bridge proxy). The
@@ -429,7 +429,7 @@ export function apply(ctx: Context, config: Config): void {
     return streamer;
   }
 
-  // ── typed sessions (owner decision 2026-09-23) ──────────────────────────
+  // Typed sessions
   // Policy = the `agentkeysSessions` service (sessions.ts); here: the live
   // handles and the one-turn-at-a-time lock every session shares.
   /** Live typed sessions: dsh session id → handle + last use. */

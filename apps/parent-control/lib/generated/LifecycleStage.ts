@@ -2,8 +2,7 @@
 
 /**
  * #693 — the launch / pull lifecycle a delegate publishes on its own feeds
- * (`ChannelEventKind::Lifecycle`, JSON body; `docs/plan/knowledge-repository.md`
- * §8): `booting` → `restoring` (checkpoint) → `syncing` (k of n namespaces)
+ * (`ChannelEventKind::Lifecycle`, JSON body): `booting` → `restoring` (checkpoint) → `syncing` (k of n namespaces)
  * → `ready`; `degraded` when the engine is down or a pull failed (chat still
  * answers — the mirror is never load-bearing); `pulling` while a periodic
  * pass runs. Counts and milliseconds only — never a line of knowledge.

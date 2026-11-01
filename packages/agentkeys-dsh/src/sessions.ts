@@ -1,20 +1,8 @@
 /**
- * @module @agentkeys/dsh-suite/sessions — typed-session POLICY as a service
- * (plan docs/plan/dsh-plugin-abstraction.md PR 2; owner decision 2026-09-23,
- * PR #725). The bridge is transport: it receives `/v1/chat` bodies and holds
- * the live agent handles. THIS plugin owns what a session window means once a
- * body names one — the index in `DSH_HOME` (`agentkeys-sessions.json`), idle
- * expiry, the reset scopes, retention of ended logs (the newest few stay),
- * and the ONE hook the rest of the suite needs: `onEnded`, fired BEFORE a
- * session's logs retire, so the bridge disposes its live handle (the memory
- * plugin commits that OpenViking session on dispose) and, with #726, the
- * extraction / cleanup policy per window has one place to attach.
- *
- * The pure vocabulary (windows, `planTurn`, the index shape, the shared
- * fixture) stays in bridge-sessions.ts; the wire is unchanged (`session` on
- * `/v1/chat`, `POST /v1/session/reset`). Provided as the cordis service
- * `agentkeysSessions`; the bridge injects it. NO default export (dsh
- * postmortem 0001).
+ * @module @agentkeys/dsh-suite/sessions
+ * Owns session indices, idle expiry, reset scopes, retention and the onEnded hook.
+ * The bridge owns live handles and transport; bridge-sessions owns the pure policy
+ * and shared protocol fixtures. State is rooted in the configured DSH_HOME.
  */
 import { randomBytes } from 'node:crypto';
 import { isAbsolute, parse, resolve } from 'node:path';

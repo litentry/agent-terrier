@@ -140,12 +140,7 @@ contract AgentKeysV1Test is Test {
         assertEq(registry.operatorMasterWallet(operatorOmni), address(0));
     }
 
-    // NOTE: the former `test_RegisterFirstMaster_RejectsFrontRunWithDifferentSender`
-    // (#165 self-attestation front-run) was REMOVED — E7 subsumes the explicit
-    // self-attestation into the account model (the master is a passkey-controlled
-    // P256Account; the UserOp signature is the passkey proof). The first-master
-    // front-run binding is a documented production-hardening follow-up — see
-    // docs/plan/web-flow/onboarding-p256account-master.md §8.
+    // First registration rejects EOAs but does not prove operator identity ownership.
 
     // ─── SidecarRegistry: resetMaster (dev/recovery escape hatch, #225 E7) ─
     /// @notice resetMaster is OWNER-ONLY (the deployer). An attacker cannot wipe

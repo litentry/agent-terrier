@@ -1,7 +1,5 @@
-//! #612 — the sandbox delegate's SELF-SERVICE backend: per-operation credential
-//! resolution, runtime-audit append and (2026-09-24, plan
-//! `docs/plan/dsh-plugin-abstraction.md` PR 1) the delegate's two VERBS —
-//! publish (#669) and propose (#573) — on the delegate's OWN authority (its
+//! Delegate self-service backend: credential resolution, audit append, publish
+//! and propose on the delegate's own authority (its
 //! chat credential + a fresh broker session), consumed by the AgentKeys dsh
 //! plugin suite through the ui-bridge's `/v1/sandbox/self/*` routes and by
 //! the `--publish-once` / `--propose-once` one-shots (one code path each).

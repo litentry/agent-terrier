@@ -1,5 +1,4 @@
-//! #594 — the delegate-sandbox LEASE SWEEPER: the "do it automatically" half
-//! of expiry relaunch (plan `docs/plan/issue-594-sandbox-checkpoint-relaunch.md`).
+//! Delegate runtime lease reconciliation and authorized relaunch.
 //!
 //! Reconcile runtime availability against live chain authority.
 //!

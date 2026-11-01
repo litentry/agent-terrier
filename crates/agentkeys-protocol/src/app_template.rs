@@ -1,6 +1,5 @@
-//! The **app template manifest** — schema, closed kind vocabularies, the
-//! fail-closed validator and the grant compiler (#662, epic #660; plan
-//! `docs/plan/family-applications.md` §4.3, arch.md §22f).
+//! App template manifest: schema, closed vocabularies, fail-closed validation
+//! and grant compilation.
 //!
 //! An *application* composes the substrate primitives (devices, channels,
 //! delegates, context/memory, resources) into one installable household use
@@ -39,8 +38,7 @@ pub const APP_TEMPLATE_SCHEMA_DEFAULT: u32 = 1;
 /// plugin every delegate equips.
 pub const BUILT_WITH_PLUGINS: [&str; 1] = ["openviking"];
 
-/// The product-default tool class a template that declares no `tools` gets
-/// (owner decision 2026-09-01: web search/fetch is on for new delegates).
+/// Default tool class when a template declares no `tools`.
 pub const DEFAULT_TOOL_CLASSES: [&str; 1] = ["web"];
 
 /// The #108 default household namespaces the distribution mirror probes when
@@ -84,7 +82,7 @@ pub enum ChannelEndpointKind {
     /// A contact-gate channel (WeChat / Telegram behind it): contacts write,
     /// the app reads and replies. The bound registry row IS the feed — the
     /// gate registers `<app> → <channel>` at install / rebind and relays that
-    /// channel both ways (owner decision 2026-09-22: no derived name).
+    /// channel both ways without deriving a second name.
     Messaging,
     /// An interactive chat feed (the operator chat, a console session).
     Chat,

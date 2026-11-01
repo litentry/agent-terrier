@@ -7,26 +7,10 @@ interface ISidecarRegistry {
 }
 
 /// @title AgentKeysScope — per-(operator, agent) scope state
-/// @notice "Which services can this agent use, with what spend limits?"
-///         Read by the broker on cap-mint AND by workers on cap-verify
-///         (arch.md §12.4, §13.1, §19).
-///
-/// @dev    ⚠ DEPLOYMENT ORDER (codex #2): deploy this thinned scope ONLY together
-///         with the registry cutover that stores the operator's 4337 ACCOUNT as
-///         `operatorMasterWallet`. If deployed while a master is still a raw EOA,
-///         that EOA key alone could setScope/revokeScope with NO biometric (the
-///         in-contract K11 gate is gone). Never deploy E3 before the cutover.
-///
-/// @dev    #164 E3 (Solution A — ERC-4337 P-256 master). Scope mutations are
-///         authorized by `msg.sender == operatorMasterWallet(operator)`, where
-///         the master is now an ERC-4337 P-256 smart account. The passkey check
-///         happens ONCE, upstream, in the account's `validateUserOp` over the
-///         `userOpHash` — which commits the entire setScope/revokeScope calldata,
-///         so the signature is a provably-complete full-intent authorization.
-///         Consequently the per-op on-chain K11 challenge, `scopeNonce`, and the
-///         K11Verifier dependency are RETIRED here (they lived in the pre-#164
-///         EOA model). Replay is the EntryPoint 2D nonce. See
-///         docs/plan/chain/erc4337-master-account.md §3.2.
+/// @notice Broker and workers independently read these service grants and limits.
+/// @dev Mutations require the registry's operatorMasterWallet as caller. The
+///      intended master is a passkey-controlled ERC-4337 account; signature and
+///      replay checks belong to that account and its EntryPoint, not this contract.
 contract AgentKeysScope {
     ISidecarRegistry public immutable registry;
 

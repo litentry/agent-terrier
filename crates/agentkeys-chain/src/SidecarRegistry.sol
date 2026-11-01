@@ -4,36 +4,11 @@ pragma solidity ^0.8.20;
 import {K11Verifier} from "./K11Verifier.sol";
 
 /// @title SidecarRegistry — per-operator device-key bindings
-/// @notice Single source of truth for "is this device registered to this operator?"
-///         Workers re-verify caps against this state on every call (arch.md §10, §13.1).
-///
-/// @dev    Stage-2 (#90) hardening:
-///         - K11 assertions are P-256 verified ON CHAIN via [K11Verifier] →
-///           [P256Router] (precompile-first since #170/#282; RIP-7212 is live
-///           on Base/Fjord AND Heima/runtime-9261) with [P256Verifier] as the
-///           pure-Solidity fallback. Heima's deployed 0.3 set predates the
-///           router and still verifies via [P256Verifier] directly. See #168.
-///         - K11 assertion challenge is bound to (operation_kind || operator ||
-///           params || chainid || operatorNonce[operator]) so a captured K11
-///           sig cannot be replayed for a different operation.
-///         - Multi-master M-of-N recovery quorum: `revokeDevice` of a MASTER
-///           device requires >= recoveryThreshold[operator] valid K11 sigs
-///           from distinct registered masters with the RECOVERY role.
-///         - DeviceEntry stores K11 P-256 pubkey (x, y) for on-chain verify.
-///
-///         #164 E3 (Solution A): `operatorMasterWallet` now holds the operator's
-///         ERC-4337 P-256 master **account** address (was an EOA). Every
-///         `msg.sender == master` check therefore means "a passkey authorized
-///         this call" (the account's validateUserOp verified the passkey over
-///         the userOpHash, which commits this calldata). This structurally
-///         closes the agent-bind/revoke biometric gap — `registerAgentDevice` /
-///         `revokeAgentDevice` keep their `msg.sender == master` guard, now
-///         passkey-gated via the account (no new K11 code needed). The
-///         multi-master + recovery functions (`registerAdditionalMasterDevice`,
-///         `revokeMasterDevice`, `setRecoveryThreshold`) and their per-op K11 +
-///         `operatorNonce` machinery are RETAINED here pending #164 E5, which
-///         folds multi-passkey + quorum recovery into the account itself. See
-///         docs/plan/chain/erc4337-master-account.md §3.2.
+/// @notice Stores device roles, agent slots and operator master-account bindings.
+/// @dev K11 assertions bind operation parameters, chain and operator nonce.
+///      Recovery requires distinct registered master devices with recovery roles.
+///      First registration requires a contract caller, but does not attest its
+///      account implementation or ownership of the supplied operator identity.
 contract SidecarRegistry {
     // ─── Role bitfield (per device, per arch.md §6.3) ────────────────────
     uint8 public constant ROLE_CAP_MINT = 1 << 0;
@@ -192,17 +167,8 @@ contract SidecarRegistry {
     // ─── Master device registration ──────────────────────────────────────
     /// @notice Register the FIRST master device for an operator. First call wins;
     ///         subsequent master mutations need this sender.
-    /// @dev    Account model (#164 E3/E7): the caller MUST be the operator's
-    ///         ERC-4337 P-256 `P256Account` — a deployed contract reached via
-    ///         `account.execute` from a passkey-signed UserOp. The account's
-    ///         `validateUserOp` (run by the EntryPoint) already verified the passkey
-    ///         signed the userOpHash, which commits THIS `registerFirstMasterDevice`
-    ///         calldata — so the call itself proves the passkey authorized
-    ///         registering this `operatorOmni`, and `msg.sender` is the
-    ///         passkey-controlled account we record as `operatorMasterWallet`. The
-    ///         explicit #166 self-attestation is subsumed by the account model for
-    ///         the dev system (see docs/plan/web-flow/onboarding-p256account-master.md
-    ///         §8); an EOA `msg.sender` is rejected (no `validateUserOp`).
+    /// @dev Intended callers are passkey-controlled accounts executing a signed
+    ///      UserOp. The code-length check alone does not prove that provenance.
     function registerFirstMasterDevice(
         bytes32 deviceKeyHash,
         bytes32 operatorOmni,
@@ -220,17 +186,7 @@ contract SidecarRegistry {
             // Operator already has a first master; use registerAdditionalMasterDevice.
             revert DeviceAlreadyRegistered(deviceKeyHash);
         }
-        // Account model (#164 E3/E7): the master MUST be a smart-contract account
-        // (the operator's P256Account), never an EOA. The caller reaches here via
-        // account.execute from a passkey-signed UserOp, so the EntryPoint already
-        // verified the passkey signed THIS calldata (committing operatorOmni) —
-        // msg.sender IS the passkey-authorized account; record it as the master.
-        // An EOA has no validateUserOp, so an EOA master could never sign the
-        // downstream ERC-4337 master mutations (scope grant / agent accept) — reject
-        // it at the source (this structurally retires the deprecated EOA register).
-        // The explicit #166 self-attestation is SUBSUMED by the account model for
-        // the dev system; the first-master front-run binding is a production-
-        // hardening follow-up — see docs/plan/web-flow/onboarding-p256account-master.md §8.
+        // This rejects EOAs; it does not attest the caller's account implementation.
         if (msg.sender.code.length == 0) revert MasterMustBeAccount(msg.sender);
 
         operatorMasterWallet[operatorOmni] = msg.sender;

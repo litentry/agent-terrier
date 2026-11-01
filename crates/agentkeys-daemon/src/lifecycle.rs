@@ -1,5 +1,4 @@
-//! #693 — the delegate's LAUNCH / PULL LIFECYCLE (`docs/plan/knowledge-repository.md`
-//! §8): `booting` → `restoring` (checkpoint) → `syncing` (k of n namespaces)
+//! The delegate's launch / pull lifecycle: `booting` → `restoring` (checkpoint) → `syncing` (k of n namespaces)
 //! → `ready`; `degraded` when the engine is down or a pull failed (chat still
 //! answers — the mirror stays never-load-bearing); `pulling` while a periodic
 //! pass runs.

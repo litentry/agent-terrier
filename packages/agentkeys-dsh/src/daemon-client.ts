@@ -1,7 +1,6 @@
 /**
  * @module @agentkeys/dsh-suite/daemon-client — the ONE way suite code reaches
- * the co-located `agentkeys-daemon` (plan docs/plan/dsh-plugin-abstraction.md
- * PR 1, spec §3.2 "bridge token"): every request carries the per-delegate
+ * the co-located `agentkeys-daemon`: every request carries the per-delegate
  * in-pod bearer (`AGENTKEYS_BRIDGE_TOKEN`, #715), a bounded timeout, and turns
  * a non-2xx reply into a `DaemonError` whose `reason` is the daemon's own
  * `error` line — the cap-mint refusal the model must see — never a bare
