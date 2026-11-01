@@ -11,7 +11,7 @@ use zeroize::Zeroizing;
 use crate::{cred_admin, local_owner::LocalOwnerSession, CommandContext};
 
 const MAX_CREDENTIAL_BYTES: u64 = 64 * 1024;
-const CAPABILITY_TTL_SECONDS: u64 = 300;
+pub(crate) const CAPABILITY_TTL_SECONDS: u64 = 300;
 
 #[derive(Clone, Copy, clap::ValueEnum)]
 pub enum CredentialAction {
@@ -47,12 +47,14 @@ fn identity(value: &str) -> Result<[u8; 32]> {
 }
 
 pub(crate) fn load_session(
-    options: &CredentialOptions,
+    session_file: &str,
+    broker_url: &str,
+    operator_omni: &str,
     key: &DeviceKey,
     now: u64,
 ) -> Result<LocalOwnerSession> {
     let encoded =
-        protected_file::read_text(&options.session_file).context("read protected local session")?;
+        protected_file::read_text(session_file).context("read protected local session")?;
     let session: LocalOwnerSession =
         serde_json::from_str(&encoded).map_err(|_| anyhow!("invalid local session"))?;
     ensure!(
@@ -60,11 +62,11 @@ pub(crate) fn load_session(
         "session is not explicitly development-only"
     );
     ensure!(
-        session.broker_url == options.broker_url,
+        session.broker_url == broker_url,
         "session belongs to another broker; log in again"
     );
     ensure!(
-        identity(&session.session.omni_account)? == identity(&options.operator_omni)?,
+        identity(&session.session.omni_account)? == identity(operator_omni)?,
         "session belongs to another owner"
     );
     ensure!(
@@ -78,13 +80,13 @@ pub(crate) fn load_session(
     Ok(session)
 }
 
-fn request_error(error: anyhow::Error) -> anyhow::Error {
+pub(crate) fn request_error(error: anyhow::Error, operation: &str) -> anyhow::Error {
     match error.downcast_ref::<BackendError>() {
         Some(BackendError::Http { status, .. }) => {
-            anyhow!("local credential request failed (HTTP {status})")
+            anyhow!("local {operation} request failed (HTTP {status})")
         }
-        Some(BackendError::Transport(_)) => anyhow!("local credential service is unreachable"),
-        _ => anyhow!("local credential response is invalid or unsupported"),
+        Some(BackendError::Transport(_)) => anyhow!("local {operation} service is unreachable"),
+        _ => anyhow!("local {operation} response is invalid or unsupported"),
     }
 }
 
@@ -100,7 +102,9 @@ pub async fn credential(context: &CommandContext, options: &CredentialOptions) -
         DeviceKey::load(&options.device_key_file).context("load existing owner request key")?,
     );
     let session = load_session(
-        options,
+        &options.session_file,
+        &options.broker_url,
+        &options.operator_omni,
         &key,
         SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs(),
     )?;
@@ -140,7 +144,7 @@ pub async fn credential(context: &CommandContext, options: &CredentialOptions) -
                 &secret,
             )
             .await
-            .map_err(request_error)?;
+            .map_err(|error| request_error(error, "credential"))?;
             Ok(
                 json!({"development_only":true, "stored":true, "service":options.service, "object_key":object_key}),
             )
@@ -149,7 +153,7 @@ pub async fn credential(context: &CommandContext, options: &CredentialOptions) -
             let secret =
                 cred_admin::cred_fetch_with(&client, request, &session.session.session_jwt)
                     .await
-                    .map_err(request_error)?;
+                    .map_err(|error| request_error(error, "credential"))?;
             Ok(json!({"development_only":true, "service":options.service, "secret":secret}))
         }
     }
@@ -201,8 +205,22 @@ mod tests {
             .unwrap();
         };
         save(&original);
-        assert!(load_session(&options, &key, 99).is_ok());
-        assert!(load_session(&options, &key, 100).is_err());
+        assert!(load_session(
+            &options.session_file,
+            &options.broker_url,
+            &options.operator_omni,
+            &key,
+            99
+        )
+        .is_ok());
+        assert!(load_session(
+            &options.session_file,
+            &options.broker_url,
+            &options.operator_omni,
+            &key,
+            100
+        )
+        .is_err());
         for (pointer, replacement) in [
             ("/development_only", json!(false)),
             ("/broker_url", json!("http://127.0.0.1:1")),
@@ -217,11 +235,26 @@ mod tests {
             let mut changed = original.clone();
             *changed.pointer_mut(pointer).unwrap() = replacement;
             save(&changed);
-            let error = load_session(&options, &key, 99).err().unwrap();
+            let error = load_session(
+                &options.session_file,
+                &options.broker_url,
+                &options.operator_omni,
+                &key,
+                99,
+            )
+            .err()
+            .unwrap();
             assert!(!format!("{error:#}").contains("synthetic-session"));
         }
         save(&original);
-        assert!(load_session(&options, &key, 99).is_ok());
+        assert!(load_session(
+            &options.session_file,
+            &options.broker_url,
+            &options.operator_omni,
+            &key,
+            99
+        )
+        .is_ok());
     }
 
     #[test]
@@ -236,7 +269,10 @@ mod tests {
         ];
         for failure in failures {
             let http = matches!(&failure, BackendError::Http { .. });
-            let error = request_error(anyhow::Error::new(failure).context("operation failed"));
+            let error = request_error(
+                anyhow::Error::new(failure).context("operation failed"),
+                "credential",
+            );
             assert!(!format!("{error:#}").contains("synthetic-private-value"));
             if http {
                 assert!(error.to_string().contains("403"));

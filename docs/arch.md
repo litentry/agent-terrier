@@ -47,6 +47,8 @@ The card schema has one owner in `agentkeys-protocol::card`. Its TypeScript outp
 
 Independent checks at broker, worker and storage boundaries remain necessary even when they share types and pure helpers.
 
+The local owner credential, agent and channel commands share one protected-session validator. Channel publish/poll reuses `agentkeys-web-core::broker::ChannelWorkerClient` with an explicitly proxy-free, redirect-refusing native transport; the native backend client owns capability minting. The local command wrapper shares profile, identity and service resolution. See [local channels](wiki/local-channels.md).
+
 The protected local agent CLI exposes the same broker bridge as the console through the existing `BridgeProxyBody` wire type. It shares owner-session validation, requires a local development profile, bounds JSON input/output and rejects redirects/proxy inheritance. The broker remains the owner of route and live-instance authorization. See [headless agent calls](wiki/local-agents.md#call-an-agent-without-a-browser).
 
 Delegate creation and context recovery require signer custody. The broker verifies the returned device proof and checks the recovered binding; it cannot generate, store or inject delegate private keys. Reconstruction storage contains public identity and runtime metadata. Key-bearing legacy databases are refused before migration; only empty retired key columns can be dropped. Runtime recreation requires a matching public address. See [delegate custody](wiki/local-agents.md#delegate-key-custody) for the recovery and historical-storage limits.

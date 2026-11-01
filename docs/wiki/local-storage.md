@@ -51,6 +51,8 @@ The retained wire field `s3_key` is a compatibility name for an object key; thes
 
 ## Memory and channels
 
+The [local channel CLI](./local-channels.md) publishes text and polls messages through the same client as the website, using the protected owner session.
+
 The signed service owns the memory namespace; an unsigned request hint cannot change it. Native memory/inbox commands load the actor's existing `--device-key-file`. Canonical reads may instead use an explicit delegation file, never both. Protocol helpers own the `knowledge:<namespace>` service spelling. Missing keys fail without replacement.
 
 Memory updates compare the expected plaintext hash with a read revision before atomic storage update. Proposals stamp provenance from the signed actor/service and reject an existing object with `409 object_revision_conflict`. Owner inbox listing follows pagination and surfaces unreadable records. Deletion requires the distinct signed `MemoryInboxDelete` operation and is confined to inbox objects; a fetch token cannot delete.

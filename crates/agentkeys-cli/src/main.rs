@@ -1351,6 +1351,7 @@ enum AgentAction {
 
 #[derive(Subcommand)]
 enum LocalAction {
+    Channel(agentkeys_cli::local_channel::ChannelOptions),
     Credential(agentkeys_cli::local_data::CredentialOptions),
     Agent(agentkeys_cli::local_agent::AgentOptions),
 }
@@ -1777,6 +1778,11 @@ async fn main() {
         },
         Commands::Chain { action } => cmd_chain(&ctx, action).await,
         Commands::Models { action } => cmd_models(action).await,
+        Commands::Local {
+            action: LocalAction::Channel(options),
+        } => agentkeys_cli::local_channel::execute(&ctx, options)
+            .await
+            .and_then(|result| serde_json::to_string(&result).map_err(Into::into)),
         Commands::Local {
             action: LocalAction::Credential(options),
         } => agentkeys_cli::local_data::credential(&ctx, options)

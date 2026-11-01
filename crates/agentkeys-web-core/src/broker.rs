@@ -377,8 +377,11 @@ pub struct ChannelWorkerClient {
 
 impl ChannelWorkerClient {
     pub fn new(base_url: impl Into<String>) -> Self {
+        Self::with_client(default_client(), base_url)
+    }
+    pub fn with_client(http: reqwest::Client, base_url: impl Into<String>) -> Self {
         Self {
-            http: default_client(),
+            http,
             base_url: base_url.into().trim_end_matches('/').to_string(),
         }
     }

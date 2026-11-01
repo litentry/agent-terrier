@@ -171,18 +171,10 @@ pub async fn execute(context: &CommandContext, options: &AgentOptions) -> Result
     development.require_local_service(&options.broker_url)?;
     let key =
         DeviceKey::load(&options.device_key_file).context("load existing owner request key")?;
-    let binding = local_data::CredentialOptions {
-        action: local_data::CredentialAction::Fetch,
-        service: String::new(),
-        operator_omni: options.operator_omni.clone(),
-        device_key_file: options.device_key_file.clone(),
-        session_file: options.session_file.clone(),
-        broker_url: options.broker_url.clone(),
-        cred_url: String::new(),
-        secret_stdin: false,
-    };
     let session = local_data::load_session(
-        &binding,
+        &options.session_file,
+        &options.broker_url,
+        &options.operator_omni,
         &key,
         SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs(),
     )?;

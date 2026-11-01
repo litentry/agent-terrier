@@ -17,6 +17,7 @@ Use fresh development identities only. The development software signer is not pr
 - [Generated CLI reference](./cli-reference.md)
 - [Contributor guide](../../CONTRIBUTING.md)
 - [Local storage and authorization checks](./local-storage.md)
+- [Publish and read channel messages](./local-channels.md)
 - [Fast and extended test lanes](./test-lanes.md)
 - [Docker isolation qualification](./docker-qualification.md)
 - [Local website configuration](./local-website.md)
