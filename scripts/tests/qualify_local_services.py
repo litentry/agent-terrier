@@ -37,7 +37,7 @@ class LocalServicesQualification(LocalOwnerFixture):
                 environment[name] = os.environ[name]
         result = subprocess.run([sys.executable, str(REPOSITORY / "terrier"), "stack", *arguments],
             env=environment, capture_output=True, text=True, timeout=240)
-        self.assertEqual(result.returncode == 0, success, result.stderr)
+        self.assertEqual(result.returncode == 0, success, result.stderr or result.stdout)
         return json.loads(result.stdout)
 
     def test_stack_start_failure_recovery_and_saved_chain_port(self):

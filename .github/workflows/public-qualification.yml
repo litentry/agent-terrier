@@ -56,7 +56,7 @@ jobs:
           docker build --file packages/agent-terrier-runtime/Dockerfile --iidfile "${RUNNER_TEMP}/agent-image.id" .
           echo "AGENT_TERRIER_TEST_AGENT_IMAGE=$(cat "${RUNNER_TEMP}/agent-image.id")" >> "${GITHUB_ENV}"
       - name: Qualify actual local services and Docker lifecycle
-        run: python3 terrier test qualification --component chain --component services --component storage --component agents --component ui --component provisioner --report "${RUNNER_TEMP}/service-qualification.json"
+        run: python3 terrier test qualification --component chain --component services --component storage --component agents --component ui --component provisioner --component website --report "${RUNNER_TEMP}/service-qualification.json"
       - name: Summarize available reports and exact image
         if: always()
         run: |
