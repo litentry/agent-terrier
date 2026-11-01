@@ -39,6 +39,7 @@ RUST_COMPONENTS = {
             ("cli-agent-transport", "agentkeys-cli", "--test", "local_agent_transport", "")],
 }
 QUALIFICATIONS = {
+    "ui": ("qualify_public_web.py",),
     "storage": (
         "qualify_local_storage.py", "qualify_local_credentials.py", "qualify_local_config.py",
         "qualify_local_memory.py", "qualify_local_channel.py", "qualify_local_broker_storage.py",
@@ -46,6 +47,7 @@ QUALIFICATIONS = {
     ),
 }
 QUALIFICATION_RUST = {
+    "ui": [],
     "storage": [*RUST_COMPONENTS["storage"],
                 ("worker-authority", "agentkeys-worker-creds", "--test", "local_storage", "")],
 }

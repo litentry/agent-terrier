@@ -39,3 +39,13 @@ Local, in the public checkout: `./terrier test focused --component relay` runs m
 The CLI component includes native local-agent HTTP tests for redirect, proxy and remote-endpoint refusal plus receipt tests for partial completion and lost-response recovery without resubmission. It starts no Docker container. The explicit [agent lifecycle qualifier](./local-agents.md#explicit-qualification) requires a reviewed preloaded image and local Docker socket.
 
 The explicit storage lane is documented in [local storage](./local-storage.md#test-lanes-and-evidence). It forwards only the explicit contract-cache/compiler/tool selectors beyond the scrubbed tool environment, reuses all existing fixtures and rejects empty or skipped-only qualification output. Real-worker fixtures verify that the selected ignored Rust test actually ran. No new scenario supervisor or signing implementation is introduced.
+
+## Built web boundary check
+
+Locally from the public checkout, after installing browser dependencies and building the shared WASM client:
+
+```sh
+python3 terrier test qualification --component ui
+```
+
+This explicit lane reuses the fast UI checks, then builds and serves the real console on a disposable loopback port. It verifies the root page and a JavaScript asset, then requires the removed anonymous development routes to return HTTP 404 with no request to a controlled test bridge. The bridge has a positive control and synthetic responses only. The test uses an explicitly unavailable application backend and no host credentials; it is an HTTP boundary check, not authenticated browser acceptance. Build and server logs are retained privately on failure. Ordinary UI iteration still starts no server or browser.
