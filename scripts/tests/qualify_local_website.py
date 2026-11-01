@@ -64,7 +64,7 @@ class LocalWebsiteQualification(LocalOwnerFixture):
             started = self.stack(state, "start")
             group = started["services"]
             self.assertTrue(started["ready"])
-            self.assertEqual(len(group["services"]), 13)
+            self.assertEqual(len(group["services"]), 14)
             address = group["services"]["website"]["url"]
             broker = group["services"]["broker"]["url"]
             self.assertEqual(address, f"http://127.0.0.1:{web_port}")
@@ -79,7 +79,7 @@ class LocalWebsiteQualification(LocalOwnerFixture):
             self.assertFalse(website.healthy(address, "http://127.0.0.1:1", health["instance"]))
             self.assertIn(b"terrier-backend-configuration", request(address)[1])
             foreign_origin = "http://unrelated.example.test"
-            for name in ("broker", *services.WORKERS):
+            for name in ("broker", *services.WORKERS, *services.COMPUTE_WORKERS):
                 endpoint = group["services"][name]["url"]
                 for method in ("GET", "OPTIONS"):
                     positive = request(endpoint + "/healthz", method, address)

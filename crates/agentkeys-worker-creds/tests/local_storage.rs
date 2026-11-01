@@ -1485,6 +1485,84 @@ async fn native_client_uses_scoped_credentials_without_cloud_credentials() {
     task.abort();
 }
 
+#[tokio::test]
+async fn classifier_reuses_authority_denials_without_touching_storage() {
+    let fixture = Fixture::new_for(
+        DataClass::Credentials,
+        |state| {
+            let config = agentkeys_worker_classify::ClassifyWorkerConfig {
+                authority: state.config.authority.clone(),
+                chain_profile: state.config.chain_profile.clone(),
+                browser_origins: String::new(),
+            };
+            agentkeys_worker_classify::handlers::build_router(Arc::new(
+                agentkeys_worker_classify::ClassifyWorkerState::build(config).unwrap(),
+            ))
+        },
+        false,
+    )
+    .await;
+    let request = |cap| serde_json::json!({"cap":cap,"data_class":"credentials","entity":"github"});
+    let positive = || request(fixture.cap(false, CapOp::Classify));
+    assert_eq!(
+        fixture.call_body("/v1/classify/tag", positive()).await.0,
+        StatusCode::OK
+    );
+    for (mutation, reason) in [
+        (0, "cap_pop_invalid"),
+        (1, "cap_op_mismatch"),
+        (2, "cap_data_class_mismatch"),
+        (3, "device_binding_mismatch"),
+    ] {
+        let mut cap = fixture.cap(false, CapOp::Classify);
+        match mutation {
+            0 => cap.client_sig = None,
+            1 => {
+                cap.payload.op = CapOp::Fetch;
+                fixture.sign(&mut cap, false);
+            }
+            2 => {
+                cap.payload.data_class = DataClass::Memory;
+                fixture.sign(&mut cap, false);
+            }
+            _ => {
+                cap.payload.actor_omni = "33".repeat(32);
+                fixture.sign(&mut cap, false);
+            }
+        }
+        let (status, body) = fixture.call_body("/v1/classify/tag", request(cap)).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["reason"], reason);
+        assert!(body.get("classification").is_none());
+    }
+    fixture.chain.lock().unwrap().allowed = false;
+    let (status, body) = fixture.call_body("/v1/classify/tag", positive()).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(body["reason"], "service_not_in_scope");
+    assert_eq!(
+        fixture
+            .call_body(
+                "/v1/classify/tag",
+                request(fixture.cap(true, CapOp::Classify))
+            )
+            .await
+            .0,
+        StatusCode::OK
+    );
+    fixture.chain.lock().unwrap().allowed = true;
+    fixture.chain.lock().unwrap().revoked = true;
+    let (status, body) = fixture.call_body("/v1/classify/tag", positive()).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(body["reason"], "device_inactive");
+    fixture.chain.lock().unwrap().revoked = false;
+    assert_eq!(
+        fixture.call_body("/v1/classify/tag", positive()).await.0,
+        StatusCode::OK
+    );
+    assert_eq!(fixture.storage.calls.load(Ordering::SeqCst), 0);
+    assert!(fixture.snapshot().is_empty());
+}
+
 struct WorkerProcess {
     child: tokio::process::Child,
     url: String,
@@ -1496,6 +1574,7 @@ impl WorkerProcess {
         public_key: &std::path::Path,
         storage_url: &str,
         encryption_key: &std::path::Path,
+        compute: bool,
     ) -> Self {
         use std::{process::Stdio, time::Duration};
         use tokio::io::AsyncBufReadExt;
@@ -1509,10 +1588,16 @@ impl WorkerProcess {
         .arg(profile)
         .arg("--broker-public-key")
         .arg(public_key)
-        .arg("--storage-url")
-        .arg(storage_url)
-        .arg("--development-kek-file")
-        .arg(encryption_key)
+        .args(if compute {
+            Vec::new()
+        } else {
+            vec![
+                std::ffi::OsString::from("--storage-url"),
+                storage_url.into(),
+                std::ffi::OsString::from("--development-kek-file"),
+                encryption_key.as_os_str().into(),
+            ]
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true)
@@ -1554,6 +1639,10 @@ impl WorkerProcess {
         if route == "/v1/channel/publish" {
             body = serde_json::json!({"cap":body["cap"], "kind":"text", "body_b64":STANDARD.encode(PLAINTEXT)});
         }
+        if route.starts_with("/v1/classify/") {
+            body =
+                serde_json::json!({"cap":body["cap"],"data_class":"credentials","entity":"github"});
+        }
         let response = reqwest::Client::builder()
             .no_proxy()
             .build()
@@ -1570,25 +1659,25 @@ impl WorkerProcess {
 #[tokio::test]
 #[ignore = "requires the explicit real-chain credential qualification fixture"]
 async fn real_chain_credential_worker() {
-    qualify_real_worker(DataClass::Credentials).await;
+    qualify_real_worker(DataClass::Credentials, false).await;
 }
 
 #[tokio::test]
 #[ignore = "requires the explicit real-chain configuration qualification fixture"]
 async fn real_chain_config_worker() {
-    qualify_real_worker(DataClass::Config).await;
+    qualify_real_worker(DataClass::Config, false).await;
 }
 
 #[tokio::test]
 #[ignore = "requires the explicit real-chain memory qualification fixture"]
 async fn real_chain_memory_worker() {
-    qualify_real_worker(DataClass::Memory).await;
+    qualify_real_worker(DataClass::Memory, false).await;
 }
 
 #[tokio::test]
 #[ignore = "requires the explicit real-chain channel qualification fixture"]
 async fn real_chain_channel_worker() {
-    qualify_real_worker(DataClass::Channel).await;
+    qualify_real_worker(DataClass::Channel, false).await;
 }
 
 fn worker_plaintext(data_class: DataClass, body: &serde_json::Value) -> Vec<u8> {
@@ -1602,7 +1691,13 @@ fn worker_plaintext(data_class: DataClass, body: &serde_json::Value) -> Vec<u8> 
         .unwrap()
 }
 
-async fn qualify_real_worker(data_class: DataClass) {
+#[tokio::test]
+#[ignore = "requires the explicit real-chain classifier qualification fixture"]
+async fn real_chain_classifier_worker() {
+    qualify_real_worker(DataClass::Credentials, true).await;
+}
+
+async fn qualify_real_worker(data_class: DataClass, compute: bool) {
     use agentkeys_core::{chain_profile::ChainProfile, protected_file};
     use rand_core::RngCore;
     use std::path::PathBuf;
@@ -1629,7 +1724,7 @@ async fn qualify_real_worker(data_class: DataClass) {
     let public_key_file = directory.join("issuer-public.pem");
     protected_file::write(public_key_file.to_str().unwrap(), public.as_bytes(), false).unwrap();
     let encryption_key_file = directory.join("worker-encryption.key");
-    if !encryption_key_file.exists() {
+    if !compute && !encryption_key_file.exists() {
         assert_eq!(phase, "active");
         let mut key = [0; 32];
         rand_core::OsRng.fill_bytes(&mut key);
@@ -1643,24 +1738,32 @@ async fn qualify_real_worker(data_class: DataClass) {
     let profile = ChainProfile::load_from_file(&profile_path).unwrap();
     profile.require_local_development(true, None).unwrap();
     let database = directory.join(format!("{}.db", data_class.as_str()));
-    let store = Arc::new(
-        LocalStore::open(
-            &database,
-            data_class,
-            AuthorityConfig::from_profile(&profile, public).unwrap(),
-        )
-        .unwrap(),
-    );
-    let (storage_url, storage_task) = serve(agentkeys_local_store::router(store)).await;
+    let (storage_url, storage_task) = if compute {
+        (String::new(), None)
+    } else {
+        let store = Arc::new(
+            LocalStore::open(
+                &database,
+                data_class,
+                AuthorityConfig::from_profile(&profile, public).unwrap(),
+            )
+            .unwrap(),
+        );
+        let (url, task) = serve(agentkeys_local_store::router(store)).await;
+        (url, Some(task))
+    };
     let mut worker = WorkerProcess::start(
         &profile_path,
         &public_key_file,
         &storage_url,
         &encryption_key_file,
+        compute,
     )
     .await;
     let cap = |key: &DeviceKey, actor: &str, op| {
-        let operation = if data_class == DataClass::Channel {
+        let operation = if compute {
+            CapOp::Classify
+        } else if data_class == DataClass::Channel {
             match op {
                 CapOp::Store => CapOp::ChannelPublish,
                 CapOp::Fetch => CapOp::ChannelSubscribe,
@@ -1682,6 +1785,9 @@ async fn qualify_real_worker(data_class: DataClass) {
             }
             .into();
         }
+        if compute {
+            cap.payload.service = "classify:credentials".into();
+        }
         sign_cap(&signer, key, &mut cap);
         cap
     };
@@ -1697,6 +1803,83 @@ async fn qualify_real_worker(data_class: DataClass) {
             },
         )
     };
+    if compute {
+        let route = "/v1/classify/tag";
+        let (status, body) = worker.call(route, owner_cap(CapOp::Classify), false).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(body["classification"].is_object());
+        let (status, body) = worker.call(route, agent_cap(CapOp::Classify), false).await;
+        if phase == "active" {
+            assert_eq!(status, StatusCode::OK, "{body}");
+            for (mutation, reason) in [
+                (0, "cap_pop_invalid"),
+                (1, "device_binding_mismatch"),
+                (2, "service_not_in_scope"),
+                (3, "cap_data_class_mismatch"),
+            ] {
+                let mut cap = agent_cap(CapOp::Classify);
+                match mutation {
+                    0 => cap.client_sig = None,
+                    1 => {
+                        cap.payload.actor_omni = "33".repeat(32);
+                        sign_cap(&signer, &agent, &mut cap);
+                    }
+                    2 => {
+                        cap.payload.service = "ungranted".into();
+                        sign_cap(&signer, &agent, &mut cap);
+                    }
+                    _ => {
+                        cap.payload.data_class = DataClass::Memory;
+                        sign_cap(&signer, &agent, &mut cap);
+                    }
+                }
+                let (status, body) = worker.call(route, cap, false).await;
+                assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+                assert_eq!(body["reason"], reason);
+                assert!(body.get("classification").is_none());
+            }
+            worker.stop().await;
+            worker = WorkerProcess::start(
+                &profile_path,
+                &public_key_file,
+                "",
+                &encryption_key_file,
+                true,
+            )
+            .await;
+            assert_eq!(
+                worker
+                    .call(route, agent_cap(CapOp::Classify), false)
+                    .await
+                    .0,
+                StatusCode::OK
+            );
+        } else {
+            assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+            assert_eq!(
+                body["reason"],
+                match phase.as_str() {
+                    "scope_revoked" => "service_not_in_scope",
+                    "device_revoked" => "device_inactive",
+                    _ => panic!("unknown phase"),
+                }
+            );
+            assert!(body.get("classification").is_none());
+        }
+        assert_eq!(
+            worker
+                .call(route, owner_cap(CapOp::Classify), false)
+                .await
+                .0,
+            StatusCode::OK
+        );
+        assert!(
+            !database.exists(),
+            "compute qualification created a durable store"
+        );
+        worker.stop().await;
+        return;
+    }
     let (put_route, get_route) = if data_class == DataClass::Config {
         ("/v1/config/put", "/v1/config/get")
     } else if data_class == DataClass::Channel {
@@ -1785,6 +1968,7 @@ async fn qualify_real_worker(data_class: DataClass) {
             &public_key_file,
             &storage_url,
             &encryption_key_file,
+            compute,
         )
         .await;
     } else {
@@ -1808,5 +1992,5 @@ async fn qualify_real_worker(data_class: DataClass) {
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(worker_plaintext(data_class, &body), PLAINTEXT);
     worker.stop().await;
-    storage_task.abort();
+    storage_task.unwrap().abort();
 }

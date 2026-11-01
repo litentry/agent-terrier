@@ -12,52 +12,54 @@ pub async fn verify_cap(
     expected_op: CapOp,
     data_class: DataClass,
 ) -> Result<(), ApiError> {
-    verify::verify_signature(&state.config.authority.broker_public_key, cap)
+    verify_authority(
+        &state.config.authority,
+        &state.http,
+        cap,
+        expected_op,
+        data_class,
+    )
+    .await
+}
+
+pub async fn verify_authority(
+    authority: &agentkeys_core::capability_verify::AuthorityConfig,
+    http: &reqwest::Client,
+    cap: &CapToken,
+    expected_op: CapOp,
+    data_class: DataClass,
+) -> Result<(), ApiError> {
+    verify::verify_signature(&authority.broker_public_key, cap)
         .map_err(|e| err_403(e.to_string(), "broker_sig_invalid"))?;
     verify::enforce_client_pop(cap).map_err(|e| err_403(e.to_string(), "cap_pop_invalid"))?;
     verify::check_op(cap, expected_op).map_err(|e| err_403(e.to_string(), "cap_op_mismatch"))?;
     verify::check_data_class(cap, data_class)
         .map_err(|e| err_403(e.to_string(), "cap_data_class_mismatch"))?;
     verify::check_freshness(cap).map_err(|e| err_403(e.to_string(), "cap_freshness_failed"))?;
-    verify::check_chain_device(
-        &state.http,
-        &state.config.authority.rpc_url,
-        &state.config.authority.registry,
-        cap,
-    )
-    .await
-    .map_err(|e| match e {
-        verify::VerifyError::DeviceInactive => err_403(e.to_string(), "device_inactive"),
-        verify::VerifyError::DeviceMismatch { .. } => {
-            err_403(e.to_string(), "device_binding_mismatch")
-        }
-        verify::VerifyError::DeviceRoleMissing { .. } => {
-            err_403(e.to_string(), "device_role_missing")
-        }
-        _ => err_502(e.to_string(), "chain_rpc"),
-    })?;
-    verify::check_chain_scope(
-        &state.http,
-        &state.config.authority.rpc_url,
-        &state.config.authority.scope,
-        cap,
-    )
-    .await
-    .map_err(|e| match e {
-        verify::VerifyError::NotInScope => err_403(e.to_string(), "service_not_in_scope"),
-        _ => err_502(e.to_string(), "chain_rpc"),
-    })?;
-    verify::check_chain_k3_epoch(
-        &state.http,
-        &state.config.authority.rpc_url,
-        &state.config.authority.epoch,
-        cap,
-    )
-    .await
-    .map_err(|e| match e {
-        verify::VerifyError::K3Mismatch { .. } => err_403(e.to_string(), "k3_epoch_mismatch"),
-        _ => err_502(e.to_string(), "chain_rpc"),
-    })?;
+    verify::check_chain_device(http, &authority.rpc_url, &authority.registry, cap)
+        .await
+        .map_err(|e| match e {
+            verify::VerifyError::DeviceInactive => err_403(e.to_string(), "device_inactive"),
+            verify::VerifyError::DeviceMismatch { .. } => {
+                err_403(e.to_string(), "device_binding_mismatch")
+            }
+            verify::VerifyError::DeviceRoleMissing { .. } => {
+                err_403(e.to_string(), "device_role_missing")
+            }
+            _ => err_502(e.to_string(), "chain_rpc"),
+        })?;
+    verify::check_chain_scope(http, &authority.rpc_url, &authority.scope, cap)
+        .await
+        .map_err(|e| match e {
+            verify::VerifyError::NotInScope => err_403(e.to_string(), "service_not_in_scope"),
+            _ => err_502(e.to_string(), "chain_rpc"),
+        })?;
+    verify::check_chain_k3_epoch(http, &authority.rpc_url, &authority.epoch, cap)
+        .await
+        .map_err(|e| match e {
+            verify::VerifyError::K3Mismatch { .. } => err_403(e.to_string(), "k3_epoch_mismatch"),
+            _ => err_502(e.to_string(), "chain_rpc"),
+        })?;
     Ok(())
 }
 

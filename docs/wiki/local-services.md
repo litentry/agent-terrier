@@ -1,4 +1,4 @@
-The local service launcher starts the real broker, development signer, authenticated model relay, transaction submitter and four storage workers, each with its own persistent object database. It uses the existing chain controller, signing implementation, key generators, protected state files and worker executables. It can configure the broker to use a reviewed local agent image. It can also supervise a prepared local model runner and prebuilt web console through the same owner. Protected [agent creation and archive](./local-agents.md) use the same service group and the canonical lifecycle implementation.
+The local service launcher starts the real broker, development signer, authenticated model relay, transaction submitter four storage workers, each with its own persistent object database, and a stateless classifier. It uses the existing chain controller, signing implementation, key generators, protected state files and worker executables. It can configure the broker to use a reviewed local agent image. It can also supervise a prepared local model runner and prebuilt web console through the same owner. Protected [agent creation and archive](./local-agents.md) use the same service group and the canonical lifecycle implementation.
 
 The [lightweight terminal manager](./local-manager.md) composes these same controllers through `terrier stack`, including persistent whole-backend restart.
 
@@ -10,7 +10,7 @@ Local, from the public checkout, prepare dependencies and binaries:
 ./terrier contracts setup
 cargo build -p agentkeys-cli -p agentkeys-broker-server -p agentkeys-local-store \
   -p agentkeys-worker-creds -p agentkeys-worker-config \
-  -p agentkeys-worker-memory -p agentkeys-worker-channel -p agentkeys-mock-server \
+  -p agentkeys-worker-memory -p agentkeys-worker-channel -p agentkeys-worker-classify -p agentkeys-mock-server \
   -p agentkeys-gate -p agentkeys-bundler
 ./terrier chain start
 ./terrier chain deploy
@@ -25,9 +25,9 @@ The first start generates fresh broker signing keys, a development signer master
 
 Repeating `services start` reuses a healthy owned supervisor. It refuses changed ports, another deployment, unhealthy existing services and missing original keys. Startup failures stop only the children launched by that supervisor. An unrelated listener on the selected port is preserved. No process is stopped using a PID found in a state file.
 
-The service manifest is version 7. It retains optional runtime, model-runner and website configuration; existing configured components are retained, while newly introduced optional components stay disabled until explicitly selected. Stop an older supervisor before starting the updated launcher. Migration verifies existing state and creates only newly introduced files: the signer key for version 1, relay admin/key-registry files for versions 1 and 2, and the transaction submitter key for versions 1 through 3. It preserves existing keys and data. Once introduced, a missing file requires restoration; migration never regenerates a previously required key.
+The service manifest is version 9. It retains optional runtime disk policy, model-runner and website configuration; existing configured components are retained, while newly introduced optional components stay disabled until explicitly selected. Stop an older supervisor before starting the updated launcher. Migration verifies existing state and creates only newly introduced files: the signer key for version 1, relay admin/key-registry files for versions 1 and 2, and the transaction submitter key for versions 1 through 3. It preserves existing keys and data. Once introduced, a missing file requires restoration; migration never regenerates a previously required key.
 
-Add `--website` after preparing the [local console](./local-website.md) to start it in the same service group. Its first selected port is persisted, its runtime backend comes from the broker endpoint, and the supervisor configures exact-origin browser access on the broker and storage workers. Website health covers delivery and instance/configuration identity; complete browser enrollment and auxiliary services remain separate qualification.
+Add `--website` after preparing the [local console](./local-website.md) to start it in the same service group. Its first selected port is persisted, its runtime backend comes from the broker endpoint, and the supervisor configures exact-origin browser access on the broker, storage workers and classifier. Website health covers delivery and instance/configuration identity; complete browser enrollment and auxiliary services remain separate qualification.
 
 ## Configure the local agent image
 
@@ -42,6 +42,12 @@ After building the [public image](./local-agent-image.md), local in the same pub
 Image and socket must be supplied together the first time. The selected image must already exist and provide the managed entry point; startup never pulls it. Subsequent stop/start retains the image, socket and unique runtime namespace. Stop services before selecting an updated image. An existing state directory cannot silently switch Docker engines; use a separate state directory for another socket.
 
 The supervisor gives the broker an isolated empty Docker client configuration and the canonical public transport script. It does not inherit Docker login configuration or context selection. The broker checks the image before reporting startup readiness. An absent/invalid image stops the owned startup group; correct the explicit image and retry. `status` reports the configured runtime separately from component health. This proves configuration and image availability, not successful agent creation or inference.
+
+## Local classification
+
+The classifier uses the deployed local profile, explicit broker public key and shared capability verifier. It independently verifies the broker signature, actor proof, operation, data class, expiry, current device binding, service grant and key epoch before returning a catalog result. It performs no model request and creates no object database or encryption key. Missing development opt-in, remote chain profiles and non-loopback listeners are refused.
+
+The classifier shares the storage workers' precise denial codes, including `device_inactive`, `device_binding_mismatch` and `service_not_in_scope`. The former generic `chain_check_failed` classifier code is retired. `terrier test qualification --component services` exercises real chain grants and revocation, positive controls, restart and refusal without a classification result or storage side effect. Website qualification also checks exact-origin access to this service. Audit integration and browser enrollment remain separate work.
 
 ## Local model relay
 
@@ -113,14 +119,14 @@ Local, after building the binaries and preparing contract dependencies:
 
 ```bash
 python3 -m unittest discover -s scripts/tests
-python3 scripts/tests/qualify_local_services.py
+./terrier test qualification --component services
 python3 scripts/tests/qualify_local_bundler.py
 python3 scripts/tests/qualify_local_credential_cli.py
 ```
 
 To include managed-image startup and missing-image recovery, set `AGENT_TERRIER_TEST_AGENT_IMAGE` and `AGENT_TERRIER_TEST_DOCKER_SOCKET` before running the service qualifier. Both must be set together. This mode uses the reviewed preloaded image and still performs no model inference.
 
-The explicit qualifier starts actual contracts and all twelve service processes, registers and logs in an owner, verifies a real signature, stores/fetches a credential, and restarts the service group without replacing its keys, derived signing address or issuer. It builds a delegate operation through the real signer, checks repeat/restart identity consistency, rejects unauthenticated and foreign-owner builds, and verifies building alone leaves the chain unchanged. It checks unauthenticated and cross-actor signing denial, missing-key and changed-deployment refusal, preserves an unrelated listener, injects a component startup failure, verifies cleanup and confirms the chain remains owned and running. It also proves missing/wrong relay admin credentials cannot change the key registry, authorized provisioning survives restart, revocation survives restart, and missing relay files are refused. It then restarts successfully and reads the same credential. This is separate from the fast default unit-test loop and from the remaining complete agent/model journey.
+The explicit qualifier starts actual contracts and all thirteen service processes, registers and logs in an owner, verifies a real signature, stores/fetches a credential, and restarts the service group without replacing its keys, derived signing address or issuer. It builds a delegate operation through the real signer, checks repeat/restart identity consistency, rejects unauthenticated and foreign-owner builds, and verifies building alone leaves the chain unchanged. It checks unauthenticated and cross-actor signing denial, missing-key and changed-deployment refusal, preserves an unrelated listener, injects a component startup failure, verifies cleanup and confirms the chain remains owned and running. It also proves missing/wrong relay admin credentials cannot change the key registry, authorized provisioning survives restart, revocation survives restart, and missing relay files are refused. It then restarts successfully and reads the same credential. This is separate from the fast default unit-test loop and from the remaining complete agent/model journey.
 
 The credential qualifier drives `terrier cred` through real owner sessions. It checks exact round-trip bytes and restart persistence, cross-owner isolation, expired/invalid/mismatched sessions, private-file permissions, missing keys, deployment mismatch, input bounds and remote endpoint refusal. Redirect and proxy controls prove no follow-on request reaches the alternate listener. Denied stores must leave the database unchanged, and error output must omit bearer and credential values.
 

@@ -43,7 +43,7 @@ QUALIFICATIONS = {
     "contracts": (),
     "provisioner": (),
     "chain": ("qualify_local_chain.py", "qualify_local_signing.py", "qualify_local_binding.py", "qualify_local_owner.py", "qualify_local_login.py", "qualify_local_bundler.py"),
-    "services": ("qualify_local_services.py",),
+    "services": ("qualify_local_services.py", "qualify_local_classify.py"),
     "agents": ("qualify_local_agents.py",),
     "website": ("qualify_local_website.py",),
     "ui": ("qualify_public_web.py",),

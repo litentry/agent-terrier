@@ -1,6 +1,4 @@
-//! Classifier worker HTTP surface — a COMPUTE gate. Same cap-verify chain as the
-//! storage workers (sig → op → data-class → freshness → chain device/scope/epoch),
-//! but the effect is TAG / COMPILE over the in-process catalog, not an S3 touch.
+//! Authorized catalog classification using the shared worker verifier.
 
 use axum::{
     extract::State,
@@ -11,17 +9,16 @@ use serde::{Deserialize, Serialize};
 
 use crate::classify::{self, CompileResult};
 use crate::state::SharedClassifyWorkerState;
-use agentkeys_worker_creds::errors::{err_403, err_502, ApiError};
-use agentkeys_worker_creds::verify::{self, CapOp, CapToken, DataClass};
+use agentkeys_worker_creds::errors::ApiError;
+use agentkeys_worker_creds::verify::{CapOp, CapToken, DataClass};
 
 pub fn build_router(state: SharedClassifyWorkerState) -> Router {
-    let browser_origins = std::env::var("AGENTKEYS_BROWSER_ORIGINS").unwrap_or_default();
     Router::new()
         .route("/healthz", get(healthz))
         .route("/v1/classify/tag", post(classify_tag))
         .route("/v1/classify/compile", post(classify_compile))
         .layer(agentkeys_worker_creds::cors::browser_cors_layer(
-            &browser_origins,
+            &state.config.browser_origins,
         ))
         .with_state(state)
 }
@@ -80,70 +77,25 @@ async fn classify_compile(
     Ok(Json(CompileResponse { ok: true, result }))
 }
 
-/// The cap gate (isolation layers 1-2) — identical chain to the storage workers,
-/// but pinned to `op=Classify` and the request's declared `data_class`. The
-/// storage workers reject `op=Classify` (`check_op`); this worker rejects any
-/// non-Classify cap, and rejects a Classify cap whose signed `data_class` differs
-/// from what's being classified (`cap_data_class_mismatch`, symmetric with §17.5).
 async fn verify_classify_cap(
     state: &SharedClassifyWorkerState,
     cap: &CapToken,
     expected_class: DataClass,
 ) -> Result<(), ApiError> {
-    verify::verify_signature(&state.config.broker_pubkey_pem, cap)
-        .map_err(|e| err_403(e.to_string(), "broker_sig_invalid"))?;
-    // K10 proof-of-possession (issue #76 — broker-SPOF defense). Same shared
-    // gate the storage workers run (verify::enforce_client_pop).
-    verify::enforce_client_pop(cap).map_err(|e| err_403(e.to_string(), "cap_pop_invalid"))?;
-    verify::check_op(cap, CapOp::Classify)
-        .map_err(|e| err_403(e.to_string(), "cap_op_mismatch"))?;
-    verify::check_data_class(cap, expected_class)
-        .map_err(|e| err_403(e.to_string(), "cap_data_class_mismatch"))?;
-    verify::check_freshness(cap).map_err(|e| err_403(e.to_string(), "cap_freshness_failed"))?;
-    verify::check_chain_device(
+    agentkeys_worker_creds::storage_worker::verify_authority(
+        &state.config.authority,
         &state.http,
-        &state.config.chain_rpc_http,
-        &state.config.registry_contract,
         cap,
+        CapOp::Classify,
+        expected_class,
     )
     .await
-    .map_err(err_403_or_502)?;
-    // Classify is master-driven onboarding (operator == actor), so check_chain_scope
-    // SKIPS the on-chain isServiceInScope for operator == actor (mirrors the broker
-    // cap-mint + storage workers).
-    verify::check_chain_scope(
-        &state.http,
-        &state.config.chain_rpc_http,
-        &state.config.scope_contract,
-        cap,
-    )
-    .await
-    .map_err(err_403_or_502)?;
-    verify::check_chain_k3_epoch(
-        &state.http,
-        &state.config.chain_rpc_http,
-        &state.config.epoch_contract,
-        cap,
-    )
-    .await
-    .map_err(err_403_or_502)?;
-    Ok(())
-}
-
-fn err_403_or_502(e: verify::VerifyError) -> ApiError {
-    match e {
-        verify::VerifyError::DeviceInactive
-        | verify::VerifyError::DeviceMismatch { .. }
-        | verify::VerifyError::DeviceRoleMissing { .. }
-        | verify::VerifyError::NotInScope
-        | verify::VerifyError::K3Mismatch { .. } => err_403(e.to_string(), "chain_check_failed"),
-        _ => err_502(e.to_string(), "chain_rpc"),
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agentkeys_worker_creds::verify;
     use agentkeys_worker_creds::verify::CapPayload;
 
     fn cap(op: CapOp, data_class: DataClass) -> CapToken {

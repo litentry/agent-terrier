@@ -27,13 +27,14 @@ WORKERS = {
     "memory": "agentkeys-worker-memory",
     "channel": "agentkeys-worker-channel",
 }
+COMPUTE_WORKERS = {"classify": "agentkeys-worker-classify"}
 BROKER_BINARY = "agentkeys-broker-server"
 STORE_BINARY = "agentkeys-local-store"
 SIGNER_BINARY = "agentkeys-local-signer"
 RELAY_BINARY = "agentkeys-gate"
 BUNDLER_BINARY = "agentkeys-bundler"
-BINARIES = (BROKER_BINARY, STORE_BINARY, SIGNER_BINARY, RELAY_BINARY, BUNDLER_BINARY, *WORKERS.values())
-MANIFEST_VERSION = 8
+BINARIES = (BROKER_BINARY, STORE_BINARY, SIGNER_BINARY, RELAY_BINARY, BUNDLER_BINARY, *WORKERS.values(), *COMPUTE_WORKERS.values())
+MANIFEST_VERSION = 9
 
 
 def binary_directory(repository, configured=None):
@@ -64,7 +65,7 @@ def prepare(repository, state, binaries, port, runtime_image=None, docker_socket
     manifest_path = directory / "manifest.json"
     if manifest_path.exists() or manifest_path.is_symlink():
         manifest = local_state.read_json(manifest_path)
-        if (not isinstance(manifest, dict) or manifest.get("version") not in (1, 2, 3, 4, 5, 6, 7, MANIFEST_VERSION) or manifest.get("development_only") is not True
+        if (not isinstance(manifest, dict) or manifest.get("version") not in (1, 2, 3, 4, 5, 6, 7, 8, MANIFEST_VERSION) or manifest.get("development_only") is not True
                 or manifest.get("profile_identity") != fingerprint
                 or type(manifest.get("initialized")) is not bool
                 or type(manifest.get("broker_port")) is not int
@@ -401,7 +402,7 @@ def serve(repository, state, configured):
         signal.signal(signal.SIGTERM, interrupted)
         signal.signal(signal.SIGINT, interrupted)
         try:
-            for name in ("broker", "signer", *WORKERS):
+            for name in ("broker", "signer", *WORKERS, *COMPUTE_WORKERS):
                 listener = reservations.enter_context(socket.socket())
                 listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
                 listener.bind(("127.0.0.1", manifest["broker_port"] if name == "broker" else 0))
@@ -436,7 +437,7 @@ def serve(repository, state, configured):
                 AGENTKEYS_GATE_TURN_URL=components["model_relay"][1] + "/v1", AGENTKEYS_BUNDLER_URL=components["bundler"][1],
                 BROKER_SPONSOR_SIGNER_KEY_FILE=str(directory / "bundler/submitter.key"))
             environment.update(AGENTKEYS_DELEGATE_KEYS="signer", AGENTKEYS_SIGNER_URL=endpoints["signer"])
-            for name in WORKERS:
+            for name in (*WORKERS, *COMPUTE_WORKERS):
                 worker = "cred" if name == "credentials" else name
                 environment[f"AGENTKEYS_WORKER_{worker.upper()}_URL"] = endpoints[name]
             environment.update(runtime_environment(repository, directory, manifest["runtime"]))
@@ -461,6 +462,11 @@ def serve(repository, state, configured):
                     [*common, "--storage-url", store[1], "--development-kek-file", worker_directory / "development.key",
                      "--browser-origins", browser_origin],
                     contracts.tool_environment())
+
+            for name, worker_binary in COMPUTE_WORKERS.items():
+                components[name] = launch_reserved(name, binaries / worker_binary,
+                    ["--development", "--profile", profile_path, "--broker-public-key", public_key,
+                     "--browser-origins", browser_origin], contracts.tool_environment())
 
             if manifest["website"] is not None:
                 process, address, website_instance = website.launch(repository, manifest["website"],
@@ -532,6 +538,7 @@ def logs(state):
     paths = [state / "services-supervisor.log"]
     directory = state / "services"
     paths.extend([directory / "broker.log", directory / "signer.log", directory / "model-relay.log", directory / "model-runner.log", directory / "bundler.log", directory / "website.log",
+                  *[directory / f"{name}.log" for name in COMPUTE_WORKERS],
                   *[directory / f"{name}{suffix}.log" for name in WORKERS for suffix in ("", "-store")]])
     for path in paths:
         if path.exists() or path.is_symlink():
