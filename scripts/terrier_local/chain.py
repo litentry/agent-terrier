@@ -25,12 +25,17 @@ def default_profile(repository):
     return json.loads((repository / "crates/agentkeys-core/chain-profiles/anvil.json").read_text())
 
 
-def rpc(endpoint, method, parameters=None):
+def rpc_location(endpoint):
     location = urllib.parse.urlsplit(endpoint)
     if (location.scheme != "http" or location.hostname != "127.0.0.1"
             or location.username or location.password or location.query or location.fragment
             or location.path not in ("", "/") or not location.port):
         raise ValueError("Local chain RPC must be an explicit IPv4 loopback HTTP endpoint")
+    return location
+
+
+def rpc(endpoint, method, parameters=None):
+    rpc_location(endpoint)
     request = urllib.request.Request(endpoint, data=json.dumps({
         "jsonrpc": "2.0", "id": 1, "method": method, "params": parameters or [],
     }).encode(), headers={"Content-Type": "application/json"})
@@ -120,7 +125,12 @@ def status(state):
 
 def start(repository, state, port=None):
     profile = default_profile(repository)
-    selected_port = port if port is not None else urllib.parse.urlsplit(profile["rpc"]["http"]).port
+    saved_profile = state / "chain-profile.json"
+    if port is None and (saved_profile.exists() or saved_profile.is_symlink()):
+        profile = local_state.read_json(saved_profile)
+        selected_port = rpc_location(profile.get("rpc", {}).get("http", "")).port
+    else:
+        selected_port = port if port is not None else urllib.parse.urlsplit(profile["rpc"]["http"]).port
     if not isinstance(selected_port, int) or not 1 <= selected_port <= 65535:
         raise ValueError("Chain port must be between 1 and 65535")
     current = status(state)

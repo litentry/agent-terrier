@@ -4,12 +4,20 @@ from pathlib import Path
 import subprocess
 import sys
 
-from . import agent, chain, contracts, data, deployment, local_state, models, owner, services, test_lanes
+from . import agent, chain, contracts, data, deployment, local_state, models, owner, services, stack, manager, test_lanes
 
 
-def main():
+def main(argv=None):
     parser = argparse.ArgumentParser(description="Agent Terrier local development tools")
     commands = parser.add_subparsers(dest="command", required=True)
+    commands.add_parser("manage", help="Open the lightweight terminal manager for the local backend stack")
+    stack_parser = commands.add_parser("stack", help="Compose the existing local chain and service controllers")
+    stack_parser.add_argument("action", choices=["start", "status", "doctor", "logs", "stop", "restart"])
+    stack_parser.add_argument("--chain-port", type=int, help="Loopback RPC port; defaults to the saved profile")
+    stack_parser.add_argument("--bin-dir", type=Path)
+    stack_parser.add_argument("--broker-port", type=int)
+    stack_parser.add_argument("--runtime-image")
+    stack_parser.add_argument("--docker-socket", type=Path)
     test_parser = commands.add_parser("test", help="Run measured source, core or focused test lanes")
     test_parser.add_argument("lane", choices=["source", "core", "focused"])
     test_parser.add_argument("--component", action="append", default=[], choices=test_lanes.COMPONENTS)
@@ -82,9 +90,12 @@ def main():
     supervisor.add_argument("--anvil", required=True)
     service_supervisor = commands.add_parser("_serve-services", help=argparse.SUPPRESS)
     service_supervisor.add_argument("--bin-dir", type=Path, required=True)
-    arguments = parser.parse_args()
+    arguments = parser.parse_args(argv)
     repository = Path(__file__).resolve().parents[2]
     try:
+        if arguments.command == "manage":
+            print(f"Local state: {local_state.state_directory(repository)}")
+            return manager.run(main)
         if arguments.command == "test":
             report, exit_code = test_lanes.run(repository, arguments.lane, arguments.component,
                 arguments.online, arguments.report, arguments.plan)
@@ -97,6 +108,20 @@ def main():
             print(json.dumps(result, indent=2))
             return 0
         state = local_state.state_directory(repository)
+        if arguments.command == "stack":
+            configuration = (arguments.chain_port, arguments.bin_dir, arguments.broker_port,
+                             arguments.runtime_image, arguments.docker_socket)
+            if arguments.action not in ("start", "restart") and any(value is not None for value in configuration):
+                raise ValueError("Stack configuration options require start or restart")
+            if arguments.action == "logs":
+                return stack.logs(state)
+            if arguments.action in ("status", "doctor"):
+                result = stack.execute(repository, state, arguments.action)
+            else:
+                with local_state.exclusive_lock(state / "operation.lock"):
+                    result = stack.execute(repository, state, arguments.action, *configuration)
+            print(json.dumps(result, indent=2))
+            return 0 if result["success"] else 1
         if arguments.command == "agent":
             with local_state.exclusive_lock(state / "operation.lock"):
                 return agent.execute(repository, state, arguments)

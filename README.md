@@ -2,7 +2,7 @@
 
 Agent Terrier is an open-source agent platform with on-chain authorization, a shared Rust core, a command-line client and a web console.
 
-The standalone local development environment is being built in [epic #1](https://github.com/litentry/agent-terrier/issues/1). Local contracts, owner login, supervised storage and Docker agent creation/archive are runnable; the complete agent/model/web journey remains unfinished.
+The standalone local development environment is being built in [epic #1](https://github.com/litentry/agent-terrier/issues/1). Local contracts, owner login, supervised storage, Docker agent lifecycle and offline model chat with restart recall are runnable; channel/tool-authority/browser and complete release acceptance remain unfinished.
 
 ## Development
 
@@ -47,6 +47,8 @@ The [local services guide](docs/wiki/local-services.md) covers `terrier services
 The [local agent image guide](docs/wiki/local-agent-image.md) covers the shared plugin composition, reproducible image build, fast process checks and real-model qualification through an explicit local-service connection with container networking disabled. Complete lifecycle and service composition remain under development.
 
 The [local agent guide](docs/wiki/local-agents.md) covers protected `terrier agent spawn/archive/receipt` commands, structured completion receipts and real-chain/Docker qualification. Archive retains application data; pending or incomplete operations exit nonzero.
+
+The [local manager guide](docs/wiki/local-manager.md) covers the lightweight terminal menu (`terrier manage`) and scriptable whole-backend start/status/doctor/logs/stop/restart (`terrier stack`). Both use the existing lifecycle controllers.
 
 ## License
 
