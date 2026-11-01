@@ -29,6 +29,41 @@ class LocalServicesQualification(LocalOwnerFixture):
         self.assertNotEqual(result.returncode, 0)
         return result
 
+    def stack(self, state, *arguments, success=True):
+        environment = contracts.tool_environment()
+        environment["AGENT_TERRIER_STATE_DIR"] = str(state)
+        for name in ("AGENT_TERRIER_CACHE_DIR", "AGENT_TERRIER_SOLC"):
+            if os.environ.get(name):
+                environment[name] = os.environ[name]
+        result = subprocess.run([sys.executable, str(REPOSITORY / "terrier"), "stack", *arguments],
+            env=environment, capture_output=True, text=True, timeout=240)
+        self.assertEqual(result.returncode == 0, success, result.stderr)
+        return json.loads(result.stdout)
+
+    def test_stack_start_failure_recovery_and_saved_chain_port(self):
+        with tempfile.TemporaryDirectory(prefix="terrier-stack-", dir="/tmp") as temporary:
+            state = Path(temporary).resolve() / "state"
+            selected_port = available_port()
+            try:
+                self.assertFalse(self.stack(state, "doctor", success=False)["ready"])
+                refused = self.stack(state, "start", "--chain-port", str(selected_port),
+                    "--bin-dir", str(state / "missing-binaries"), success=False)
+                self.assertEqual(refused["failed_stage"], "services")
+                self.assertFalse(refused["chain"]["running"])
+                self.assertFalse(refused["services"]["running"])
+                profile = local_state.read_json(state / "chain-profile.json")
+                started = self.stack(state, "start")
+                self.assertTrue(started["ready"])
+                self.assertEqual(started["chain"]["rpc_http"], f"http://127.0.0.1:{selected_port}")
+                self.assertFalse(started["deployment"]["deployed"])
+                self.assertEqual(local_state.read_json(state / "chain-profile.json"), profile)
+                self.assertEqual(self.stack(state, "start")["chain"], started["chain"])
+                self.assertTrue(self.stack(state, "stop")["state_preserved"])
+                self.assertFalse(self.stack(state, "doctor", success=False)["ready"])
+            finally:
+                self.services(state, "stop")
+                self.invoke(state, "stop")
+
     def test_service_lifecycle_real_credentials_and_failure_cleanup(self):
         with tempfile.TemporaryDirectory(prefix="terrier-services-", dir="/tmp") as temporary:
             root = Path(temporary).resolve()
@@ -165,6 +200,16 @@ class LocalServicesQualification(LocalOwnerFixture):
                 self.assertEqual(signing_check(), original_signer_address)
                 credential("fetch")
                 self.assertTrue(all(path.read_bytes() == value for path, value in preserved.items()), "service restart replaced a key")
+                restarted = self.stack(state, "restart")
+                self.assertTrue(restarted["ready"])
+                self.assertEqual(restarted["chain"]["rpc_http"], running_chain["rpc_http"])
+                self.assertNotEqual(restarted["chain"]["instance_id"], running_chain["instance_id"])
+                running = restarted["services"]
+                running_chain = restarted["chain"]
+                self.assertEqual(running["services"]["broker"]["url"], broker)
+                self.assertTrue(all(path.read_bytes() == value for path, value in preserved.items()), "stack restart replaced a key")
+                credential("fetch")
+                self.assertEqual(signing_check(), original_signer_address)
                 relay = running["services"]["model_relay"]["url"]
                 self.assertEqual(request(relay + "/v1/usage", bearer=relay_token)[0], 200)
                 before = registry.read_bytes()
