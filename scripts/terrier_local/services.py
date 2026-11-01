@@ -33,7 +33,7 @@ SIGNER_BINARY = "agentkeys-local-signer"
 RELAY_BINARY = "agentkeys-gate"
 BUNDLER_BINARY = "agentkeys-bundler"
 BINARIES = (BROKER_BINARY, STORE_BINARY, SIGNER_BINARY, RELAY_BINARY, BUNDLER_BINARY, *WORKERS.values())
-MANIFEST_VERSION = 7
+MANIFEST_VERSION = 8
 
 
 def binary_directory(repository, configured=None):
@@ -58,13 +58,13 @@ def available_port():
         return listener.getsockname()[1]
 
 
-def prepare(repository, state, binaries, port, runtime_image=None, docker_socket=None, model_directory=None, model_binary=None, enable_website=None, web_port=None):
+def prepare(repository, state, binaries, port, runtime_image=None, docker_socket=None, model_directory=None, model_binary=None, enable_website=None, web_port=None, runtime_disk_policy=None):
     running_chain, profile, fingerprint = deployment.active_profile(repository, state)
     directory = local_state.private_directory(state / "services")
     manifest_path = directory / "manifest.json"
     if manifest_path.exists() or manifest_path.is_symlink():
         manifest = local_state.read_json(manifest_path)
-        if (not isinstance(manifest, dict) or manifest.get("version") not in (1, 2, 3, 4, 5, 6, MANIFEST_VERSION) or manifest.get("development_only") is not True
+        if (not isinstance(manifest, dict) or manifest.get("version") not in (1, 2, 3, 4, 5, 6, 7, MANIFEST_VERSION) or manifest.get("development_only") is not True
                 or manifest.get("profile_identity") != fingerprint
                 or type(manifest.get("initialized")) is not bool
                 or type(manifest.get("broker_port")) is not int
@@ -80,7 +80,7 @@ def prepare(repository, state, binaries, port, runtime_image=None, docker_socket
         manifest = {"version":MANIFEST_VERSION, "development_only":True, "profile_identity":fingerprint,
                     "broker_port":port if port is not None else available_port(), "initialized":False}
         local_state.write_json(manifest_path, manifest)
-    runtime = runtime_configuration(manifest, runtime_image, docker_socket)
+    runtime = runtime_configuration(manifest, runtime_image, docker_socket, runtime_disk_policy)
     model_runner = models.configuration(manifest, model_directory, model_binary)
     web_configuration = website.configuration(manifest, enable_website, web_port)
     if web_configuration is not None:
@@ -141,7 +141,7 @@ def prepare(repository, state, binaries, port, runtime_image=None, docker_socket
     return manifest
 
 
-def runtime_configuration(manifest, image=None, socket_path=None):
+def runtime_configuration(manifest, image=None, socket_path=None, disk_policy=None):
     if (image is None) != (socket_path is None):
         raise ValueError("Runtime image and Docker socket must be configured together")
     if manifest.get("version", 0) >= 5 and manifest.get("initialized") and "runtime" not in manifest:
@@ -149,10 +149,22 @@ def runtime_configuration(manifest, image=None, socket_path=None):
     previous = manifest.get("runtime")
     if previous is not None:
         validate_runtime_configuration(previous)
+    if disk_policy is not None:
+        if not isinstance(disk_policy, str) or len(disk_policy) > 4096:
+            raise ValueError("Runtime disk policy must be a JSON object; see the disk-policy reference")
+        disk_policy = json.loads(disk_policy)
+        if not isinstance(disk_policy, dict):
+            raise ValueError("Runtime disk policy must be a JSON object; see the disk-policy reference")
     if image is None:
-        return previous
+        if disk_policy is None:
+            return previous
+        if previous is None:
+            raise ValueError("Configure a local runtime image and Docker socket before its disk policy")
+        return {**previous, "disk_policy":disk_policy}
     configured = {"image":image, "socket":str(Path(socket_path).expanduser()),
                   "namespace":previous["namespace"] if previous else "terrier-" + secrets.token_hex(16)}
+    if disk_policy is not None or previous and "disk_policy" in previous:
+        configured["disk_policy"] = disk_policy if disk_policy is not None else previous["disk_policy"]
     validate_runtime_configuration(configured)
     if previous and previous["socket"] != configured["socket"]:
         raise ValueError("Existing runtime state belongs to another Docker socket; use a separate local state directory")
@@ -160,8 +172,10 @@ def runtime_configuration(manifest, image=None, socket_path=None):
 
 
 def validate_runtime_configuration(configuration):
-    if not isinstance(configuration, dict) or set(configuration) != {"image", "socket", "namespace"}:
+    if not isinstance(configuration, dict) or set(configuration) not in ({"image", "socket", "namespace"}, {"image", "socket", "namespace", "disk_policy"}):
         raise ValueError("Invalid persisted runtime configuration")
+    if "disk_policy" in configuration and (not isinstance(configuration["disk_policy"], dict) or len(json.dumps(configuration["disk_policy"])) > 4096):
+        raise ValueError("Invalid persisted runtime disk policy")
     image, endpoint, namespace = (configuration[name] for name in ("image", "socket", "namespace"))
     if (not all(isinstance(value, str) and value for value in (image, endpoint, namespace))
             or image.startswith("-") or any(character.isspace() for character in image)
@@ -186,7 +200,8 @@ def runtime_environment(repository, directory, configuration):
             "AGENT_TERRIER_DOCKER_SOCKET":configuration["socket"],
             "AGENT_TERRIER_RUNTIME_NAMESPACE":configuration["namespace"],
             "AGENT_TERRIER_TRANSPORT_SCRIPT":str((repository / "packages/agent-terrier-runtime/service-transport.mjs").resolve()),
-            "DOCKER_CONFIG":str(client_directory)}
+            "DOCKER_CONFIG":str(client_directory),
+            **({"AGENT_TERRIER_RUNTIME_DISK_POLICY":json.dumps(configuration["disk_policy"])} if "disk_policy" in configuration else {})}
 
 
 def prepare_submitter(state, binaries, manifest, running_chain, profile):
@@ -214,7 +229,7 @@ def prepare_submitter(state, binaries, manifest, running_chain, profile):
         chain.rpc(running_chain["rpc_http"], "anvil_setBalance", [address, hex(funding)])
 
 
-def start(repository, state, configured=None, port=None, runtime_image=None, docker_socket=None, model_directory=None, model_binary=None, enable_website=None, web_port=None):
+def start(repository, state, configured=None, port=None, runtime_image=None, docker_socket=None, model_directory=None, model_binary=None, enable_website=None, web_port=None, runtime_disk_policy=None):
     current = status(state)
     if current["running"]:
         if current.get("service_schema") != MANIFEST_VERSION:
@@ -223,8 +238,8 @@ def start(repository, state, configured=None, port=None, runtime_image=None, doc
             raise RuntimeError("Local services are unhealthy; inspect doctor/logs, then stop before restarting")
         if port is not None and current["broker_port"] != port:
             raise ValueError("The owned broker is already running on a different port")
-        if runtime_image is not None or docker_socket is not None:
-            requested = runtime_configuration({"runtime":current.get("runtime")}, runtime_image, docker_socket)
+        if runtime_image is not None or docker_socket is not None or runtime_disk_policy is not None:
+            requested = runtime_configuration({"runtime":current.get("runtime")}, runtime_image, docker_socket, runtime_disk_policy)
             if requested != current.get("runtime"):
                 raise ValueError("Stop local services before changing runtime configuration")
         if model_directory is not None or model_binary is not None:
@@ -237,7 +252,7 @@ def start(repository, state, configured=None, port=None, runtime_image=None, doc
                 raise ValueError("Stop local services before changing website configuration")
         return current
     binaries = binary_directory(repository, configured)
-    prepare(repository, state, binaries, port, runtime_image, docker_socket, model_directory, model_binary, enable_website, web_port)
+    prepare(repository, state, binaries, port, runtime_image, docker_socket, model_directory, model_binary, enable_website, web_port, runtime_disk_policy)
     log = local_state.open_private(state / "services-supervisor.log", os.O_CREAT | os.O_WRONLY | os.O_APPEND)
     environment = contracts.tool_environment()
     environment["AGENT_TERRIER_STATE_DIR"] = str(state)

@@ -67,7 +67,11 @@ class LocalAgentQualification(LocalOwnerFixture):
             if os.environ.get("AGENT_TERRIER_TEST_MODEL_DIR"):
                 model_options = ["--model-dir", os.environ["AGENT_TERRIER_TEST_MODEL_DIR"],
                                  "--model-binary", os.environ["AGENT_TERRIER_TEST_MODEL_BINARY"]]
-            running = self.services(state, "start", "--runtime-image", image, "--docker-socket", docker_socket, *model_options)
+            disk_policy = {"state_limit_mib":1024, "min_free_mib":1024, "check_interval_seconds":2}
+            running = self.services(state, "start", "--runtime-image", image, "--docker-socket", docker_socket,
+                "--runtime-disk-policy", json.dumps(disk_policy), *model_options)
+            self.assertEqual(running["runtime"]["disk_policy"], disk_policy)
+            self.assertEqual(local_state.read_json(state / "services/manifest.json")["runtime"]["disk_policy"], disk_policy)
             if model_options:
                 capabilities = models.run(REPOSITORY, "probe")
                 self.assertEqual(capabilities["embedding_dimensions"], models.recipe(REPOSITORY)["embedding"]["dimension"])

@@ -26,6 +26,7 @@ Agent Terrier local development tools
 | --chain-port | no |  | Loopback RPC port; defaults to the saved profile |
 | --bin-dir | no |  |  |
 | --broker-port | no |  |  |
+| --runtime-disk-policy | no |  | Explicit JSON development disk policy; persisted with runtime configuration |
 | --runtime-image | no |  |  |
 | --docker-socket | no |  |  |
 | --model-dir | no |  | Own a local model runner using predownloaded models |
@@ -83,6 +84,7 @@ Agent Terrier local development tools
 | action | yes | start, status, doctor, logs, stop |  |
 | --bin-dir | no |  | Directory containing built public service binaries |
 | --broker-port | no |  | Broker port for the first service startup |
+| --runtime-disk-policy | no |  | Explicit JSON development disk policy; persisted with runtime configuration |
 | --runtime-image | no |  | Enable the managed runtime with a reviewed preloaded local image |
 | --docker-socket | no |  | Explicit local Docker Unix socket; required with --runtime-image |
 | --model-dir | no |  | Own a local model runner using predownloaded models |

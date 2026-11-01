@@ -56,3 +56,19 @@ Runtime images must provide an `nc` executable supporting `nc 127.0.0.1 <port>` 
 Connections have a five-second header deadline, a bounded header size, a one-hour maximum lifetime and at most 32 concurrent connections per endpoint. Missing or wrong forwarding proof returns HTTP 403 before any container stream starts. Endpoint teardown closes its listener and active host forwarding tasks; credentials and container environments are never printed in those errors. Existing containers with published ports are refused and require explicit operator inspection/removal before reuse.
 
 The real qualifier reproduced cross-network access with the earlier published-port configuration on Docker Engine 29.5.3. The unpublished-port configuration passed both authorized HTTP controls and cross-network denial on that engine. Separate bridge networks alone are insufficient evidence for published-port isolation: Docker documents that publishing ports permits access across bridge networks. See the [Docker bridge networking documentation](https://docs.docker.com/engine/network/drivers/bridge/).
+
+## Development disk policy
+
+The managed Docker controller measures allocated state-volume usage and available space before sending the bootstrap frame. It repeats the measurement while the agent runs. Exceeding the allowance, falling below the reserve or failing to measure stops that container through the existing controller. Saved state is retained. A restart still refuses oversized state; explicitly raise the allowance or recover/remove the unwanted data before trying again.
+
+`DiskPolicy` in `crates/agentkeys-runtime/src/docker_runtime/disk.rs` owns the defaults and validation: 1,024 MiB per agent, at least 1,024 MiB free on the Docker volume filesystem, and a 15-second check interval. Each sample has a ten-second deadline. Values are explicit positive integers; the interval may be 1–300 seconds. Standalone managed callers supply the same policy through `AGENT_TERRIER_RUNTIME_DISK_POLICY`. The stack launcher accepts and persists it using `--runtime-disk-policy`; it does not import that setting from the ambient shell.
+
+Local, from the public checkout, after stopping a configured stack, an example explicit policy is:
+
+```sh
+python3 terrier stack start --runtime-disk-policy "$(jq -n '{state_limit_mib:2048,min_free_mib:1024,check_interval_seconds:15}')"
+```
+
+This is a development safeguard, **not a hard filesystem quota or hostile-agent disk-isolation guarantee**. Writes can exceed the allowance between measurements. Allocated reachable state files are counted with [`du -skx`](https://www.gnu.org/s/coreutils/manual/html_node/du-invocation.html), without following symlinks or crossing filesystems; deleted files still held open are not included. Available space comes from [`df -Pk`](https://www.gnu.org/s/coreutils/manual/html_node/df-invocation.html). Unreadable state causes refusal. Docker image layers, engine logs, other volumes and the host filesystem backing a virtual engine are outside this per-agent count. Free-space measurement describes the volume filesystem inside Docker, not the host's remaining physical capacity. The trusted Docker engine and host must remain responsive for shutdown to be confirmed.
+
+The managed qualification has an authorized chat below a small allowance, writes beyond that allowance, waits for the affected container to stop and proves another actor remains running. It refuses restart with the saved oversized data, then increases the allowance and verifies those bytes survived. An impossibly large free-space reserve exercises low-disk refusal without filling the machine; refused starts make no model call. Unit checks pin the exact allowance/free-space boundaries and reject malformed measurements instead of treating them as zero usage.
