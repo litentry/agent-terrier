@@ -1,10 +1,6 @@
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use agentkeys_broker_server::error::BrokerError;
-use agentkeys_broker_server::sts::{StsClient, UnavailableStsClient};
-use axum::response::IntoResponse;
-
 struct BrokerProcess(Child);
 
 impl Drop for BrokerProcess {
@@ -12,28 +8,6 @@ impl Drop for BrokerProcess {
         let _ = self.0.kill();
         let _ = self.0.wait();
     }
-}
-
-#[tokio::test]
-async fn unavailable_exchange_refuses_every_operation() {
-    let adapter = UnavailableStsClient;
-    let results = [
-        adapter
-            .assume_role_with_web_identity("role", "session", "synthetic", 900)
-            .await
-            .map(|_| ()),
-        adapter
-            .assume_role_scoped("role", "session", "synthetic", 900, None)
-            .await
-            .map(|_| ()),
-        adapter.caller_identity_ok().await,
-    ];
-    for result in results {
-        let error = result.unwrap_err();
-        assert!(matches!(error, BrokerError::Unavailable(_)));
-        assert_eq!(error.into_response().status(), 503);
-    }
-    assert!(!adapter.supports_inline_session_policy());
 }
 
 #[tokio::test]
@@ -49,6 +23,13 @@ async fn local_binary_wires_the_private_email_outbox() {
 async fn check_local_binary(email_enabled: bool) {
     let directory = tempfile::tempdir().unwrap();
     let binary = env!("CARGO_BIN_EXE_agentkeys-broker-server");
+    let wake_path = directory.path().join("wake-token");
+    agentkeys_core::protected_file::write(
+        wake_path.to_str().unwrap(),
+        b"synthetic-wake-token",
+        true,
+    )
+    .unwrap();
     for purpose in ["oidc", "session"] {
         let generated = Command::new(binary)
             .env_clear()
@@ -66,6 +47,7 @@ async fn check_local_binary(email_enabled: bool) {
         Command::new(binary)
             .env_clear()
             .env("BROKER_OIDC_ISSUER", &endpoint)
+            .env("BROKER_CHANNEL_WAKE_TOKEN_FILE", &wake_path)
             .env("BROKER_DEV_MODE", "true")
             .env(
                 "BROKER_AUTH_METHODS",
@@ -128,6 +110,57 @@ async fn check_local_binary(email_enabled: bool) {
             assert!(agentkeys_core::protected_file::read_text(path.to_str().unwrap()).is_ok());
         }
     }
+    for route in [
+        "canonical-sts",
+        "inbox-sts",
+        "own-sts",
+        "speech-sts",
+        "channel-sts",
+    ] {
+        let response = client
+            .post(format!("{endpoint}/v1/cap/{route}"))
+            .json(&serde_json::json!({}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            404,
+            "retired exchange remains reachable: {route}"
+        );
+    }
+    for bearer in [None, Some("wrong-synthetic-token")] {
+        let mut request = client.post(format!("{endpoint}/v1/sandbox/wake")).json(
+            &agentkeys_protocol::ChannelWakeRequest {
+                owner_omni: "synthetic-owner".into(),
+                channel_id: "synthetic-feed".into(),
+                event_ts_ms: None,
+            },
+        );
+        if let Some(bearer) = bearer {
+            request = request.bearer_auth(bearer);
+        }
+        let denied = request.send().await.unwrap();
+        assert_eq!(denied.status(), 401);
+        let body: serde_json::Value = denied.json().await.unwrap();
+        assert_eq!(body["error"], "unauthorized");
+        assert!(!body.to_string().contains("synthetic-wake-token"));
+    }
+    let control = client
+        .post(format!("{endpoint}/v1/sandbox/wake"))
+        .bearer_auth("synthetic-wake-token")
+        .json(&agentkeys_protocol::ChannelWakeRequest {
+            owner_omni: "synthetic-owner".into(),
+            channel_id: "synthetic-feed".into(),
+            event_ts_ms: None,
+        })
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(control.status(), 200);
+    let receipt: serde_json::Value = control.json().await.unwrap();
+    assert_eq!(receipt["woken"], serde_json::json!([]));
+    assert_eq!(receipt["skipped"], 0);
     let refused = client
         .post(format!("{endpoint}/v1/cap/cred-store"))
         .json(&agentkeys_protocol::BrokerCapRequest {
@@ -145,13 +178,4 @@ async fn check_local_binary(email_enabled: bool) {
         .await
         .unwrap();
     assert_eq!(refused.status(), 401);
-    let unknown_provider = Command::new(binary)
-        .env_clear()
-        .env("AGENTKEYS_STS_PROVIDER", "unconfigured-external")
-        .args(["--port", "0"])
-        .output()
-        .unwrap();
-    assert!(!unknown_provider.status.success());
-    assert!(String::from_utf8_lossy(&unknown_provider.stderr)
-        .contains("unsupported by the local binary"));
 }

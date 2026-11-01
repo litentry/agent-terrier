@@ -90,7 +90,7 @@ test-stub            = []                          # existing — injected trans
 
 [dev-dependencies]
 agentkeys-web-core = { workspace = true }
-agentkeys-broker-server = { path = ".", features = ["test-stub", "auth-email-link"] }
+agentkeys-broker-server = { path = ".", features = ["test-stub", "auth-email-link", "auth-oauth2-google"] }
 agentkeys-mock-server = { path = "../agentkeys-mock-server" }
 tower = { version = "0.4", features = ["util"] }
 http-body-util = "0.1"

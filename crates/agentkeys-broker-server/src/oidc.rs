@@ -233,7 +233,7 @@ mod tests {
     }
 
     #[test]
-    fn jwks_shape_matches_aws_oidc_expectations() {
+    fn jwks_shape_matches_oidc_expectations() {
         let tmp = TempDir::new().unwrap();
         let kp = OidcKeypair::generate_and_persist(&tmp.path().join("kp.json")).unwrap();
         let jwks = kp.jwks_json();
@@ -255,7 +255,7 @@ mod tests {
         let claims = serde_json::json!({
             "iss": "https://oidc.primary.example",
             "sub": "agentkeys:agent:0xabc",
-            "aud": "sts.amazonaws.com",
+            "aud": "https://relying-party.example",
             "exp": 9_999_999_999_u64,
             "iat": 1_000_000_000_u64,
             "agentkeys_user_wallet": "0xabc",
@@ -267,7 +267,7 @@ mod tests {
         let decoding_key =
             DecodingKey::from_ec_components(&kp.public_x_b64, &kp.public_y_b64).unwrap();
         let mut validation = Validation::new(Algorithm::ES256);
-        validation.set_audience(&["sts.amazonaws.com"]);
+        validation.set_audience(&["https://relying-party.example"]);
         validation.set_issuer(&["https://oidc.primary.example"]);
 
         let token_data: jsonwebtoken::TokenData<serde_json::Value> =

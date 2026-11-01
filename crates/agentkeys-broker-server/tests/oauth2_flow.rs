@@ -37,7 +37,6 @@ use agentkeys_broker_server::{
         AuthNonceStore, EmailRateLimitStore, IdentityLinkStore, OAuth2PendingStore,
         SpawnContextStore, WalletStore,
     },
-    sts::{AssumedCredentials, StsClient, StubStsClient},
 };
 use serde_json::Value;
 use tempfile::TempDir;
@@ -45,15 +44,6 @@ use tempfile::TempDir;
 const TEST_ISSUER: &str = "https://broker.oauth2.test";
 const TEST_REDIRECT: &str = "https://broker.oauth2.test/auth/oauth2/callback";
 const TEST_CLIENT_ID: &str = "test-google-client-id";
-
-fn stub_creds() -> AssumedCredentials {
-    AssumedCredentials {
-        access_key_id: "ASIA-OAUTH".into(),
-        secret_access_key: "oauth-secret".into(),
-        session_token: "oauth-session".into(),
-        expiration_unix: 9_999_999_999,
-    }
-}
 
 async fn spawn_broker() -> (String, Arc<AppState>, Arc<StubOAuth2Provider>) {
     let tmp = Box::leak(Box::new(TempDir::new().unwrap()));
@@ -99,20 +89,11 @@ async fn spawn_broker() -> (String, Arc<AppState>, Arc<StubOAuth2Provider>) {
         audit: vec![sqlite_anchor],
     });
 
-    let sts: Arc<dyn StsClient> = Arc::new(StubStsClient::ok(stub_creds()));
-
     let config = BrokerConfig {
         login_config: None,
         login_access: Default::default(),
-        data_role_arn: "arn:aws:iam::000:role/test".into(),
-        memory_role_arn: String::new(),
-        speech_role_arn: String::new(),
-        channel_role_arn: String::new(),
-        channel_sts_token: String::new(),
-        sts_provider: "aws".into(),
+        channel_wake_token: String::new(),
         audit_db_path: tmp.path().join("audit.sqlite"),
-        aws_region: "us-east-1".into(),
-        session_duration_seconds: 3600,
         shutdown_grace_seconds: 5,
         oidc_issuer: TEST_ISSUER.into(),
         oidc_keypair_path: tmp.path().join("oidc.json"),
@@ -122,7 +103,7 @@ async fn spawn_broker() -> (String, Arc<AppState>, Arc<StubOAuth2Provider>) {
         audit_anchors: "sqlite".into(),
         refuse_to_boot_strict: false,
         client_id: agentkeys_broker_server::identity::DEFAULT_CLIENT_ID.to_string(),
-        sts_audience: "sts.amazonaws.com".into(),
+        oidc_audience: "https://relying-party.example".into(),
     };
 
     let http = reqwest::Client::builder()
@@ -135,7 +116,6 @@ async fn spawn_broker() -> (String, Arc<AppState>, Arc<StubOAuth2Provider>) {
         config,
         http,
         audit: AuditLog::open_in_memory().unwrap(),
-        sts,
         oidc: Arc::new(oidc),
         session_keypair: Arc::new(session_kp),
         registry,

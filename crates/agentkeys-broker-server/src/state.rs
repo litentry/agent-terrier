@@ -11,7 +11,6 @@ use crate::storage::{
     AgentDelegationStore, AuthNonceStore, IdentityLinkStore, PairingRequestStore,
     SpawnContextStore, WalletStore,
 };
-use crate::sts::StsClient;
 
 /// Tier-2 reachability state shared with the /readyz handler.
 ///
@@ -32,7 +31,6 @@ pub struct AppState {
     /// US-011 retires it. New mints write through the AuditAnchor trait
     /// in `registry.audit`.
     pub audit: AuditLog,
-    pub sts: Arc<dyn StsClient>,
     pub oidc: Arc<OidcKeypair>,
     /// Stage 7 additions:
     pub session_keypair: Arc<SessionKeypair>,

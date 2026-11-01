@@ -768,15 +768,8 @@ mod tests {
         BrokerConfig {
             login_config: None,
             login_access: Default::default(),
-            data_role_arn: "arn:aws:iam::000:role/test".into(),
-            memory_role_arn: String::new(),
-            speech_role_arn: String::new(),
-            channel_role_arn: String::new(),
-            channel_sts_token: String::new(),
-            sts_provider: "aws".into(),
+            channel_wake_token: String::new(),
             audit_db_path: audit_db,
-            aws_region: "us-east-1".into(),
-            session_duration_seconds: 3600,
             shutdown_grace_seconds: 30,
             oidc_issuer: oidc_issuer.to_string(),
             oidc_keypair_path: oidc_kp_path,
@@ -786,7 +779,7 @@ mod tests {
             audit_anchors: "sqlite".into(),
             refuse_to_boot_strict: false,
             client_id: crate::identity::DEFAULT_CLIENT_ID.to_string(),
-            sts_audience: "sts.amazonaws.com".into(),
+            oidc_audience: "https://relying-party.example".into(),
         }
     }
 

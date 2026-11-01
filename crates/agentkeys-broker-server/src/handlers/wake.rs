@@ -11,22 +11,18 @@
 //! or trigger a competing creation. The runtime receives a replay window
 //! (`AGENTKEYS_WAKE_SINCE_MS`) that includes the event which woke it.
 //!
-//! Authority: the caller is the co-located channel worker (the #541 host-minted
-//! `AGENTKEYS_CHANNEL_STS_TOKEN` bearer — the same worker-only trust the
-//! channel-sts mint uses); every create is still gated on a LIVE chain probe
-//! (registered ∧ ¬revoked ∧ TIER_AGENT, omnis from the chain — D1), exactly
-//! like the lease sweeper. The row is provisioning data; the wake cannot widen
-//! anything: a delegate that was never granted the feed has no row naming it.
+//! The channel worker authenticates with an explicitly configured protected token.
+//! Every create also requires current on-chain registration and actor binding.
 
 use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::Json;
 use serde::Serialize;
 
+use crate::auth::constant_time_str_eq;
 use crate::auth::extract_bearer_token;
 use crate::error::{BrokerError, BrokerResult};
 use crate::handlers::accept::{eth_call, load_accept_config, selector};
-use crate::handlers::channel_sts::constant_time_str_eq;
 use crate::handlers::revoke::parse_device_probe;
 use crate::state::SharedState;
 
@@ -114,10 +110,10 @@ pub async fn sandbox_wake(
     headers: HeaderMap,
     Json(req): Json<WakeRequest>,
 ) -> BrokerResult<Json<WakeResponse>> {
-    let expected_bearer = &state.config.channel_sts_token;
+    let expected_bearer = &state.config.channel_wake_token;
     if expected_bearer.is_empty() {
         return Err(BrokerError::Internal(
-            "sandbox wake not configured: AGENTKEYS_CHANNEL_STS_TOKEN is unset; \
+            "sandbox wake not configured: BROKER_CHANNEL_WAKE_TOKEN_FILE is unset; \
              configure the same protected token for the broker and channel worker"
                 .into(),
         ));

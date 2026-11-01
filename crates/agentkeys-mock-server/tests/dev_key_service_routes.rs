@@ -483,14 +483,7 @@ async fn signer_only_has_no_external_credential_exchange() {
     )
     .await;
     assert_eq!(before.0, StatusCode::OK);
-    let exchange = serde_json::to_value(agentkeys_protocol::SignStsBody {
-        omni_account: omni,
-        data_class: "config".into(),
-        verbs: vec!["get".into()],
-        ttl_seconds: 60,
-        oidc_token: "untrusted-token".into(),
-    })
-    .unwrap();
+    let exchange = json!({"omni_account": omni, "data_class": "config", "verbs": ["get"], "ttl_seconds": 60, "oidc_token": "untrusted-token"});
     let rejected =
         post_json_with_header(router.clone(), "/dev/sign-sts", exchange, Some(&bearer)).await;
     assert_eq!(rejected.0, StatusCode::NOT_FOUND);

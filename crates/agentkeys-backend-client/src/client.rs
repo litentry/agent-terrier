@@ -11,7 +11,7 @@ use crate::protocol::{
     InboxDeleteBody, InboxDeleteResp, InboxGetBody, InboxGetResp, InboxItem, InboxItemMeta,
     InboxListBody, InboxListResp, MemoryGetBody, MemoryGetInput, MemoryGetResp, MemoryGetResult,
     MemoryInboxAppendBody, MemoryInboxAppendResp, MemoryPutBody, MemoryPutInput, MemoryPutResp,
-    MemoryPutResult, RevokeResult, SpeechStsBody, SpeechStsResult, ENVELOPE_VERSION,
+    MemoryPutResult, RevokeResult, ENVELOPE_VERSION,
 };
 
 /// #552 — everything the client needs to have a cap-PoP signed IN the signer
@@ -291,31 +291,6 @@ impl BackendClient {
         }
 
         resp.json::<CapToken>()
-            .await
-            .map_err(|e| BackendError::Parse(e.to_string()))
-    }
-
-    /// Redeem a speech capability through an explicitly configured speech service.
-    pub async fn speech_sts(
-        &self,
-        cap: CapToken,
-        session_bearer: &str,
-    ) -> Result<SpeechStsResult, BackendError> {
-        let url = format!("{}/v1/cap/speech-sts", self.broker()?);
-        let resp = self
-            .client
-            .post(&url)
-            .bearer_auth(session_bearer)
-            .json(&SpeechStsBody { cap })
-            .send()
-            .await
-            .map_err(|e| BackendError::Transport(e.to_string()))?;
-        if !resp.status().is_success() {
-            let status = resp.status().as_u16();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(BackendError::Http { status, body });
-        }
-        resp.json::<SpeechStsResult>()
             .await
             .map_err(|e| BackendError::Parse(e.to_string()))
     }

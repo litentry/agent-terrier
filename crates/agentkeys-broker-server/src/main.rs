@@ -10,7 +10,6 @@ use agentkeys_broker_server::{
     jwt::session::SessionKeypair,
     oidc::OidcKeypair,
     state::{AppState, Tier2State},
-    sts::UnavailableStsClient,
 };
 use clap::{Parser, Subcommand, ValueEnum};
 
@@ -155,7 +154,6 @@ async fn main() -> anyhow::Result<()> {
         config,
         http,
         audit,
-        sts: Arc::new(UnavailableStsClient),
         oidc: boot_artifacts.oidc_keypair,
         session_keypair: boot_artifacts.session_keypair,
         registry: boot_artifacts.registry,

@@ -213,8 +213,7 @@ pub async fn cap_memory_canonical_get(
 /// `proposal:<ns>` grant (a DISTINCT service-id from the `knowledge:<ns>` read grant —
 /// granting read never grants push). The delegate then redeems the cap at the
 /// memory worker's `/v1/memory/inbox-append`, which performs the write
-/// server-side under a broker-minted, prefix-scoped operator STS (`/v1/cap/inbox-sts`);
-/// the delegate holds no AWS creds.
+/// after independently verifying current authority for the exact inbox path.
 pub async fn cap_memory_append(
     State(state): State<SharedState>,
     headers: HeaderMap,
@@ -322,7 +321,7 @@ pub struct CapSpeechRequest {
     #[serde(default)]
     pub client_ts: Option<u64>,
     /// Device→sandbox delegation (issue #369) — passed through to the minted
-    /// cap-token; `/v1/cap/speech-sts` re-verifies it on redemption.
+    /// cap-token; a speech implementation must independently verify it.
     #[serde(default)]
     pub delegation_path: Option<DelegationPath>,
 }
@@ -968,36 +967,6 @@ fn keccak256_of_lc_service(name: &str) -> String {
     hasher.update(name.to_lowercase().as_bytes());
     let digest = hasher.finalize();
     format!("0x{}", hex::encode(digest))
-}
-
-/// Verify a `broker_sig` THIS broker produced over `payload` (#295 P1 §7a — the
-/// `/v1/cap/canonical-sts` endpoint re-verifies a CanonicalFetch cap before
-/// issuing scoped STS, so a forged/foreign cap can't obtain operator-prefix
-/// credentials). Recomputes `Sha256(json(payload))` and checks the ECDSA sig
-/// against the verifying key derived from the session signing PEM. Exact inverse
-/// of [`sign_cap_payload`] (same digest input, same encoding).
-pub(crate) fn verify_cap_payload_sig(
-    signing_pem: &str,
-    payload: &CapPayload,
-    sig_b64: &str,
-) -> bool {
-    use p256::ecdsa::signature::Verifier;
-    let Ok(canonical) = serde_json::to_vec(payload) else {
-        return false;
-    };
-    let mut hasher = Sha256::new();
-    hasher.update(&canonical);
-    let digest = hasher.finalize();
-    let Ok(sig_bytes) = URL_SAFE_NO_PAD.decode(sig_b64) else {
-        return false;
-    };
-    let Ok(sig) = Signature::from_slice(&sig_bytes) else {
-        return false;
-    };
-    let Ok(signing_key) = SigningKey::from_pkcs8_pem(signing_pem) else {
-        return false;
-    };
-    signing_key.verifying_key().verify(&digest, &sig).is_ok()
 }
 
 fn sign_cap_payload(signing_pem: &str, payload: &CapPayload) -> Result<String, CapError> {

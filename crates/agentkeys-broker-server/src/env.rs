@@ -17,9 +17,9 @@
 /// Operators reading the runbook see related vars together (Designer review #docs).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Group {
-    /// Backend session validation, AWS region, audit DB path, etc.
+    /// Local service and audit configuration.
     Core,
-    /// OIDC issuer keypair + JWT TTL (used by AWS STS AssumeRoleWithWebIdentity).
+    /// OIDC issuer keypair, audience and token lifetime.
     Oidc,
     /// Session JWT keypair + TTL (broker-internal; minted by the
     /// email-link / OAuth2 auth flows, consumed by /v1/mint-oidc-jwt).
@@ -30,47 +30,21 @@ pub enum Group {
     AuditEvm,
     /// Auth method registration + plugin selection.
     Auth,
-    /// Email-link auth specifics (SES, HMAC key, rate limits).
+    /// Email-link authentication and rate limits.
     AuthEmail,
     /// OAuth2 specifics (providers, client credentials, JWKS cache).
     AuthOAuth2,
     /// Per-identity / per-IP rate limit knobs.
     Limits,
-    /// Legacy aliases retained for one minor version. Deprecation logged at boot.
-    Legacy,
 }
 
 // ---------------------------------------------------------------------------
 // Core
 // ---------------------------------------------------------------------------
 
-/// Required (or derive from `ACCOUNT_ID`). The role the broker assumes via STS for users.
-pub const BROKER_DATA_ROLE_ARN: &str = "BROKER_DATA_ROLE_ARN";
-/// Optional (#295 P1 §7a). The per-data-class MEMORY IAM role ARN the broker
-/// AssumeRoles (with a read-only, exact-object inline session policy) to issue
-/// delegated canonical-memory READ credentials. When unset, `/v1/cap/canonical-sts`
-/// returns a clear "not configured" error rather than failing boot. Same value
-/// the worker host uses as `MEMORY_ROLE_ARN`.
-pub const MEMORY_ROLE_ARN: &str = "MEMORY_ROLE_ARN";
-/// Optional (#441). The SPEECH IAM role ARN the broker AssumeRoles (with an
-/// inline Transcribe/Polly-only session policy) at `/v1/cap/speech-sts` to
-/// issue short-TTL speech creds. When unset, that endpoint returns a clear
-/// "not configured" error rather than failing boot. Same posture as
-/// `MEMORY_ROLE_ARN`.
-pub const SPEECH_ROLE_ARN: &str = "SPEECH_ROLE_ARN";
-
-pub const CHANNEL_ROLE_ARN: &str = "CHANNEL_ROLE_ARN";
-
-pub const AGENTKEYS_CHANNEL_STS_TOKEN: &str = "AGENTKEYS_CHANNEL_STS_TOKEN";
-/// Legacy provider selector: the local binary accepts only an unset or local
-/// value and never forwards it to actor runtimes.
-pub const AGENTKEYS_STS_PROVIDER: &str = "AGENTKEYS_STS_PROVIDER";
+pub const BROKER_CHANNEL_WAKE_TOKEN_FILE: &str = "BROKER_CHANNEL_WAKE_TOKEN_FILE";
 /// Optional. Path to the audit-log SQLite DB. Defaults to `~/.agentkeys/broker/audit.sqlite`.
 pub const BROKER_AUDIT_DB_PATH: &str = "BROKER_AUDIT_DB_PATH";
-/// Optional. AWS region used for STS calls. Defaults to `us-east-1`.
-pub const BROKER_AWS_REGION: &str = "BROKER_AWS_REGION";
-/// Optional. Lifetime in seconds of minted AWS sessions. Range \[900, 43200\]. Default 3600.
-pub const BROKER_SESSION_DURATION_SECONDS: &str = "BROKER_SESSION_DURATION_SECONDS";
 /// Optional. SIGTERM-to-exit grace window in seconds. Default 30.
 pub const BROKER_SHUTDOWN_GRACE_SECONDS: &str = "BROKER_SHUTDOWN_GRACE_SECONDS";
 /// Optional. When `true`, relaxes the HTTPS-only OIDC-issuer rule. Logged loudly. Default `false`.
@@ -92,16 +66,16 @@ pub const BROKER_NTP_MAX_SKEW_SECONDS: &str = "BROKER_NTP_MAX_SKEW_SECONDS";
 pub const BROKER_METRICS_ENABLED: &str = "BROKER_METRICS_ENABLED";
 
 // ---------------------------------------------------------------------------
-// OIDC issuer (existing — used by AWS STS AssumeRoleWithWebIdentity)
+// OIDC issuer
 // ---------------------------------------------------------------------------
 
 /// Required in production. Public HTTPS URL the broker advertises as its OIDC issuer.
 pub const BROKER_OIDC_ISSUER: &str = "BROKER_OIDC_ISSUER";
 /// Optional. Path to the persisted OIDC ES256 keypair JSON. Default `$HOME/.agentkeys/broker/oidc-keypair.json`.
 pub const BROKER_OIDC_KEYPAIR_PATH: &str = "BROKER_OIDC_KEYPAIR_PATH";
-/// Optional. TTL in seconds of OIDC JWTs minted for STS. Range \[60, 3600\]. Default 300.
+/// Optional. TTL in seconds of broker identity tokens. Range \[60, 3600\]. Default 300.
 pub const BROKER_OIDC_JWT_TTL_SECONDS: &str = "BROKER_OIDC_JWT_TTL_SECONDS";
-pub const BROKER_STS_AUDIENCE: &str = "BROKER_STS_AUDIENCE";
+pub const BROKER_OIDC_AUDIENCE: &str = "BROKER_OIDC_AUDIENCE";
 
 // ---------------------------------------------------------------------------
 // Session JWT (NEW — broker-internal, separate from the OIDC issuer keypair)
@@ -229,17 +203,6 @@ pub const BROKER_RATE_LIMIT_CHALLENGES_PER_HOUR_PER_IP: &str =
 pub const BROKER_RECOVERY_GRANT_DELAY_SECONDS: &str = "BROKER_RECOVERY_GRANT_DELAY_SECONDS";
 
 // ---------------------------------------------------------------------------
-// Legacy aliases (kept for one minor version, deprecation logged at boot)
-// ---------------------------------------------------------------------------
-
-/// Legacy. Pre-2026-04-28 alias of `BROKER_DATA_ROLE_ARN` (renamed to disambiguate from project "agent" terminology).
-pub const BROKER_AGENT_ROLE_ARN: &str = "BROKER_AGENT_ROLE_ARN";
-/// Legacy. AWS account ID; broker derives `BROKER_DATA_ROLE_ARN` if both are set and only this is provided.
-pub const ACCOUNT_ID: &str = "ACCOUNT_ID";
-/// Legacy. Alias of `BROKER_AWS_REGION`.
-pub const REGION: &str = "REGION";
-
-// ---------------------------------------------------------------------------
 // Registry — used by docs generator and runbook drift check
 // ---------------------------------------------------------------------------
 
@@ -252,20 +215,11 @@ pub const REGION: &str = "REGION";
 pub const fn all() -> &'static [(&'static str, &'static str, Group)] {
     &[
         // Core
-        (
-            BROKER_DATA_ROLE_ARN,
-            "Role the broker assumes via STS for users.",
-            Group::Core,
-        ),
+        (BROKER_CHANNEL_WAKE_TOKEN_FILE, "Protected local file shared with the channel wake client.", Group::Core),
+        (BROKER_OIDC_AUDIENCE, "Identity-token audience; defaults to the configured issuer.", Group::Oidc),
         (
             BROKER_AUDIT_DB_PATH,
             "Path to audit-log SQLite DB.",
-            Group::Core,
-        ),
-        (BROKER_AWS_REGION, "AWS region for STS calls.", Group::Core),
-        (
-            BROKER_SESSION_DURATION_SECONDS,
-            "Lifetime in seconds of minted AWS sessions [900, 43200].",
             Group::Core,
         ),
         (
@@ -485,18 +439,6 @@ pub const fn all() -> &'static [(&'static str, &'static str, Group)] {
             "Time-lock seconds before recovery grant activates.",
             Group::Limits,
         ),
-        // Legacy
-        (
-            BROKER_AGENT_ROLE_ARN,
-            "Legacy alias of BROKER_DATA_ROLE_ARN.",
-            Group::Legacy,
-        ),
-        (
-            ACCOUNT_ID,
-            "Legacy AWS account ID; derives BROKER_DATA_ROLE_ARN.",
-            Group::Legacy,
-        ),
-        (REGION, "Legacy alias of BROKER_AWS_REGION.", Group::Legacy),
     ]
 }
 
@@ -540,7 +482,8 @@ mod tests {
     fn all_includes_required_phase0_vars() {
         let names: Vec<&str> = all().iter().map(|(n, _, _)| *n).collect();
         for required in [
-            BROKER_DATA_ROLE_ARN,
+            BROKER_CHANNEL_WAKE_TOKEN_FILE,
+            BROKER_OIDC_AUDIENCE,
             BROKER_OIDC_ISSUER,
             BROKER_OIDC_KEYPAIR_PATH,
             BROKER_SESSION_KEYPAIR_PATH,
@@ -578,8 +521,7 @@ mod tests {
                 | Group::Auth
                 | Group::AuthEmail
                 | Group::AuthOAuth2
-                | Group::Limits
-                | Group::Legacy => {
+                | Group::Limits => {
                     assert!(!name.is_empty());
                 }
             }
