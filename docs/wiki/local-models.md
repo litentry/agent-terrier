@@ -108,7 +108,7 @@ This builds the explicit relay qualification without downloading dependencies, t
 
 The [relay qualification record](../../e2e/fixtures/model-qualification/macos-arm64-relay-2026-10-31.json) reports a 2.809-second relay probe on the same Mac/model recipe, including streamed chat, tool execution returning 42 and correct 768-dimensional embedding retrieval. The direct probe ran first, so this is a warm relay measurement, not a cold-start promise. Sampled model-runner RSS peaked at 1,965,792 KiB; relay memory is not included.
 
-The recall probe uses three synthetic in-memory documents. It proves inference and vector retrieval, not persistent authorized application memory. The managed application check below qualifies persisted conversation recall separately. Authorized application memory, channel conversation and complete release acceptance remain open.
+The recall probe uses three synthetic in-memory documents. It proves inference and vector retrieval, not persistent authorized application memory. The managed application check below qualifies persisted conversation recall separately. Authorized application memory and complete release acceptance remain open; the tool/channel application run below has separate evidence.
 
 ## Managed application qualification
 
@@ -129,7 +129,7 @@ python3 scripts/tests/qualify_local_models.py \
 
 The [2026-11-01 application report](../../e2e/fixtures/model-qualification/macos-arm64-application-2026-11-01.json) records the immutable image identity, compiler hash and exact model digests. On that Mac, runner startup took 0.250 seconds, the preliminary capability probe 3.060 seconds, and the application leg 24.456 seconds. Models and compiled dependencies were already cached; these are measured warm timings, not cold-install or CI targets. The agent container had networking disabled and the host application/model processes ran under the external-connection denial policy, with local control sockets allowed.
 
-This proves actual owner-to-agent chat and persisted conversation recall after runtime recreation. It does not qualify channel conversations, application tool authority, OpenViking-backed authorized memory, browser behavior or an independent clean install. The direct capability probe's addition tool and three-document vector lookup remain separate component checks. Failed lifecycle tests retain a private diagnostic directory; review it before sharing.
+That earlier run proves owner-to-agent chat and persisted conversation recall after runtime recreation. It did not exercise channel conversations or application tool authority; the expanded run below covers those paths. OpenViking-backed authorized memory, browser behavior and independent clean installation remain open. The direct capability probe's addition tool and three-document vector lookup remain separate component checks. Failed lifecycle tests retain a private diagnostic directory; review it before sharing.
 
 ## Supervised application qualification
 
@@ -143,6 +143,14 @@ python3 scripts/tests/qualify_local_models.py --supervised-application \
   --solc "${AGENT_TERRIER_SOLC:?Set the installed compiler matching foundry.toml}"
 ```
 
-This reuses the real application scenario under external IP connection denial. The service supervisor starts the runner, the actual CLI probes chat/streaming/tools/embeddings, and the application exercises protected creation, real chat, service/model restart, conversation recall and revocation. The test verifies that model configuration is reused and the model port is released on shutdown. It removes only its owned temporary application state and labeled containers/volumes; downloaded models remain. Full channel/tool-authority/browser journeys and independent clean installation remain separate gates.
+This reuses the real application scenario under external IP connection denial. The service supervisor starts the runner, the actual CLI probes chat/streaming/tools/embeddings, and the application exercises protected creation, real chat, service/model restart, conversation recall and revocation. The test verifies that model configuration is reused and the model port is released on shutdown. It removes only its owned temporary application state and labeled containers/volumes; downloaded models remain. The expanded tool/channel run below uses this same scenario; browser and independent clean-install acceptance remain separate gates.
 
 The [2026-11-01 supervised report](../../e2e/fixtures/model-qualification/macos-arm64-supervised-2026-11-01.json) records a 42.546-second run on macOS arm64 with the pinned models and complete local image already prepared. That is a measured warm qualification time, not a fresh-install budget.
+
+## Tool and channel application qualification
+
+The [expanded macOS arm64 report](../qualification/application-tools-macos-arm64.json) records a 123.905-second supervised run with the exact image and model digests, external IP connections denied and container networking disabled. It covers actual model tool invocation, delivery of the exact text to storage, denial for an ungranted channel, success on that same channel after a real chain grant, and denial with unchanged messages after removal of the grant. An independent model session is used for each tool attempt; the persisted tool call and linked result must exist. A model saying that it acted is insufficient.
+
+The same run sends an owner message through `terrier channel publish` and waits for a completed agent reply through `terrier channel poll`. It also retains the existing foreign-chat denial, model/service restart, conversation recall, archive, relay revocation and retained-data checks. Inputs were already downloaded and binaries/image built; the measured total includes the supervised application lifecycle, not image compilation or installation.
+
+Rebuild the image from the corrected source before running this expanded scenario. The shared native client now joins trailing-slash service endpoints with canonical route paths; the previous double-slash request was rejected by the local transport. The source base and changed product-file hash in the report identify the tested correction. Both packaged executables and first-party runtime packages passed the artifact privacy check. Persistent authorized application memory, browser enrollment and independent clean installation remain unqualified. Failed runs retain private tool diagnostics alongside the existing private service logs.

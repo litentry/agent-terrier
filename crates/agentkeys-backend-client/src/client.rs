@@ -151,28 +151,30 @@ impl BackendClient {
         self
     }
 
-    fn broker(&self) -> Result<&str, BackendError> {
-        self.broker_url
+    fn endpoint<'a>(
+        configured: &'a Option<String>,
+        name: &'static str,
+    ) -> Result<&'a str, BackendError> {
+        configured
             .as_deref()
-            .ok_or(BackendError::NotConfigured("broker_url"))
+            .map(|url| url.trim_end_matches('/'))
+            .ok_or(BackendError::NotConfigured(name))
+    }
+
+    fn broker(&self) -> Result<&str, BackendError> {
+        Self::endpoint(&self.broker_url, "broker_url")
     }
 
     fn memory(&self) -> Result<&str, BackendError> {
-        self.memory_url
-            .as_deref()
-            .ok_or(BackendError::NotConfigured("memory_url"))
+        Self::endpoint(&self.memory_url, "memory_url")
     }
 
     fn audit(&self) -> Result<&str, BackendError> {
-        self.audit_url
-            .as_deref()
-            .ok_or(BackendError::NotConfigured("audit_url"))
+        Self::endpoint(&self.audit_url, "audit_url")
     }
 
     fn cred(&self) -> Result<&str, BackendError> {
-        self.cred_url
-            .as_deref()
-            .ok_or(BackendError::NotConfigured("cred_url"))
+        Self::endpoint(&self.cred_url, "cred_url")
     }
 
     /// `POST /v1/cap/<op>` — mint a signed, data-class-explicit cap. The
@@ -675,7 +677,8 @@ mod local_transport_tests {
         let task = tokio::spawn(async move {
             axum::serve(listener, router).await.unwrap();
         });
-        let client = BackendClient::new(Some(url), None, None, None).with_device_key(key);
+        let client =
+            BackendClient::new(Some(format!("{url}/")), None, None, None).with_device_key(key);
         let request = CapMintRequest {
             operator_omni: "11".repeat(32),
             actor_omni: "22".repeat(32),
@@ -699,7 +702,7 @@ mod local_transport_tests {
     #[tokio::test]
     async fn canonical_memory_requires_no_cloud_credentials() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let url = format!("http://{}", listener.local_addr().unwrap());
+        let url = format!("http://{}/", listener.local_addr().unwrap());
         let server = tokio::spawn(async move {
             axum::serve(
                 listener,

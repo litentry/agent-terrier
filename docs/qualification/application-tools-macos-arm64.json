@@ -1,0 +1,66 @@
+{
+  "qualification": "supervised-local-model-application",
+  "external_network_denied": true,
+  "local_unix_control_sockets_allowed": true,
+  "recipe": {
+    "base_url": "http://127.0.0.1:11434/v1",
+    "chat": {
+      "digest": "8f68893c685c3ddff2aa3fffce2aa60a30bb2da65ca488b61fff134a4d1730e7",
+      "model": "qwen3:1.7b"
+    },
+    "embedding": {
+      "digest": "0a109f422b47e3a30ba2b10eca18548e944e8a23073ee3f3e947efcf3c45e59f",
+      "dimension": 768,
+      "model": "nomic-embed-text:v1.5"
+    },
+    "runtime": {
+      "context_length": 4096,
+      "max_loaded_models": 1,
+      "name": "ollama",
+      "parallel_requests": 1,
+      "version": "0.34.4"
+    }
+  },
+  "architecture": "arm64",
+  "operating_system": "15.7.4",
+  "application": {
+    "qualification": "local-agent-application",
+    "real_chain": true,
+    "protected_owner_login": true,
+    "signer_custody": true,
+    "managed_docker": true,
+    "image_id": "sha256:5e427c2b0af2a024c64137073cdace338fbae7bcd51b56204567bfae8e6a59c9",
+    "container_network": "none",
+    "real_model_chat": true,
+    "restart_recall": true,
+    "foreign_chat_denied": true,
+    "denied_chat_usage_unchanged": true,
+    "revocation": true,
+    "retained_data": true,
+    "model_runner_supervised": true,
+    "model_runner_restart_verified": true,
+    "model_publish_tool": true,
+    "ungranted_tool_denied": true,
+    "chain_grant_enables_tool": true,
+    "chain_scope_removal_denies_tool": true,
+    "denied_tool_channel_unchanged": true,
+    "owner_channel_to_agent_reply": true,
+    "not_qualified": [
+      "authorized persistent memory retrieval",
+      "browser",
+      "independent clean install"
+    ]
+  },
+  "seconds": 123.905,
+  "source": {
+    "base_public_revision": "8d2d0bcc4b73c8a17c7dc0b147be33bf032a4f3c",
+    "changed_product_files": {
+      "crates/agentkeys-backend-client/src/client.rs": "1266b1b0ea0e5e36b7d0b2d90c243a3c7ae634d87035ae71a05afca24b6c210e"
+    },
+    "qualification_script_sha256": "29145716faae3eb7b8f187289968a8ee0f93845d6da6947259c3bcb19e161768"
+  },
+  "image_first_party_privacy": {
+    "scanned_files": 47,
+    "findings": 0
+  }
+}

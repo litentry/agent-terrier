@@ -39,4 +39,4 @@ python3 scripts/tests/qualify_local_credential_cli.py
 
 One shared fixture qualifies both credential and channel commands against real local contracts, broker login and workers. Channel checks cover exact text round trip, cursors, owner separation, encrypted persistence, restart, input bounds, rejected sessions with unchanged storage, remote-address refusal, redirect refusal and proxy-independent access. Existing worker qualification separately checks live scope and device revocation.
 
-This command currently supports owner text publish/poll. Attachments, streaming media and complete agent tool/channel conversation acceptance remain separate work in [the release epic](https://github.com/litentry/agent-terrier/issues/1).
+This command currently supports owner text publish/poll. The [real-model qualification](./local-models.md#tool-and-channel-application-qualification) verifies an owner message reaching the agent and a completed reply returning through this CLI, plus tool grant/removal controls. Attachments, streaming media and complete release acceptance remain separate work in [the release epic](https://github.com/litentry/agent-terrier/issues/1).
