@@ -1,4 +1,4 @@
-**Status:** Protected creation and archive pass the real local-chain and Docker qualifier, including foreign-owner denial, revoked relay access and retained application data. Actual model chat and persisted conversation recall after runtime recreation also pass with external connections denied. Channel/tool-authority/browser acceptance and recovery of missing creation context remain under development.
+**Status:** Protected creation and archive pass the real local-chain and Docker qualifier, including foreign-owner denial, revoked relay access and retained application data. Actual model chat and persisted conversation recall after runtime recreation also pass with external connections denied. The expanded offline qualifier also verifies model publish tools, grant/removal denials and owner-channel replies. Authorized persistent memory, browser acceptance and recovery of missing creation context remain under development.
 
 ## Prepare
 
