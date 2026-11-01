@@ -1,5 +1,6 @@
 """Explicit macOS real-model qualification with outbound networking denied."""
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -14,6 +15,7 @@ import tempfile
 import threading
 import time
 import urllib.request
+from urllib.parse import urlsplit
 import uuid
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -22,7 +24,7 @@ from terrier_local import contracts, models, owner
 REPOSITORY = Path(__file__).resolve().parents[2]
 LOOPBACK_HOST = "127.0.0.1"
 TEST_NETWORK_ADDRESS = "192.0.2.1"
-OFFLINE_PROFILE = '(version 1) (allow default) (deny network-outbound) (allow network-outbound (remote ip "localhost:*"))'
+OFFLINE_PROFILE = '(version 1) (allow default) (deny network-outbound) (allow network-outbound (remote ip "localhost:*")) (allow network-outbound (remote unix-socket))'
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -116,13 +118,14 @@ def qualify_runtime_image(image, docker_socket, endpoint, environment, state):
             execute(["container", "rm", "--force", container])
 
 
-def qualify(model_directory, binary, gate=False, agent_runtime=False, runtime_image=None, docker_socket=None):
+def qualify(model_directory, binary, gate=False, agent_runtime=False, runtime_image=None, docker_socket=None, application=False, solc=None):
     if sys.platform != "darwin" or not shutil.which("sandbox-exec"):
         raise ValueError("This offline qualification requires macOS sandbox-exec; the model probe itself is portable")
     recipe = models.run(REPOSITORY, "config")
     if recipe != json.loads((REPOSITORY / "presets/local-models.json").read_text()):
         raise ValueError("Rebuild the CLI: its model recipe differs from the checked-in source")
     model_directory = model_directory.expanduser().resolve(strict=True)
+    compiler = contracts.validate_compiler(REPOSITORY / "crates/agentkeys-chain", solc) if application else None
     gate_test = build_gate_test() if gate else None
     with tempfile.TemporaryDirectory(prefix="terrier-model-qualification-") as temporary:
         state = Path(temporary)
@@ -139,8 +142,14 @@ def qualify(model_directory, binary, gate=False, agent_runtime=False, runtime_im
             TEST_NETWORK_ADDRESS], env=environment, capture_output=True, timeout=5)
         if control.returncode:
             raise RuntimeError("Could not prove OS-level outbound connection denial")
+        selected_port = 0
+        if application:
+            configured = urlsplit(recipe["base_url"])
+            if configured.scheme != "http" or configured.hostname != LOOPBACK_HOST or configured.path != "/v1" or not configured.port:
+                raise ValueError("Application qualification requires the recipe's explicit loopback model endpoint")
+            selected_port = configured.port
         with socket.socket() as listener:
-            listener.bind((LOOPBACK_HOST,0))
+            listener.bind((LOOPBACK_HOST, selected_port))
             port = listener.getsockname()[1]
         endpoint = f"http://{LOOPBACK_HOST}:{port}"
         runtime = recipe["runtime"]
@@ -226,9 +235,26 @@ def qualify(model_directory, binary, gate=False, agent_runtime=False, runtime_im
                     if agent_result.returncode:
                         raise RuntimeError("Real agent runtime qualification failed: " + agent_result.stderr.strip())
                     agent_report = json.loads(agent_result.stdout)
-                image_report = qualify_runtime_image(runtime_image, docker_socket, endpoint, environment, state) if runtime_image else None
+                image_report = qualify_runtime_image(runtime_image, docker_socket, endpoint, environment, state) if runtime_image and not application else None
+                application_report = None
+                application_seconds = None
+                if application:
+                    application_started = time.monotonic()
+                    application_environment = dict(environment, AGENT_TERRIER_TEST_MODEL_CHAT="1", AGENT_TERRIER_SOLC=str(compiler),
+                        AGENT_TERRIER_TEST_AGENT_IMAGE=runtime_image,
+                        AGENT_TERRIER_TEST_DOCKER_SOCKET=str(docker_socket),
+                        AGENT_TERRIER_CACHE_DIR=str(contracts.cache_directory()))
+                    application_result = subprocess.run([*restriction, sys.executable,
+                        str(REPOSITORY / "scripts/tests/qualify_local_agents.py")], cwd=REPOSITORY,
+                        env=application_environment, capture_output=True, text=True, timeout=600)
+                    if application_result.returncode:
+                        raise RuntimeError("Managed local application qualification failed: " + application_result.stderr.strip())
+                    application_report = json.loads(application_result.stdout)
+                    application_seconds = round(time.monotonic() - application_started, 3)
                 return {
-                    "qualification":"local-model-capabilities", "external_network_denied":True,
+                    "qualification":"local-agent-application" if application else "local-model-capabilities", "external_network_denied":True,
+                    "local_unix_control_sockets_allowed":True,
+                    "solidity_compiler_sha256":hashlib.sha256(compiler.read_bytes()).hexdigest() if compiler else None,
                     "operating_system":platform.mac_ver()[0], "architecture":platform.machine(),
                     "hardware":subprocess.check_output(["sysctl","-n","machdep.cpu.brand_string"],text=True).strip(),
                     "physical_memory_bytes":int(subprocess.check_output(["sysctl","-n","hw.memsize"],text=True)),
@@ -241,6 +267,7 @@ def qualify(model_directory, binary, gate=False, agent_runtime=False, runtime_im
                     "relay_probe_seconds":relay_seconds,
                     "agent_runtime":agent_report,
                     "agent_runtime_image":image_report,
+                    "application":application_report, "application_seconds":application_seconds,
                 }
             finally:
                 finished.set()
@@ -259,16 +286,22 @@ if __name__ == "__main__":
     parser.add_argument("--ollama",default=shutil.which("ollama"),help="Local Ollama executable")
     parser.add_argument("--gate",action="store_true",help="Also qualify the authenticated relay using the same real models and network restriction")
     parser.add_argument("--agent-runtime",action="store_true",help="Also qualify real agent chat and restart recall; build the packages workspace first")
-    parser.add_argument("--runtime-image",help="Already-loaded qualification image built from the runtime Dockerfile's qualification target")
+    parser.add_argument("--runtime-image",help="Reviewed preloaded runtime image; use the complete image with --application")
+    parser.add_argument("--solc", type=Path, help="Explicit downloaded Solidity compiler for --application")
+    parser.add_argument("--application", action="store_true", help="Qualify real owner-to-agent chat, restart recall and revocation through the complete local stack")
     parser.add_argument("--docker-socket",type=Path,help="Explicit local Docker socket required with --runtime-image")
     arguments = parser.parse_args()
     try:
         if not arguments.ollama:
             raise ValueError("Install the recipe's Ollama version first")
+        if arguments.application and not (arguments.runtime_image and arguments.docker_socket and arguments.solc):
+            raise ValueError("--application requires the complete runtime image, explicit Docker socket and downloaded --solc compiler")
+        if arguments.solc and not arguments.application:
+            raise ValueError("--solc is only used with --application")
         if bool(arguments.runtime_image) != bool(arguments.docker_socket):
             raise ValueError("Set --runtime-image and --docker-socket together")
         print(json.dumps(qualify(arguments.models_dir,arguments.ollama,arguments.gate,arguments.agent_runtime,
-            arguments.runtime_image,arguments.docker_socket),indent=2))
+            arguments.runtime_image,arguments.docker_socket,arguments.application,arguments.solc),indent=2))
     except (OSError,ValueError,RuntimeError,subprocess.TimeoutExpired) as error:
         print(f"model qualification: {error}",file=sys.stderr)
         raise SystemExit(1)

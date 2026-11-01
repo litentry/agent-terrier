@@ -55,7 +55,7 @@ The daemon writes generated memory configuration as an owner-only file through t
 
 ## Offline qualification
 
-The checked-in macOS qualifier launches its own temporary runner with an isolated home directory, cloud features disabled and OS-level outbound network denial. It verifies an external socket gets `PermissionError`, then runs the real CLI under the same restriction; successful loopback inference is the positive control. Existing model files are reused without download or pruning, exact runtime/model identities are checked, and only the qualifier's processes and temporary files are removed afterward.
+The checked-in macOS qualifier launches its own temporary runner with an isolated home directory, cloud features disabled and OS-level external IP connection denial. Loopback IP and local Unix control sockets remain available for the runner, service supervisors and explicit Docker socket. It verifies an external socket gets `PermissionError`, then runs the real CLI under the same restriction; successful loopback inference is the positive control. Existing model files are reused without download or pruning, exact runtime/model identities are checked, and only the qualifier's processes and temporary files are removed afterward.
 
 Local, terminal A on macOS, after stopping the preparation runner and retaining its `OLLAMA_MODELS` setting:
 
@@ -74,7 +74,7 @@ Sampled runner-process RSS peaked at 1,911,104 KiB (about 1.82 GiB). This is pro
 
 ## Authenticated relay
 
-The relay defaults to the same local endpoint and chat model as the recipe, binds to loopback, and requires a caller relay key. An upstream model key is optional. Configuration comes only from explicit `AGENTKEYS_GATE_*` inputs or flags; the relay does not discover host credential files. Without a relay keys file, inference requests return 401. Use `agentkeys-gate --help` for the explicit configuration fields; the [local services launcher](./local-services.md) supervises the relay; starting the model runner and completing the full agent journey remain separate steps.
+The relay defaults to the same local endpoint and chat model as the recipe, binds to loopback, and requires a caller relay key. An upstream model key is optional. Configuration comes only from explicit `AGENTKEYS_GATE_*` inputs or flags; the relay does not discover host credential files. Without a relay keys file, inference requests return 401. Use `agentkeys-gate --help` for the explicit configuration fields; the [local services launcher](./local-services.md) supervises the relay; starting the model runner is an explicit preparation step.
 
 `--admin-token-file`, `--upstream-api-key-file` and `--keys-file` must name owner-only regular files owned by the current user, with no symlinks or hard links. Supplying both inline and file forms of an admin or upstream credential is an error. Invalid explicit configuration fails startup instead of selecting another endpoint. The chat model override never overwrites an embedding request's model.
 
@@ -92,4 +92,25 @@ This builds the explicit relay qualification without downloading dependencies, t
 
 The [relay qualification record](../../e2e/fixtures/model-qualification/macos-arm64-relay-2026-10-31.json) reports a 2.809-second relay probe on the same Mac/model recipe, including streamed chat, tool execution returning 42 and correct 768-dimensional embedding retrieval. The direct probe ran first, so this is a warm relay measurement, not a cold-start promise. Sampled model-runner RSS peaked at 1,965,792 KiB; relay memory is not included.
 
-The recall probe uses three synthetic in-memory documents. It proves inference and vector retrieval, not persistent authorized application memory. Complete agent-image wiring, broker configuration, storage-backed recall and the full offline application journey remain tracked by the open local-runtime epic.
+The recall probe uses three synthetic in-memory documents. It proves inference and vector retrieval, not persistent authorized application memory. The managed application check below qualifies persisted conversation recall separately. Authorized application memory, channel conversation and complete release acceptance remain open.
+
+## Managed application qualification
+
+`--application` reuses the existing local-agent lifecycle qualifier with actual inference. It creates disposable contracts and protected owners, logs in, creates an agent through the broker, sends a chat through the authenticated relay, recreates the runtime and checks conversation recall. Foreign-owner chat must fail without increasing model usage. Archive, relay revocation and retained volume data are checked before owned resources are removed.
+
+Prepare the complete [local agent image](./local-agent-image.md), cached Rust/contract dependencies, and the compiler pinned in `foundry.toml`. Stop the preparation model runner: this test starts its own isolated runner at the recipe's endpoint and refuses an occupied port. It neither adopts nor stops another runner. Select a trusted downloaded compiler explicitly; its version is checked by the same helper used for normal contract commands and deployment. No model, image, dependency or compiler is downloaded during this check.
+
+Local, in the public checkout on macOS:
+
+```bash
+python3 scripts/tests/qualify_local_models.py \
+  --models-dir "${OLLAMA_MODELS:?Set the prepared model directory}" \
+  --application \
+  --solc "${AGENT_TERRIER_SOLC:?Set the downloaded compiler executable}" \
+  --runtime-image "${AGENT_TERRIER_RUNTIME_IMAGE:?Set the reviewed complete image}" \
+  --docker-socket "${AGENT_TERRIER_DOCKER_SOCKET:?Set the local Docker Unix socket}"
+```
+
+The [2026-11-01 application report](../../e2e/fixtures/model-qualification/macos-arm64-application-2026-11-01.json) records the immutable image identity, compiler hash and exact model digests. On that Mac, runner startup took 0.250 seconds, the preliminary capability probe 3.060 seconds, and the application leg 24.456 seconds. Models and compiled dependencies were already cached; these are measured warm timings, not cold-install or CI targets. The agent container had networking disabled and the host application/model processes ran under the external-connection denial policy, with local control sockets allowed.
+
+This proves actual owner-to-agent chat and persisted conversation recall after runtime recreation. It does not qualify channel conversations, application tool authority, OpenViking-backed authorized memory, browser behavior or an independent clean install. The direct capability probe's addition tool and three-document vector lookup remain separate component checks. Failed lifecycle tests retain a private diagnostic directory; review it before sharing.

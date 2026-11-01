@@ -1,0 +1,73 @@
+{
+  "qualification": "local-agent-application",
+  "external_network_denied": true,
+  "local_unix_control_sockets_allowed": true,
+  "solidity_compiler_sha256": "5d98c9ed892b74ecadc4ab7f93de6211fdde0351ef66f2cb90eb11630e30e2ab",
+  "operating_system": "15.7.4",
+  "architecture": "arm64",
+  "hardware": "Apple M3 Pro",
+  "physical_memory_bytes": 19327352832,
+  "runtime_version": "0.34.4",
+  "recipe": {
+    "base_url": "http://127.0.0.1:11434/v1",
+    "chat": {
+      "digest": "8f68893c685c3ddff2aa3fffce2aa60a30bb2da65ca488b61fff134a4d1730e7",
+      "model": "qwen3:1.7b"
+    },
+    "embedding": {
+      "digest": "0a109f422b47e3a30ba2b10eca18548e944e8a23073ee3f3e947efcf3c45e59f",
+      "dimension": 768,
+      "model": "nomic-embed-text:v1.5"
+    },
+    "runtime": {
+      "context_length": 4096,
+      "max_loaded_models": 1,
+      "name": "ollama",
+      "parallel_requests": 1,
+      "version": "0.34.4"
+    }
+  },
+  "model_bytes": 1633595894,
+  "runner_startup_seconds": 0.25,
+  "probe_seconds": 3.06,
+  "peak_runner_process_rss_kib": 1921824,
+  "capabilities": {
+    "loopback_endpoint": true,
+    "chat_model": "qwen3:1.7b",
+    "embedding_model": "nomic-embed-text:v1.5",
+    "chat_ms": 1343,
+    "stream_ms": 357,
+    "tool_roundtrip_ms": 753,
+    "embedding_ms": 583,
+    "stream_events": 29,
+    "embedding_dimensions": 768,
+    "retrieved_document": 0,
+    "executed_tool_result": 42
+  },
+  "authenticated_relay": null,
+  "relay_probe_seconds": null,
+  "agent_runtime": null,
+  "agent_runtime_image": null,
+  "application": {
+    "qualification": "local-agent-application",
+    "real_chain": true,
+    "protected_owner_login": true,
+    "signer_custody": true,
+    "managed_docker": true,
+    "image_id": "sha256:9880a70be1e15f7d75a0941fc8de5bdc1ed7d12cd2650db1b7af7fff1077b0e7",
+    "container_network": "none",
+    "real_model_chat": true,
+    "restart_recall": true,
+    "foreign_chat_denied": true,
+    "denied_chat_usage_unchanged": true,
+    "revocation": true,
+    "retained_data": true,
+    "not_qualified": [
+      "channel conversation",
+      "application tool authority",
+      "browser",
+      "independent clean install"
+    ]
+  },
+  "application_seconds": 24.456
+}

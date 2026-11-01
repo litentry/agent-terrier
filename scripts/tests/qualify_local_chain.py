@@ -26,6 +26,8 @@ class LocalChainFixture(unittest.TestCase):
         environment["AGENT_TERRIER_STATE_DIR"] = str(state)
         if os.environ.get("AGENT_TERRIER_CACHE_DIR"):
             environment["AGENT_TERRIER_CACHE_DIR"] = os.environ["AGENT_TERRIER_CACHE_DIR"]
+        if os.environ.get("AGENT_TERRIER_SOLC"):
+            environment["AGENT_TERRIER_SOLC"] = os.environ["AGENT_TERRIER_SOLC"]
         if forge:
             environment["AGENT_TERRIER_FORGE"] = str(forge)
         result = subprocess.run([sys.executable, str(REPOSITORY / "terrier"), "chain", *arguments],

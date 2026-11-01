@@ -135,6 +135,7 @@ def deploy(repository, state, offline=False, resume=False):
     archive = contracts.verified_archive(repository, cache, offline)
     with contracts.build_lock(repository, cache):
         project = contracts.prepare_project(repository, cache, contracts.archive_files(archive))
+        compiler_arguments = contracts.compiler_arguments(project)
         generated_registry = project / "deployment-registry.json"
         if not pending:
             if generated_registry.exists() or generated_registry.is_symlink():
@@ -150,7 +151,7 @@ def deploy(repository, state, offline=False, resume=False):
             "--root", ".", "--remappings", "forge-std/=lib/forge-std/src/", "--rpc-url", endpoint,
             "--cache-path", str(deployment_directory / "cache"),
             "--sender", deployer, "--keystore", str(keystore), "--password-file", str(password_file),
-            "--broadcast", "--slow", "--non-interactive",
+            "--broadcast", "--slow", "--non-interactive", *compiler_arguments,
         ]
         if offline:
             command.append("--offline")
