@@ -2,6 +2,8 @@
 
 Work from a public checkout and keep changes focused on one issue. The crate prefix remains `agentkeys-` to preserve existing code and protocol compatibility.
 
+The public source history starts from a reviewed standalone baseline dated 2026-11-01. Use a fresh checkout after that refresh. Preserve any unsubmitted work privately, then reapply only reviewed source changes; do not merge or push an old checkout’s history into this repository. The [baseline record](docs/qualification/source-baseline-macos-arm64.json) documents source identity and build verification.
+
 Use `docs/arch.md` to find the owner of a component. Extend an existing module instead of adding a second wire schema, configuration resolver or lifecycle controller. Browser-facing types come from the shared Rust definitions.
 
 Run the relevant component or crate tests locally. UI component tests use controlled clients and run without browser startup. Browser navigation, rendering and security integration still require their own acceptance.

@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "date": "2026-11-01",
+  "source_revision": "bace80a31d3cb03dd953a3688d5d0e196a4660a2",
+  "platform": {
+    "system": "Darwin",
+    "architecture": "arm64"
+  },
+  "source": {
+    "tracked_files": 1076,
+    "reachable_commits_at_cutover": 1,
+    "manifest_sha256": "455200bdfe4a0f6c33e5a1f32fcd3b72f19090ed22d295844671990a2f294213",
+    "manifest_encoding": "sha256(json.dumps(path_to_sha256_and_executable, sort_keys=True).encode())",
+    "preserved_file_contents_and_executable_modes": true,
+    "anonymous_https_clone_verified": true
+  },
+  "builds": {
+    "native_workspace_binaries": "passed",
+    "native_build_seconds_rounded": 80,
+    "browser_wasm": "passed",
+    "console": "passed",
+    "device_display": "passed",
+    "runtime_plugins": "passed",
+    "fresh_compiled_output": true,
+    "downloaded_dependency_cache_reused": true
+  },
+  "source_lane": {
+    "passed": true,
+    "seconds": 5.075,
+    "python_tests": 92
+  },
+  "artifact_privacy": {
+    "console_static_files": 15,
+    "display_files": 15,
+    "runtime_plugin_files": 40,
+    "findings": 0
+  },
+  "limits": [
+    "Build and source qualification only; not independent full application acceptance.",
+    "Cached dependencies were reused; cold download time was not measured.",
+    "Ordinary public branch and tag reachability does not certify retained pull-request refs, caches, forks or existing clones.",
+    "Earlier qualification records retain their originally tested revisions and artifact identities; they are not relabeled as new runs."
+  ]
+}
