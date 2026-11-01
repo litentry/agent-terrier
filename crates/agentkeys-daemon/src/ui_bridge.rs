@@ -3285,8 +3285,8 @@ const PRESET_APPLY_READY_POLL: std::time::Duration = std::time::Duration::from_s
 /// Wait (bounded) until the delegate's bridge is REACHABLE — it answers
 /// `/healthz` with its own body, at any status (`sandbox_bridge_reachable`) —
 /// then distribute the preset. A bridge that never answers still gets the
-/// attempt, so the audit row carries its actual answer; an unconfigured base
-/// (no gateway known) skips the wait.
+/// attempt, so the audit row carries its actual answer. Missing routing or
+/// ownership context skips the wait.
 async fn apply_preset_when_ready(
     state: &SharedUiBridgeState,
     broker: &str,
@@ -3300,7 +3300,7 @@ async fn apply_preset_when_ready(
     let ready = loop {
         match sandbox_bridge_reachable(state, sandbox_id, agent_url, Some(delegate_omni)).await {
             Ok(()) => break true,
-            Err(e) if e.starts_with("sandbox_unconfigured") => {
+            Err(e) if e.starts_with("sandbox_") => {
                 last_err = e;
                 break false;
             }
@@ -7907,7 +7907,7 @@ async fn master_chat_poll(
 /// #428 — spawn-time preset apply: fetch the bundle from the broker's
 /// compiled-in catalog, seed the delegate's persona canonical (the #390 store
 /// — versioned; the locked base layer is appended at apply) + apply it into
-/// the FRESH sandbox (instance-routed via `x-faas-instance-name`), and
+/// the fresh owned runtime through the broker, and
 /// distribute the skills docs through the bridge's skills surface (it owns
 /// the runtime home's skills dir). Best-effort LOUD:
 /// the on-chain ceremony is already final, so every failure surfaces in the
@@ -11524,12 +11524,16 @@ async fn sandbox_bridge_exchange_instanced(
     base_override: Option<&str>,
     delegate_omni: Option<&str>,
 ) -> Result<(String, reqwest::StatusCode, serde_json::Value), String> {
-    // The broker checks ownership and supplies the per-delegate bridge bearer.
-    if let Some(id) = instance.filter(|i| !i.trim().is_empty()) {
-        if let Some(target) = bridge_via_broker_target(state, delegate_omni).await {
-            return sandbox_bridge_exchange_via_broker(state, &target, id, method, path, body)
-                .await;
-        }
+    if instance.is_some() || delegate_omni.is_some() {
+        let target = bridge_via_broker_target(state, delegate_omni).await?;
+        return sandbox_bridge_exchange_via_broker(
+            &target,
+            instance.filter(|id| !id.trim().is_empty()),
+            method,
+            path,
+            body,
+        )
+        .await;
     }
     let base = base_override
         .filter(|b| !b.trim().is_empty())
@@ -11541,15 +11545,14 @@ async fn sandbox_bridge_exchange_instanced(
         })?;
     let url = format!("{}{}", base.trim_end_matches('/'), path);
     let client = reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
         .timeout(std::time::Duration::from_secs(20))
         .build()
         .map_err(|e| format!("bridge client: {e}"))?;
     let mut req = client.request(method, &url);
     if let Some(token) = state.sandbox_bridge_token.as_deref() {
         req = req.bearer_auth(token);
-    }
-    if let Some(id) = instance.filter(|i| !i.is_empty()) {
-        req = req.header("x-faas-instance-name", id);
     }
     if let Some(b) = body {
         req = req.json(&b);
@@ -11585,28 +11588,37 @@ struct BridgeViaBroker {
     device_key_hash: String,
 }
 
-/// The via-broker target for a per-delegate bridge call, when the console
-/// has everything the broker's `/v1/agent/bridge` needs: a broker, a master
-/// session, and the delegate's `device_key_hash` (from the binding manifest,
-/// by the delegate omni). `None` = fall back to the direct call (dev / no
-/// session / unknown delegate) — which the gateway then refuses loudly.
+/// Missing owner or binding metadata never selects a direct transport.
 async fn bridge_via_broker_target(
     state: &SharedUiBridgeState,
     delegate_omni: Option<&str>,
-) -> Option<BridgeViaBroker> {
-    let broker = state.broker_url.clone()?;
-    let omni = delegate_omni.filter(|o| !o.trim().is_empty())?;
+) -> Result<BridgeViaBroker, String> {
+    let broker = state
+        .broker_url
+        .as_ref()
+        .filter(|url| !url.trim().is_empty())
+        .ok_or("sandbox_unconfigured: broker is required for managed requests")?
+        .clone();
+    let omni = delegate_omni
+        .filter(|omni| !omni.trim().is_empty())
+        .ok_or("sandbox_delegate_missing")?;
     let (j1, operator_omni) = match state.onboarding_session.read().await.as_ref() {
-        Some(s) if !s.j1.is_empty() => (s.j1.clone(), s.omni.clone()),
-        _ => return None,
+        Some(session) if !session.j1.trim().is_empty() && !session.omni.trim().is_empty() => {
+            (session.j1.clone(), session.omni.clone())
+        }
+        _ => return Err("sandbox_owner_session_required".into()),
     };
-    let manifest = ensure_binding_manifest(state).await.ok()?;
-    let entry = manifest.entry_for(omni, "")?;
+    let manifest = ensure_binding_manifest(state)
+        .await
+        .map_err(|_| "sandbox_binding_unavailable")?;
+    let entry = manifest
+        .entry_for(omni, "")
+        .ok_or("sandbox_delegate_unbound")?;
     let device_key_hash = entry.device_key_hash.trim().to_string();
     if device_key_hash.is_empty() {
-        return None;
+        return Err("sandbox_device_binding_missing".into());
     }
-    Some(BridgeViaBroker {
+    Ok(BridgeViaBroker {
         broker,
         j1,
         operator_omni,
@@ -11620,25 +11632,25 @@ async fn bridge_via_broker_target(
 /// a 400 apply) is unchanged; the broker's own refusals (not owned, no live
 /// instance, gateway unreachable) arrive as `{"error": …}` JSON.
 async fn sandbox_bridge_exchange_via_broker(
-    state: &SharedUiBridgeState,
     target: &BridgeViaBroker,
-    sandbox_id: &str,
+    sandbox_id: Option<&str>,
     method: reqwest::Method,
     path: &str,
     body: Option<serde_json::Value>,
 ) -> Result<(String, reqwest::StatusCode, serde_json::Value), String> {
-    let _ = state;
     let url = format!("{}/v1/agent/bridge", target.broker.trim_end_matches('/'));
     // The shared wire type (D7): the broker deserializes exactly this.
     let req_body = agentkeys_backend_client::protocol::BridgeProxyBody {
         operator_omni: target.operator_omni.clone(),
         device_key_hash: target.device_key_hash.clone(),
-        sandbox_id: Some(sandbox_id.to_string()),
+        sandbox_id: sandbox_id.map(str::to_string),
         method: Some(method.as_str().to_string()),
         path: path.to_string(),
         body,
     };
     let client = reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
         .timeout(std::time::Duration::from_secs(200))
         .build()
         .map_err(|e| format!("bridge client: {e}"))?;
@@ -11676,13 +11688,6 @@ async fn apply_persona_to_sandbox(
     instance: Option<&str>,
     bridge_base: Option<&str>,
 ) -> (bool, String) {
-    if bridge_base.is_none_or(|b| b.trim().is_empty()) && state.sandbox_bridge_url.is_none() {
-        return (
-            false,
-            "sandbox_unconfigured: stored canonically; the sandbox picks it up at next spawn"
-                .to_string(),
-        );
-    }
     use base64::{engine::general_purpose::STANDARD, Engine};
     let body = serde_json::json!({
         "files": { "soul": STANDARD.encode(soul_body.as_bytes()) },
@@ -12937,6 +12942,10 @@ async fn push_audit(state: &SharedUiBridgeState, evt: ApiAuditEvent) {
 //
 // Run: `cargo test -p agentkeys-daemon --lib ui_bridge`
 //      `cargo llvm-cov -p agentkeys-daemon --lib ui_bridge`
+
+#[cfg(test)]
+#[path = "ui_bridge_bridge_tests.rs"]
+mod bridge_tests;
 
 #[cfg(test)]
 mod tests {

@@ -3392,8 +3392,8 @@ pub fn is_capability_service(service: &str) -> bool {
 
 /// #715 — the console→broker body for `POST /v1/agent/bridge`: one bridge
 /// call to an OWNED delegate's in-sandbox bridge, forwarded by the broker
-/// (which holds the stack-wide gateway credential and derives the delegate's
-/// `AGENTKEYS_BRIDGE_TOKEN`). ONE definition (D7): the broker deserializes it,
+/// (which checks ownership and supplies the delegate's bridge credential).
+/// ONE definition (D7): the broker deserializes it,
 /// the console daemon serializes it — a drift is a compile error, not a 4xx.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BridgeProxyBody {
