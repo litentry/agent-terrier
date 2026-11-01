@@ -516,9 +516,8 @@ export function RoutePage({ embedded = false }: { embedded?: boolean } = {}) {
               <div className="banner warn" style={{ marginBottom: 12 }}>
                 <span className="lbl">older gate</span>
                 <span>
-                  This contact gate is older than the Kev / Jev switch: it routes every message with{' '}
-                  <span className="mono">{view.model}</span> and can&apos;t switch or compare models from here. Update the broker host
-                  (<span className="mono">setup-broker-host.sh --cloud ve</span>) to turn the switch on.
+                  This service routes every message with <span className="mono">{view.model}</span>.
+                  Model switching and comparison are unavailable in this service version.
                 </span>
               </div>
             )}

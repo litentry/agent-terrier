@@ -117,8 +117,8 @@ pub async fn sandbox_wake(
     let expected_bearer = &state.config.channel_sts_token;
     if expected_bearer.is_empty() {
         return Err(BrokerError::Internal(
-            "sandbox wake not configured: AGENTKEYS_CHANNEL_STS_TOKEN is unset on the broker \
-             host (setup-broker-host.sh writes it to the broker + channel units)"
+            "sandbox wake not configured: AGENTKEYS_CHANNEL_STS_TOKEN is unset; \
+             configure the same protected token for the broker and channel worker"
                 .into(),
         ));
     }

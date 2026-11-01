@@ -2318,12 +2318,6 @@ pub struct CanonicalStsResult {
 
 // ── #441 speech plane — cap→STS relay (epic #439 stack ②) ────────────────────
 
-/// Request body for the broker `POST /v1/cap/speech-sts`. The actor presents
-/// its broker-minted `SpeechUse` cap (and its OWN session JWT as the Bearer)
-/// and receives short-TTL creds valid ONLY for Transcribe streaming + Polly
-/// synthesis. No server-held speech token exists on this stack — the relay is
-/// the SAME cap→STS pattern as storage/channels (the epic's consistent-auth
-/// principle; the VE stack's #386 app-token custody is the documented gap).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SpeechStsBody {
     pub cap: CapToken,
@@ -2501,13 +2495,6 @@ pub struct InboxStsResult {
     pub expiration: i64,
 }
 
-/// #716 — request body for the broker `POST /v1/cap/own-sts`: the OWN-namespace
-/// twin of [`InboxStsBody`]. The memory WORKER relays a delegate's session
-/// bearer + its broker-minted `Store`/`Fetch` Memory cap and receives STS
-/// scoped to the delegate's OWN prefix objects for that one service — minted
-/// server-side for the one write the delegate previously had no credential
-/// path for on VE (the #594/#694 checkpoint put). The delegate never holds
-/// cloud creds.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OwnStsBody {
     pub cap: CapToken,

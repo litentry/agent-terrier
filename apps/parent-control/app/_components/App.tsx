@@ -160,10 +160,6 @@ function InteractiveApp({ hosted, onSessionEnd }: { hosted: boolean; onSessionEn
       const r = await client.getChainList();
       if (!cancelled && r.ok) {
         setDaemonChain(r.data.daemonChain);
-        // Bind the stack-scoped identity store to the daemon's operational
-        // (chain, broker) so master pointer reads/writes target THIS stack —
-        // Heima↔Base switches AND same-chain broker switches (Heima-AWS ↔
-        // Heima-VE, #373).
         setActiveStack(r.data.daemonChain, r.data.daemonBroker ?? '');
       }
     })();
@@ -399,11 +395,6 @@ function InteractiveApp({ hosted, onSessionEnd }: { hosted: boolean; onSessionEn
   const resetMaster = async () => {
     if (hosted) { showToast('This console uses your existing account. Sign in with an approved passkey; browser access never requires a master reset.'); return; }
     if (status.kind !== 'connected') { showToast('Connect a daemon first.'); return; }
-    // 2026-07-16 guard — NEVER start a reset the stack can't finish: the fleet
-    // revoke below mutates chain state and the unbind is first-master-final, so
-    // when the broker's sponsored-register runtime is down (the VE 503) refuse
-    // HERE, before any Touch ID. The daemon hard-refuses too (defense in depth);
-    // preflight failures other than a definite "not ready" never block.
     const pre = await client.registerPreflight();
     if (pre.ok && pre.data.register_ready === false) {
       akLog('reset: refused — broker register path down', { detail: pre.data.detail });
@@ -1820,10 +1811,6 @@ function ChainPage() {
   const [chains, setChains] = useState<ChainListEntry[]>([]);
   const [daemonChain, setDaemonChain] = useState<string | null>(null);
   const [view, setView] = useState<string>('');
-  // #373 stack selector — the operator's (chain, broker) inventory. The stack
-  // axis has a CLOUD dimension: the same chain can be served by different
-  // brokers (Heima-AWS vs Heima-VE). Display + health only: the daemon binds
-  // ONE stack per boot, so switching = relaunch via the fleet `c` picker.
   const [stacks, setStacks] = useState<StackEntry[]>([]);
   const [daemonBroker, setDaemonBroker] = useState<string | null>(null);
 
@@ -1925,7 +1912,7 @@ function ChainPage() {
             </table>
             <div className="muted" style={{ fontSize: 11, padding: '6px 10px' }}>
               browser sessions + onboarding are isolated per (chain, broker) — the same chain behind
-              another broker (e.g. Heima-VE) keeps its own sign-in{daemonBroker ? ` · this daemon → ${daemonBroker}` : ''}
+              another broker keeps its own sign-in{daemonBroker ? ` · this daemon → ${daemonBroker}` : ''}
             </div>
           </div>
         </div>

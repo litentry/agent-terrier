@@ -333,9 +333,6 @@ pub fn summarize(reports: &[NamespaceReport]) -> PassSummary {
     s
 }
 
-/// What a namespace's reconcile failed to converge — each one makes the pass
-/// `degraded`. A manifest that cannot persist was once only a WARN while every
-/// pass reported `ready` and re-embedded the granted items (VE prod, chef).
 fn engine_errors(ns: &str, st: &ReconcileStats) -> Vec<String> {
     let mut out = Vec::new();
     if st.write_failed > 0 || st.delete_failed > 0 {
@@ -871,8 +868,6 @@ mod tests {
         assert!(!units.is_empty());
     }
 
-    /// VE prod to 2026-10-04: chef's household item was re-mirrored every pass
-    /// (its manifest could not be written) while every pass said `ready`.
     #[test]
     fn a_pass_whose_manifest_did_not_persist_is_degraded_not_ready() {
         let report = |ns: &str, outcome| NamespaceReport {

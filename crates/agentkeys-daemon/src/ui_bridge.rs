@@ -836,26 +836,6 @@ pub fn build_router(state: SharedUiBridgeState, allowed_origin: &str) -> Router 
         .with_state(state)
 }
 
-/// Build the bridge state. `rp_id` is the WebAuthn relying-party id —
-/// always "localhost" for dev, "console.example" (or operator domain) in
-/// production. `rp_origin` is the browser's window.location.origin.
-// Runtime-config constructor: the params ARE the daemon's config surface (RP +
-// broker/signer + chain + W3 memory). Bundling into a config struct is deferred
-// (W2 adds more chain config here); clippy's documented escape for constructors.
-/// Derive a co-located worker's public URL from the broker URL, mirroring the
-/// operator scripts' `derive_companion` (setup-broker-host.sh) + the env files'
-/// `<worker><suffix>.<zone>` convention — so the daemon reasons the gateway (and
-/// any co-located worker) from the broker it already points at, instead of a
-/// hardcoded per-stack env var. Returns `None` when the broker host isn't a
-/// recognized `broker*.<zone>` public host (e.g. a bare IP / localhost for a
-/// dev broker); the worker is then simply unreachable and the caller treats it
-/// as not-configured.
-///
-/// Stack → suffix (from the broker host's first DNS label):
-/// - `broker.<zone>`        → `""`        (prod)
-/// - `test-broker.<zone>`   → `"-test"`   (#265 slot 1 — grandfathered `test-` prefix)
-/// - `broker-<x>.<zone>`     → `"-<x>"`     (a further test-fleet slot, e.g. `broker-test-3`)
-/// - `broker-base.<zone>`   → `"-base"`   (#282 Base stack)
 pub(crate) fn derive_worker_url(broker_url: &str, worker: &str) -> Option<String> {
     // ONE owner (#675): the wasm-safe protocol function, shared with the
     // browser device client — the daemon must never drift from it.
@@ -927,12 +907,6 @@ pub fn build_state(
             .ok()
             .as_deref(),
     )?;
-    // The daemon was the ONLY component sourcing its RPC from the compiled chain profile;
-    // the broker (accept.rs/cap.rs), every worker (state.rs) and the bundler all read
-    // AGENTKEYS_CHAIN_RPC_HTTP from their env. Read the same var here (dev.sh sources it
-    // from operator-workstation.<chain>.env, like setup-broker-host.sh does for the broker)
-    // so the daemon's chain reads AND /v1/chain/info (the top-right badge) match the rest
-    // of the system instead of diverging on the profile default.
     if let Some(rpc) = chain_rpc_from_env(&chain_profile.name, |k| std::env::var(k).ok()) {
         tracing::info!(
             chain = %chain_profile.name, rpc = %rpc,
@@ -1488,23 +1462,6 @@ async fn reset_target_omni(state: &SharedUiBridgeState) -> Option<String> {
         .map(|o| agentkeys_backend_client::normalize_omni_0x(&o))
 }
 
-/// Probe whether the configured broker can BUILD **and pay for** a sponsored
-/// master register (#278 D6) — the question behind both a safe reset and a
-/// safe onboarding. Sends a syntactically complete but deliberately-garbage
-/// `/v1/register/build` body under the live J1: the broker loads its accept
-/// config (sponsor key / paymaster / factory) AND checks the bundler is ready
-/// to submit+pay (#501 — bundler `/healthz`, which reports `ready:false` when
-/// the submitter EOA is below the chain gas floor) BEFORE parsing the
-/// attestation, so a missing sponsored-register runtime OR an out-of-gas
-/// bundler answers 503 while a healthy one rejects the garbage body with 400
-/// (or 409 on the already-registered skip-gate). Returns `Some(broker detail)`
-/// ONLY on a definite 503; network errors and every other status return `None`
-/// — an indeterminate probe must never block a reset or an onboarding.
-///
-/// Why this exists (2026-07-16 VE stranding): the app's "reset + re-onboard"
-/// remedy unbound the master on chain, then `/v1/register/build` 503'd at the
-/// VE broker (no BROKER_SPONSOR_SIGNER_KEY, no bundler) — leaving the identity
-/// with NO master on ANY stack and no way to re-bind from that stack.
 async fn broker_register_path_unavailable(
     broker: &str,
     j1: &str,
@@ -1535,18 +1492,6 @@ async fn broker_register_path_unavailable(
     }
 }
 
-/// `GET /v1/master/register/preflight` — can the broker BUILD a sponsored
-/// master register right now? Two callers, one question:
-///   - RESET asks BEFORE the Touch-ID fleet revoke, so a doomed reset (unbind
-///     that could never re-onboard) is refused before ANY on-chain mutation.
-///   - ONBOARDING asks BEFORE `navigator.credentials.create()`, so a passkey
-///     is never minted when the register would 503 anyway — otherwise every
-///     failed attempt orphans a fresh passkey in the Secure Enclave and the
-///     promised second Touch ID never fires (the 2026-07-17 VE observation).
-///
-/// `register_ready: false` carries the broker's own error detail. No broker
-/// configured (the legacy script register path) or no live J1/omni to probe
-/// with ⇒ ready — indeterminate never blocks.
 async fn master_register_preflight(
     State(state): State<SharedUiBridgeState>,
 ) -> Json<serde_json::Value> {
@@ -1614,12 +1559,6 @@ async fn master_reset(State(state): State<SharedUiBridgeState>) -> Json<serde_js
     // needs it) — registered master, then persisted coords, then live session.
     let operator_omni = reset_target_omni(&state).await;
 
-    // GUARD (2026-07-16 VE stranding): a reset is only safe when the master can
-    // RE-register afterwards — `registerFirstMasterDevice` is first-master-only,
-    // so unbind-then-503 leaves the identity with no master on ANY stack. Refuse
-    // BEFORE any mutation when the broker's register path is definitely down.
-    // Indeterminate (no broker / no J1 / probe unreachable) never blocks; the
-    // documented emergency override skips the probe entirely.
     let skip_preflight = std::env::var("AGENTKEYS_RESET_SKIP_REGISTER_PREFLIGHT")
         .map(|v| v.trim() == "1")
         .unwrap_or(false);
@@ -1650,10 +1589,7 @@ async fn master_reset(State(state): State<SharedUiBridgeState>) -> Json<serde_js
                         "reset refused — this broker cannot re-register a master right now ({detail}). \
                          Unbinding now would strand this identity with NO master and no way to \
                          re-onboard on this stack. Fix the broker's sponsored-register runtime \
-                         (BROKER_SPONSOR_SIGNER_KEY + PAYMASTER_ADDRESS + bundler — on VE: \
-                         setup-broker-host.sh --cloud ve steps 3–5), or run the reset from a stack \
-                         whose broker can re-register. Emergency override: start the daemon with \
-                         AGENTKEYS_RESET_SKIP_REGISTER_PREFLIGHT=1."
+                         before retrying; local state and chain authority were preserved."
                     ),
                 }));
             }
@@ -2110,17 +2046,6 @@ pub async fn rehydrate_master_session(state: &UiBridgeState) {
             // session is by construction a full one.
             identity_only_reason: None,
         });
-        // This used to mark the master registered ON FAITH ("the device is on
-        // chain under this omni") — false whenever the session was persisted
-        // BEFORE its master ever registered (the 2026-07-16 VE incident: a
-        // fresh sovereign omni rehydrated as `master-registered`, onboarding
-        // trusted the cached field over the fresh #435 probe, and the operator
-        // was pushed into a destructive reset for a binding that never
-        // existed). Verify on chain first, with #435 probe semantics: bound →
-        // mark (account backfilled, zero-prompt fast path); PROVEN unbound →
-        // do NOT mark (onboarding offers the real register instead);
-        // indeterminate (chain unconfigured / RPC error) → mark as before —
-        // never punish a legit master for a flaky boot-time read.
         let rpc = state.chain_profile.rpc.http.clone();
         let mark: Option<Option<String>> = match registry_address(state) {
             Some(registry) if !rpc.is_empty() => {
@@ -2713,17 +2638,6 @@ const TIER_AGENT: u8 = 2;
 /// SidecarRegistry `TIER_DEVICE` — a channel-endpoint device.
 const TIER_DEVICE: u8 = 3;
 
-/// The actor kind the CHAIN asserts, or `None` for a pre-#427 row (tier 0) that
-/// predates the on-chain split.
-///
-/// This is the source of truth for device-vs-delegate. The binding manifest is
-/// a CACHE (labels, presets, service names) and can be absent — when it was
-/// treated as the only source, a chain-restored row reported an unknown kind
-/// and the UI fell back to guessing from the SHAPE of the actor's grants
-/// ("holds only channel grants ⇒ device"). That guess mislabels a delegate
-/// whose only grants are channel grants, which is exactly what happened on the
-/// VE stack: a delegate (tier 2) and a device (tier 3) both rendered as
-/// "device" while the chain had said which was which all along.
 fn tier_kind(tier: u8) -> Option<&'static str> {
     match tier {
         TIER_AGENT => Some("delegate"),
@@ -3926,12 +3840,6 @@ async fn reconcile_actors_from_chain(
             .filter(|a| a.role == "agent")
             .map(|a| (a.id.clone(), a.omni_hex.clone()))
             .collect();
-        // Fetch every agent's scope CONCURRENTLY. This used to `await` once per
-        // agent inside the loop, so an actors refresh cost N SERIAL chain
-        // round-trips — measured 20.6 s on the VE stack, which is what froze
-        // the fleet device page when it called this from a render path. Now the
-        // whole fleet costs one wall-clock round-trip. The mutation below still
-        // happens one row at a time under the write lock (unchanged).
         let fetched =
             futures_util::future::join_all(agent_rows.into_iter().map(|(id, actor_omni)| {
                 let rpc = rpc.clone();
@@ -4783,11 +4691,6 @@ mod actor_kind_tests {
 
     #[test]
     fn the_chain_tier_decides_device_vs_delegate() {
-        // The live VE stack, read from SidecarRegistry.getDevice:
-        //   0x346391ed… (dkh f85a3626…) tier 2 → delegate "test1"
-        //   0xcd9edf15… (dkh 61563208…) tier 3 → the mock device
-        // Both held ONLY channel grants, so the old scope-shape guess called
-        // both "device". The tier separates them without any heuristic.
         assert_eq!(tier_kind(2), Some("delegate"));
         assert_eq!(tier_kind(3), Some("device"));
     }
@@ -4868,13 +4771,17 @@ mod stack_list_tests {
         let raw = r#"[
             {"name":"prod","chain":"heima","broker_url":"https://broker.primary.example"},
             {"name":"base","chain":"base","broker_url":"https://broker-base.primary.example"},
-            {"name":"ve","chain":"heima","broker_url":"https://broker.secondary.example"}
+            {"name":"secondary_broker","chain":"heima","broker_url":"https://broker.secondary.example"}
         ]"#;
         let stacks = parse_stacks_json(Some(raw));
         assert_eq!(stacks.len(), 3);
         assert_eq!(
             stacks[2],
-            entry("ve", "heima", "https://broker.secondary.example")
+            entry(
+                "secondary_broker",
+                "heima",
+                "https://broker.secondary.example"
+            )
         );
     }
 
@@ -4887,13 +4794,14 @@ mod stack_list_tests {
         assert!(parse_stacks_json(Some(r#"[{"name":"x"}]"#)).is_empty());
     }
 
-    // The #373 isolation invariant at the selector layer: the SAME chain via a
-    // DIFFERENT broker is NOT the active stack — a Heima-VE daemon must never
-    // mark (or be marked as) the Heima-AWS stack, and vice versa.
     #[test]
     fn same_chain_different_broker_is_not_active() {
         let aws = entry("prod", "heima", "https://broker.primary.example");
-        let ve = entry("ve", "heima", "https://broker.secondary.example");
+        let secondary_broker = entry(
+            "secondary_broker",
+            "heima",
+            "https://broker.secondary.example",
+        );
         // daemon bound to the AWS broker:
         assert!(stack_is_active(
             &aws,
@@ -4901,13 +4809,12 @@ mod stack_list_tests {
             Some("https://broker.primary.example")
         ));
         assert!(!stack_is_active(
-            &ve,
+            &secondary_broker,
             "heima",
             Some("https://broker.primary.example")
         ));
-        // daemon bound to the VE broker:
         assert!(stack_is_active(
-            &ve,
+            &secondary_broker,
             "heima",
             Some("https://broker.secondary.example")
         ));
@@ -4920,17 +4827,21 @@ mod stack_list_tests {
 
     #[test]
     fn active_matching_normalizes_case_and_trailing_slash() {
-        let ve = entry("ve", "heima", "https://broker.secondary.example");
+        let secondary_broker = entry(
+            "secondary_broker",
+            "heima",
+            "https://broker.secondary.example",
+        );
         assert!(stack_is_active(
-            &ve,
+            &secondary_broker,
             "HEIMA",
             Some("https://broker.secondary.example/")
         ));
         // a brokerless daemon matches no inventory stack
-        assert!(!stack_is_active(&ve, "heima", None));
+        assert!(!stack_is_active(&secondary_broker, "heima", None));
         // a different chain on the same broker URL is not active either
         assert!(!stack_is_active(
-            &ve,
+            &secondary_broker,
             "base",
             Some("https://broker.secondary.example")
         ));
@@ -4982,10 +4893,6 @@ async fn chain_info(
     })))
 }
 
-/// One (chain, broker) pair of the operator's stack inventory (#373 — the
-/// stack axis gained a cloud dimension: the SAME chain can be served by
-/// different brokers/data planes, e.g. Heima-AWS vs Heima-VE). Parsed from
-/// `AGENTKEYS_STACKS_JSON`; field names are the env-file / fleet spellings.
 #[derive(Clone, Debug, PartialEq, serde::Deserialize)]
 pub struct StackEntry {
     pub name: String,
@@ -5010,24 +4917,12 @@ fn parse_stacks_json(raw: Option<&str>) -> Vec<StackEntry> {
     }
 }
 
-/// Whether an inventory stack IS the stack this daemon runs: same chain
-/// (case-insensitive) and same broker URL (trailing-slash-insensitive). The
-/// broker comparison is what splits Heima-AWS from Heima-VE — chain alone
-/// can't (#373).
 fn stack_is_active(entry: &StackEntry, daemon_chain: &str, daemon_broker: Option<&str>) -> bool {
     let norm = |u: &str| u.trim_end_matches('/').to_ascii_lowercase();
     entry.chain.eq_ignore_ascii_case(daemon_chain)
         && daemon_broker.map(norm) == Some(norm(&entry.broker_url))
 }
 
-/// `GET /v1/stack/list` — the operator's stack inventory for the web stack
-/// selector (#373): every known (chain, broker) pair, which one this daemon
-/// runs (`active`), and a live per-broker `/healthz` probe (`healthy`) so an
-/// unbootable stack (the VE broker until its runtime-port follow-ups land)
-/// renders degraded instead of selectable. Selecting a DIFFERENT stack is not
-/// a web action — the daemon binds one (chain, broker) per boot (relaunch via
-/// the fleet `c` picker / dev.sh env); that per-boot binding is exactly the
-/// isolation guarantee that a Heima-VE session never talks to the AWS broker.
 async fn stack_list(State(state): State<SharedUiBridgeState>) -> Json<serde_json::Value> {
     let daemon_chain = state.chain_profile.name.clone();
     let mut stacks = state.stacks.clone();
@@ -6654,22 +6549,6 @@ pub(crate) fn worker_poll_budget(wait_seconds: u64) -> std::time::Duration {
     std::time::Duration::from_secs(wait_seconds + WORKER_POLL_OVERHEAD_SECS)
 }
 
-/// The channel worker the daemon talks to — same env family as every worker
-/// URL (`AGENTKEYS_WORKER_CHANNEL_URL`, wired by dev.sh / the host env files).
-/// The channel worker base URL for the caller's SELECTED stack.
-///
-/// Derived from the session broker (`channel.<zone>` via `derive_worker_url`,
-/// mirroring `weixin`) so the daemon never publishes to a hardcoded per-stack
-/// worker. `broker` MUST be the same `coords.broker` the channel cap is minted
-/// against — that is what stops the two from diverging: the bug was a cap minted
-/// by the VE broker presented to the AWS-test channel worker (a stale ambient
-/// `AGENTKEYS_WORKER_CHANNEL_URL`), refused 403 `broker_sig_invalid`.
-///
-/// An explicit `AGENTKEYS_WORKER_CHANNEL_URL` still overrides — but on a
-/// multi-stack daemon that single env var cannot be right for every stack, so
-/// derivation is the correct default. Unlike memory/config, channel publish is
-/// cap-only from the daemon (no client-side STS/role), so the URL is all it
-/// needs — nothing to keep paired with a per-stack role ARN.
 pub(crate) fn channel_worker_url(broker: &str) -> Result<String, String> {
     if let Some(u) = worker_url_override_or_derive(
         "AGENTKEYS_WORKER_CHANNEL_URL",
@@ -9097,12 +8976,6 @@ async fn resolve_categories(state: &SharedUiBridgeState) -> Result<Vec<MemoryCat
                 // Present-but-empty (unusual) or confirmed-missing taxonomy →
                 // fallback is legitimate (nothing durable to list).
                 Ok(_) => Ok(fallback_categories(state).await),
-                // A configured-but-broken Config store is a HARD error (502), never
-                // masked behind in-memory data or an empty list (#201 finding-2):
-                // the operator must see + fix it. Real data or a loud failure.
-                // Name the worker + broker pair: a cross-stack pairing (e.g. an
-                // ambient AWS config URL against the VE broker) is otherwise
-                // invisible in the surfaced error.
                 Err(e) => Err(format!(
                     "config taxonomy unavailable (config worker {}, broker {}): {e}",
                     ctx.worker_url, ctx.broker
@@ -12971,11 +12844,6 @@ mod tests {
         );
     }
 
-    /// An identity-only session must name the SIGNER — the component that
-    /// actually failed — not the config/memory worker the caller blames.
-    /// Live VE incident: onboarding held identity-only because the stack had no
-    /// signer, and the operator was told "Fix the config worker" about a
-    /// perfectly healthy worker, three steps from the real cause.
     #[tokio::test]
     async fn identity_only_error_names_the_signer_not_the_worker() {
         let state = build_state(
@@ -13068,13 +12936,13 @@ mod tests {
 
     #[test]
     fn foreign_zone_overrides_are_refused_and_derived() {
-        let ve = Some("https://broker.secondary.example");
+        let secondary_broker = Some("https://broker.secondary.example");
         // A foreign deployment override is rejected in favor of derivation.
         assert_eq!(
             worker_url_override_or_derive(
                 "X",
                 Some("https://weixin-test.primary.example".into()),
-                ve,
+                secondary_broker,
                 "weixin"
             )
             .as_deref(),
@@ -13085,20 +12953,25 @@ mod tests {
             worker_url_override_or_derive(
                 "X",
                 Some("https://weixin.secondary.example/".into()),
-                ve,
+                secondary_broker,
                 "weixin"
             )
             .as_deref(),
             Some("https://weixin.secondary.example")
         );
         assert_eq!(
-            worker_url_override_or_derive("X", Some("http://127.0.0.1:9101".into()), ve, "weixin")
-                .as_deref(),
+            worker_url_override_or_derive(
+                "X",
+                Some("http://127.0.0.1:9101".into()),
+                secondary_broker,
+                "weixin"
+            )
+            .as_deref(),
             Some("http://127.0.0.1:9101")
         );
         // no override → derived; nothing at all → None; blank override → derived
         assert_eq!(
-            worker_url_override_or_derive("X", None, ve, "channel").as_deref(),
+            worker_url_override_or_derive("X", None, secondary_broker, "channel").as_deref(),
             Some("https://channel.secondary.example")
         );
         assert_eq!(
@@ -13106,7 +12979,8 @@ mod tests {
             None
         );
         assert_eq!(
-            worker_url_override_or_derive("X", Some("  ".into()), ve, "channel").as_deref(),
+            worker_url_override_or_derive("X", Some("  ".into()), secondary_broker, "channel")
+                .as_deref(),
             Some("https://channel.secondary.example")
         );
     }
@@ -14005,12 +13879,6 @@ mod tests {
 
     #[tokio::test]
     async fn rehydrate_does_not_mark_registered_when_chain_says_unbound() {
-        // The 2026-07-16 VE false positive: a persisted session whose omni was
-        // NEVER registered (fresh sovereign namespace, #464) must not rehydrate
-        // as `master-registered` — the onboarding ceremony would trust the
-        // cached field and push the operator into a destructive reset for a
-        // binding that never existed. Proven-unbound (empty chain stub) ⇒ the
-        // session itself restores, but chain stays "none".
         let tmp = tempfile::tempdir().unwrap();
         let store = MasterSessionStore::new(tmp.path().join(".agentkeys"));
         let omni = format!("0x{}", "66".repeat(32));
@@ -15505,10 +15373,6 @@ mod tests {
 
     #[tokio::test]
     async fn master_reset_refuses_when_broker_register_path_is_down() {
-        // 2026-07-16 VE stranding guard: a broker whose /v1/register/build
-        // answers 503 (no sponsor key / no bundler) cannot re-register after an
-        // unbind — the reset must refuse BEFORE any mutation, fleet teardown
-        // included (the pending-bindings route here proves it is never hit).
         let app = Router::new()
             .route(
                 "/v1/register/build",

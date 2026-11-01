@@ -165,10 +165,6 @@ mod tests {
         std::fs::remove_file(&path).ok();
     }
 
-    // First boot: no registry file yet (nothing bound) — the gateway must come
-    // up EMPTY, not crash-loop (the live VE incident: nginx 502, restart
-    // counter in the thousands). The first master-approved mutate then creates
-    // the file, and a fresh load reads it back.
     #[test]
     fn load_missing_file_is_first_boot_empty() {
         let path = std::env::temp_dir()

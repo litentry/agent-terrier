@@ -374,13 +374,6 @@ export interface MasterResetFleet {
   agents_still_bound?: { id: string; label: string; device_key_hash?: string | null }[];
 }
 
-/** Result of `GET /v1/master/register/preflight` — can the broker BUILD a
- *  sponsored master register right now? `register_ready: false` = its
- *  sponsored-register runtime is down (503). Two guards read it: RESET (an
- *  unbind that could never re-onboard would STRAND the identity — the
- *  2026-07-16 VE incident) and ONBOARDING (minting a passkey the broker can't
- *  register orphans it in the Secure Enclave and the 2nd Touch ID never fires
- *  — the 2026-07-17 observation). */
 export interface RegisterPreflight {
   register_ready: boolean;
   /** Which path vouched: 'broker' (probed live), 'script' (no broker — the
@@ -452,17 +445,12 @@ export interface ChainList {
   daemonBroker?: string | null;
 }
 
-/** One operator stack — a (chain, broker) pair — from `GET /v1/stack/list`
- *  (#373: the stack axis gained a cloud dimension; Heima-AWS and Heima-VE are
- *  the SAME chain behind DIFFERENT brokers/data planes). */
 export interface StackEntry {
   name: string;
   chain: string;
   brokerUrl: string;
   /** This is the stack the daemon runs (chain AND broker match). */
   active: boolean;
-  /** Live daemon-side `/healthz` probe of the stack's broker — false renders
-   *  the stack degraded (e.g. the VE broker until its runtime port boots). */
   healthy: boolean;
 }
 

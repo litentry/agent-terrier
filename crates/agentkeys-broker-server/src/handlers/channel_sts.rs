@@ -1,37 +1,4 @@
-//! `POST /v1/cap/channel-sts` — the WORKER-redeemed, cap-derived storage
-//! credential mint for the channel data class (#541).
-//!
-//! ## Why this exists (and why it is NOT the canonical/inbox relay shape)
-//! memory/config are per-actor PRIVATE stores, so the CLIENT relays creds it
-//! minted for its own prefix. A channel is a SHARED, owner-owned feed
-//! (`bots/<owner>/channel/<id>/…`): a participant has nothing of its own to
-//! relay and must never hold the OWNER's storage credential. So the CHANNEL
-//! WORKER — after its independent layer-2 cap verify — exchanges the cap for
-//! short-lived, owner-scoped creds here and touches storage with those. This
-//! retires the ambient-credential path entirely (arch §22e): on AWS the worker
-//! previously rode the EC2 instance profile (defeating §17.5 layers 3/4); on
-//! VE it had nothing and every storage call failed.
-//!
-//! ## Authorization
-//! 1. **Worker bearer** — `AGENTKEYS_CHANNEL_STS_TOKEN`, a host-minted shared
-//!    secret written by `setup-broker-host.sh` into BOTH the broker unit env
-//!    and the channel worker env (same generate-once posture as the worker
-//!    KEKs; never in the repo env files). Devices/delegates hold caps but not
-//!    this bearer, so a cap alone can never be redeemed for raw storage creds
-//!    — participants stay behind the worker's mediation (L2 policy, size caps,
-//!    envelope encryption, audit).
-//! 2. **The cap itself** — must be a broker-signed, unexpired Channel-class
-//!    `ChannelPublish`/`ChannelSubscribe` cap; its `operator_omni` names the
-//!    feed OWNER the creds are scoped to.
-//!
-//! ## Scoping
-//! AWS: an inline session policy narrows to Get/Put/Delete/List on
-//! `bots/<owner>/channel/<channel_id>/*` — intersected with the channel role's
-//! identity policy (`provision-channel-role.sh`, PrincipalTag-interpolated) and
-//! the bucket policy (`apply-channel-bucket-policy.sh`). VE: the provider
-//! refuses AWS-dialect inline policies (#510); the per-owner scope-down is
-//! rendered VE-side from the OIDC tag, so we pass `None` and rely on it (the
-//! #512 intent renderer is the follow-up that narrows to the single channel).
+//! Worker-authenticated channel credential exchange.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -67,7 +34,7 @@ pub async fn mint_channel_sts(
     if role.is_empty() || expected_bearer.is_empty() {
         return Err(BrokerError::Internal(
             "channel-sts not configured: set CHANNEL_ROLE_ARN + AGENTKEYS_CHANNEL_STS_TOKEN \
-             on the broker host (setup-broker-host.sh writes both)"
+             for both the broker and channel worker"
                 .into(),
         ));
     }
@@ -133,10 +100,6 @@ pub async fn mint_channel_sts(
     );
     let oidc_jwt = state.oidc.sign_jwt(&claims)?;
 
-    // 6. AWS: narrow further to THIS channel's prefix with an inline session
-    //    policy (objects + prefix-conditioned list — teardown needs Delete).
-    //    VE: the provider refuses the AWS dialect; per-owner scope-down is
-    //    rendered provider-side from the tag (see module docs).
     let policy_string;
     let policy = if state.sts.supports_inline_session_policy() {
         let owner = p.operator_omni.trim_start_matches("0x").to_lowercase();

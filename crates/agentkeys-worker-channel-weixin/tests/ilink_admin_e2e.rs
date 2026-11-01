@@ -47,9 +47,6 @@ struct MockIlink {
     /// bot's loop drains only its own messages.
     next_confirm: Mutex<Option<Value>>,
     inbox_by_auth: Mutex<HashMap<String, Vec<Value>>>,
-    /// The field-observed shape (VE prod 2026-09-11): a send that carries no
-    /// `context_token` — the only kind possible before the member's first message
-    /// — does not reach them. The mock refuses it so the test proves the retry.
     reject_without_context: std::sync::atomic::AtomicBool,
 }
 

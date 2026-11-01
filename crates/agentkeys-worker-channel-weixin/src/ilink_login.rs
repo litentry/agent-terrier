@@ -26,9 +26,6 @@ const OVERALL_DEADLINE: Duration = Duration::from_secs(480);
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
 const MAX_QR_REFRESH: u32 = 3;
 
-/// Canonical secrets-file default for `--login-write` (override with
-/// `--secrets-file`). Kept in sync with `setup-broker-host.sh`'s
-/// `WORKER_WEIXIN_SECRETS_FILE` (`$DEV_KEY_SERVICE_ENV_DIR/weixin-secrets.env`).
 pub const DEFAULT_SECRETS_FILE: &str = "/etc/agentkeys/weixin-secrets.env";
 
 /// The keys `--login-write` OWNS in the secrets file. Every other line (the OA
@@ -526,7 +523,6 @@ AGENTKEYS_WEIXIN_APP_ID=wxappid
             N.fetch_add(1, Ordering::Relaxed)
         ));
         let _ = std::fs::remove_file(&path);
-        // Seed the placeholder template exactly as setup-broker-host.sh ships it.
         std::fs::write(
             &path,
             "AGENTKEYS_WEIXIN_OPERATOR_OMNI=0xabc\n\

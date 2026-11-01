@@ -65,8 +65,6 @@ pub enum AuditOpKind {
     /// #384 — one LLM turn through the metered key-custody egress relay
     /// (`agentkeys-gate`): token usage + attribution, budgets per #332.
     GateTurn = 90,
-    /// #519 — one ASR transcription through the gate speech relay (the VE
-    /// #386 gate-held app-token posture; the AWS twin is the #441 STS plane).
     SpeechAsr = 91,
     /// #519 — one TTS synthesis through the gate speech relay.
     SpeechTts = 92,

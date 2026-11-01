@@ -671,9 +671,6 @@ async fn spawn_with_stack_as(household: &str, actor_omni: &str) -> (String, Mock
 
 #[tokio::test]
 async fn a_bare_enrolled_actor_omni_still_mints_the_feed_cap() {
-    // VE prod 2026-09-25: the gateway device was enrolled with its actor omni
-    // bare, the cap mint sent it as-is, and the broker refused every turn
-    // `400 actor_omni must start with 0x` — routed to chef, never delivered.
     let (base, stack) = spawn_with_stack_as(UNREGISTERED_HOUSEHOLD, &"cd".repeat(32)).await;
     let (_, body) = post_msg(&base, "openid-owner", "/chef 今晚吃什么").await;
     assert!(body["feed_error"].is_null(), "{body}");

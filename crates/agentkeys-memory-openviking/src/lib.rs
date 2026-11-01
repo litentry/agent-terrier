@@ -634,10 +634,7 @@ pub struct ReconcileStats {
     /// The first failure's reason (uri + engine answer) — a count without its
     /// reason is undebuggable (suite-7 once died on "1 write(s) failed" alone).
     pub first_error: Option<String>,
-    /// The manifest swap failed (`<path>: <error>`): this pass's rows were not
-    /// recorded, so the next pass re-mirrors — re-embeds — these items. On VE
-    /// prod this was only a WARN while every pass reported `ready` and
-    /// re-embedded chef's household item (~11 embedding calls every 5 min).
+    /// Persistence failure; the next pass must not be reported as already reconciled.
     pub manifest_error: Option<String>,
 }
 
@@ -1345,9 +1342,6 @@ mod tests {
         assert!(matches!(err, OpenVikingError::Http { status: 200, .. }));
     }
 
-    /// VE prod to 2026-10-04: the manifest could not be written, every pass
-    /// rewrote the item (the engine re-embeds on every write) and reported
-    /// `ready`. The failure is now in the stats, with its path and reason.
     #[cfg(unix)]
     #[tokio::test]
     async fn a_manifest_that_cannot_persist_is_reported_with_its_cost() {

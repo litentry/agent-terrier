@@ -44,15 +44,6 @@ pub struct BundlerConfig {
     pub gas_floor_wei: Option<u128>,
 }
 
-/// Boot state. The two HOST-CONDITIONAL inputs — the EntryPoint address
-/// (per-chain deploy state) and the submitter key (operator-provisioned
-/// secret in `/etc/agentkeys/broker-sponsor.env`) — may legitimately be
-/// absent on a host with no accept/sponsorship provisioning (e.g. the CI
-/// test EC2, whose separate test contract set has no ERC-4337 infra).
-/// Absent/empty ⇒ `Degraded`: the service still boots, serves `/healthz`
-/// 200 (so `setup-broker-host.sh`'s probe + systemd stay green instead of
-/// crash-looping), and answers RPC with an actionable error — mirroring the
-/// broker's own unsponsored degradation. MALFORMED values still fail fast.
 pub enum BundlerBoot {
     /// Boxed: the config (signer key + addresses) dwarfs the `Degraded`
     /// variant, and there is exactly ONE `BundlerBoot` per process.

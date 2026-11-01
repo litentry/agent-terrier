@@ -97,11 +97,6 @@ pub fn canonical_fixtures() -> Vec<Fixture> {
     let config_get = ConfigGetBody {
         cap: json!("<cap-token>"),
     };
-    // Cred store carries TWO canonical shapes (unlike config, where legacy is
-    // deprecated): legacy plaintext_b64 (worker-side stage-1 K3 encrypt — what
-    // keeps the delegated agent-fetch flow working until the #91 KEK-release)
-    // and the v3 client-encrypted envelope (the VE posture; worker stores it
-    // verbatim). Exactly one key is ever set, so each mode is its own fixture.
     let cred_store = CredStoreBody {
         cap: json!("<cap-token>"),
         plaintext_b64: Some("<base64-plaintext>".into()),

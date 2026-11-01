@@ -129,8 +129,6 @@ const DEF_PAYMASTER_VERIFICATION_GAS: u128 = 200_000;
 const DEF_PAYMASTER_POST_OP_GAS: u128 = 50_000;
 pub(crate) const SPONSOR_WINDOW_SECS: u64 = 3600;
 
-/// Sponsor + chain config the build handler needs beyond the request, read from the
-/// broker process env (wired by setup-broker-host.sh). All addresses 20-byte.
 pub struct AcceptConfig {
     pub rpc_url: String,
     pub chain_id: u64,
@@ -200,12 +198,6 @@ fn profile_configuration(
         .ok_or_else(|| format!("chain profile has no {contract}"))
 }
 
-/// The lookup behind [`env_profile`], injectable so it can be tested without
-/// touching process env. An EMPTY (or whitespace) value counts as UNSET: the
-/// test stacks pin `PAYMASTER_ADDRESS_<CHAIN>=` deliberately (`host-common.sh`
-/// — the unsponsored #230 posture) and a unit's `Environment=K=` sets K to "",
-/// so reading "" as a value turned every sponsored build on the VE test broker
-/// into `PAYMASTER_ADDRESS must be a 20-byte address` (2026-09-10).
 pub(crate) fn resolve_profile_var(
     base: &str,
     profile: &str,
@@ -1037,7 +1029,7 @@ pub async fn accept_submit(
         aerr(
             StatusCode::SERVICE_UNAVAILABLE,
             "AGENTKEYS_BUNDLER_URL not set — point the broker at an ERC-4337 bundler \
-             (the in-house agentkeys-bundler, wired by setup-broker-host.sh, or any \
+             (agentkeys-bundler or another \
              eth_sendUserOperation-speaking service)",
         )
     })?;
@@ -1657,8 +1649,6 @@ mod env_profile_tests {
 
     #[test]
     fn an_empty_value_is_unset_not_an_invalid_address() {
-        // The VE renderer pins the test stack's paymaster EMPTY (no paymaster
-        // on the test set); the broker must read that as "unsponsored".
         let e = env(&[
             ("PAYMASTER_ADDRESS_HEIMA", ""),
             ("PAYMASTER_ADDRESS", "   "),

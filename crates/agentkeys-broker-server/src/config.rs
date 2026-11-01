@@ -17,10 +17,6 @@ pub struct BrokerConfig {
     /// Transcribe/Polly-only session policy). Empty when `SPEECH_ROLE_ARN` is
     /// unset; the endpoint then returns a clear "not configured" error.
     pub speech_role_arn: String,
-    /// #541 — the per-data-class CHANNEL role `/v1/cap/channel-sts` AssumeRoles
-    /// (owner-scoped, channel-prefix inline policy on AWS; provider-side
-    /// scope-down on VE). Empty = clear "not configured" error, same posture
-    /// as `memory_role_arn`.
     pub channel_role_arn: String,
     /// #541 — the host-minted shared bearer authenticating the CHANNEL WORKER
     /// to `/v1/cap/channel-sts`. Empty = the endpoint refuses (not configured).
@@ -55,11 +51,6 @@ pub struct BrokerConfig {
     pub refuse_to_boot_strict: bool,
     /// Configured identity namespace; changes require an identity migration.
     pub client_id: String,
-    /// #510 — the `aud` claim stamped into broker-minted OIDC JWTs
-    /// (`BROKER_STS_AUDIENCE`). AWS's provider registers
-    /// `sts.amazonaws.com` (the historical hardcode, kept as the default);
-    /// the VE provider registers its own audience (ve-broker-runtime-port
-    /// follow-up 2) — config, never a code constant.
     pub sts_audience: String,
 }
 

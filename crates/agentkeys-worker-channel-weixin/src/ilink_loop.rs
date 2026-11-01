@@ -26,14 +26,6 @@ const RETRY_DELAY: Duration = Duration::from_secs(2);
 const BACKOFF_DELAY: Duration = Duration::from_secs(30);
 const STALE_TOKEN_PAUSE: Duration = Duration::from_secs(60 * 60);
 
-/// Durable loop state: the resumable cursor + the per-user reply tokens.
-/// BOTH belong to ONE bot: a `context_token` is issued inside a conversation
-/// with the bot that received the message, and the cursor is that bot's
-/// server-side position. So the file is keyed by `bot_key` — a fingerprint of
-/// the bot token — and a different bot NEVER inherits it (measured 2026-09-11
-/// 23:28 on VE prod: the owner's new bot resumed the old bot's file, the bound
-/// notice rode a stale token, the API answered `ret=0`, nothing reached the
-/// phone, and the row was wrongly marked welcomed).
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct IlinkPersist {
     /// `bot_key(token)` of the bot this file belongs to; empty = a pre-#688 file

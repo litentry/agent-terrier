@@ -74,28 +74,37 @@ mod tests {
 
     #[test]
     fn overrides_stand_only_on_loopback_or_the_broker_zone() {
-        let ve = "https://broker.secondary.example";
+        let secondary_broker = "https://broker.secondary.example";
         assert!(worker_override_matches_broker(
             "https://weixin.secondary.example",
-            ve
+            secondary_broker
         ));
         assert!(worker_override_matches_broker(
             "https://weixin-test.secondary.example/",
             "https://test-broker.secondary.example"
         ));
-        assert!(worker_override_matches_broker("http://127.0.0.1:9101", ve));
-        assert!(worker_override_matches_broker("http://localhost:9101/", ve));
+        assert!(worker_override_matches_broker(
+            "http://127.0.0.1:9101",
+            secondary_broker
+        ));
+        assert!(worker_override_matches_broker(
+            "http://localhost:9101/",
+            secondary_broker
+        ));
         // An override on another deployment must not redirect this client.
         assert!(!worker_override_matches_broker(
             "https://weixin-test.primary.example",
-            ve
+            secondary_broker
         ));
         assert!(!worker_override_matches_broker(
             "https://weixin.secondary.example",
             "http://127.0.0.1:8091"
         ));
-        assert!(!worker_override_matches_broker("", ve));
-        assert!(!worker_override_matches_broker("https://weixin", ve));
+        assert!(!worker_override_matches_broker("", secondary_broker));
+        assert!(!worker_override_matches_broker(
+            "https://weixin",
+            secondary_broker
+        ));
     }
 
     #[test]

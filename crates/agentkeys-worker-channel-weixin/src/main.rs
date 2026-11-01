@@ -1,31 +1,4 @@
-//! Channel gateway worker binary — #407 WeChat (OA webhook / iLink) + #444
-//! Telegram. (Binary keeps its historical `weixin` name; ONE deployed unit =
-//! ONE transport, selected per stack: VE = ilink/oa, AWS = telegram.)
-//!
-//! Transport selection: AGENTKEYS_WEIXIN_TRANSPORT = `oa` (default) | `ilink` | `telegram`.
-//!
-//! Required env under `oa` (fail-fast):
-//!   AGENTKEYS_WEIXIN_TOKEN                  = the 公众号 callback verification token
-//!   AGENTKEYS_WEIXIN_APP_ID                 = the 公众号 AppID
-//! Required env under `ilink`:
-//!   AGENTKEYS_WEIXIN_ILINK_BOT_TOKEN[_FILE] = the bot token from the `--login` ceremony
-//! Required env under `telegram` (#444; absent = boots OFFLINE and idles):
-//!   AGENTKEYS_TELEGRAM_BOT_TOKEN[_FILE]     = the BotFather bot token (#384 custody)
-//! Always required:
-//!   AGENTKEYS_WEIXIN_CONTACT_REGISTRY_FILE  = master-authored contact registry JSON
-//!   AGENTKEYS_WEIXIN_OPERATOR_OMNI          = the household operator omni (0x+64hex)
-//! Optional:
-//!   AGENTKEYS_WEIXIN_APP_SECRET[_FILE]      = the OA SENDING credential (#384 custody)
-//!   AGENTKEYS_WEIXIN_ILINK_BASE_URL         = the bot's API host (login prints it)
-//!   AGENTKEYS_WEIXIN_ILINK_STATE_FILE       = iLink cursor/reply-token state file
-//!   AGENTKEYS_TELEGRAM_API_BASE             = Bot API base (default public; mock e2e overrides)
-//!   AGENTKEYS_TELEGRAM_STATE_FILE           = telegram offset/chat-id state file
-//!   AGENTKEYS_WEIXIN_BOT_AGENT              = UA-style self-id (default AgentKeys/<ver>)
-//!   AGENTKEYS_WORKER_CHANNEL_URL            = the channel worker to relay into (else decision-only)
-//!   AGENTKEYS_AUDIT_WORKER_URL              = durable audit sink for relay/bind rows
-//!   AGENTKEYS_WEIXIN_OPERATOR_GRADE_ALIASES = comma list (default spend,usage,stats,cost,audit,billing)
-//!   AGENTKEYS_WEIXIN_PARENT_CONTROL_DEEPLINK, AGENTKEYS_WEIXIN_RATE_MAX, AGENTKEYS_WEIXIN_RATE_WINDOW_SECS
-//!   AGENTKEYS_WEIXIN_ALLOW_UNSIGNED=1       = TEST-ONLY OA signature bypass (mock e2e)
+//! Channel gateway worker with an explicitly selected message transport.
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -68,9 +41,6 @@ struct Cli {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // No RUST_LOG on a host ⇒ `fmt::init()` shows ERROR only, which hid the
-    // "tokens NOT persisted" / "notice NOT delivered" warns on VE prod
-    // (2026-09-11). Default to info; RUST_LOG still overrides.
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()

@@ -143,12 +143,6 @@ pub fn create_router(state: SharedState) -> Router {
             "/v1/cap/inbox-sts",
             post(handlers::inbox_sts::mint_inbox_sts),
         )
-        // #716 — broker-brokered scoped STS for a delegate's OWN-namespace
-        // memory op (the own-prefix sibling of canonical/inbox-sts): the
-        // memory worker presents the delegate's Store/Fetch cap + the
-        // delegate's OWN session and gets back ACTOR-tagged creds scoped to
-        // that one service's objects — the credential path the #594/#694
-        // checkpoint put never had on VE.
         .route("/v1/cap/own-sts", post(handlers::own_sts::mint_own_sts))
         // Per-data-class CONFIG caps (#178 P1 / config-data-class-memory-list).
         // data_class=Config — the policy / memory-types taxonomy; master-only.

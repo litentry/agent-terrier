@@ -20,8 +20,7 @@ const base = {
 };
 
 describe('normalizeRouterView', () => {
-  it('reads a gate from before the Kev / Jev switch without crashing (the 2026-10-05 VE prod shape)', () => {
-    // The keys a pre-#749 gate sends — measured from VE prod's contact gate.
+  it('reads a legacy single-model service without crashing', () => {
     const old = {
       ...base,
       upstream: { error: 'error sending request for url (http://127.0.0.1:8077/v1/systemone/models)' },

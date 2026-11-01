@@ -19,13 +19,6 @@ import {
   setMasterOmni,
 } from '@/lib/identityStore';
 
-// The master pointer (credentialId + the #242 omni it was bound for) is
-// stack-scoped — see lib/identityStore. The daemon switches between
-// (chain, broker) stacks (Heima-AWS / Base-AWS / Heima-VE, #373), and a master
-// enrolled on one stack must never be auto-selected while the daemon runs
-// another: the omni-match guard below would reject it, silently suppressing
-// the "Sign back in with Touch ID" offer.
-
 const omniEq = (a: string, b: string) =>
   a.trim().replace(/^0x/, '').toLowerCase() === b.trim().replace(/^0x/, '').toLowerCase();
 
@@ -48,11 +41,6 @@ type EnrollOutcome =
   // one state that REQUIRES an action rendered as "demo · no daemon" (a lie —
   // the daemon was up), narrated a fake ceremony, and never asked for Touch ID.
   | { mode: 'needs-reset'; omni?: string; reason: string }
-  // The broker's sponsored-register path is down (503) — the register would
-  // fail AFTER we mint a passkey, orphaning it in the Secure Enclave and
-  // never reaching the 2nd Touch ID. Caught by a PREFLIGHT before
-  // credentials.create, so NO passkey is created. Transient: retry once the
-  // operator arms the broker's sponsor key (VE setup-broker-host step 5).
   | { mode: 'broker-not-ready'; reason: string }
   // #501: the CHAIN could not be read (the #435 probe answered `error`). The
   // daemon is healthy — only the chain is unreachable — so this must never
@@ -91,12 +79,6 @@ async function tryRealEnroll(client: AgentKeysClient, email: string): Promise<En
       reason: probe.data.probe_error ?? 'the chain could not be read (RPC unreachable)',
     };
   }
-  // When the FRESH probe answered, it is authoritative — including bound=false.
-  // The session-cached `chain` field is marked on rehydrate and used to claim
-  // `master-registered` for an omni that was never bound (the 2026-07-16 VE
-  // false positive that pushed an operator into a destructive reset); it is
-  // consulted only when the probe endpoint itself was unavailable (older
-  // daemon, transport error) — the probe:'error' case already bailed above.
   const boundOnChain = probe.ok
     ? probe.data.bound === true
     : st.ok && st.data.chain === 'master-registered';
@@ -152,16 +134,6 @@ async function tryRealEnroll(client: AgentKeysClient, email: string): Promise<En
     };
   }
 
-  // PREFLIGHT the broker's sponsored-register path BEFORE minting a passkey
-  // (2026-07-17 VE): `credentials.create()` always makes a NEW Secure-Enclave
-  // credential, but the register can only be BUILT after it (the build needs
-  // the passkey pubkey). So a broker that 503s /v1/register/build fails AFTER
-  // the passkey exists — orphaning it, and never reaching the 2nd Touch ID.
-  // Probing first means: broker down ⇒ no passkey minted, a clear reason, and
-  // a retry that works the instant the operator arms the sponsor key. Only a
-  // DEFINITE "not ready" blocks; indeterminate (no broker / probe error) falls
-  // through to the create as before, so the register-error backstop below still
-  // catches a broker that dies between the probe and the build.
   const preflight = await client.registerPreflight();
   if (preflight.ok && preflight.data.register_ready === false) {
     akLog('onboarding: broker register path DOWN — not minting a passkey (would orphan)', {
@@ -548,10 +520,6 @@ export function OnboardingScreen({
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      // Bind the identity store to the daemon's live (chain, broker) BEFORE
-      // reading the pointer, so a stack switch (Heima↔Base, or Heima-AWS↔
-      // Heima-VE on the same chain) reads THIS stack's master — not another
-      // stack's, whose omni would mismatch and silently hide the offer.
       await ensureActiveStack(async () => {
         const info = await client.getChainInfo();
         return info.ok

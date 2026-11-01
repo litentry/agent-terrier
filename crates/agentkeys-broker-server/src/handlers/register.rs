@@ -61,7 +61,7 @@ async fn bundler_not_ready_reason(state: &SharedState) -> Option<String> {
         .unwrap_or_else(|| "unconfigured".to_string());
     Some(format!(
         "the bundler is not ready ({missing}) — arm the submitter key / EntryPoint \
-         (setup-broker-host.sh) so it can submit + pay for handleOps"
+         so it can submit and fund handleOps"
     ))
 }
 

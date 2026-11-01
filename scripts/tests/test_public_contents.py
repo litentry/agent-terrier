@@ -57,6 +57,17 @@ class PublicContentsTests(unittest.TestCase):
             for spelling in ("broker.public.example", domain + ".public.example", "x" + domain):
                 self.assertEqual(self.check_text("https://" + spelling)["findings"], [])
 
+    def test_private_context_phrases_are_denied_without_exposing_the_dictionary(self):
+        phrases = {"synthetic-operator-helper.sh", "privatebackend deployment"}
+        digests = {hashlib.sha256(phrase.encode()).hexdigest() for phrase in phrases}
+        with mock.patch.object(public_check, "PRIVATE_CONTEXT_HASHES", digests, create=True):
+            for phrase in phrases:
+                report = self.check_text("comment " + phrase.upper() + " unavailable")
+                self.assertEqual(report["findings"], [{"path":"example.txt", "rule":"private-deployment-context", "line":1}])
+                self.assertNotIn(phrase, json.dumps(report).lower())
+            self.assertEqual(self.check_text("public helper and a local deployment")["findings"], [])
+            self.assertEqual(self.check_text("privatebackend library")["findings"], [])
+
     def test_rejects_private_key_without_printing_it(self):
         canary = "-----BEGIN " + "PRIVATE KEY-----\n" + "synthetic-test-material"
         report = self.check_text(canary)
