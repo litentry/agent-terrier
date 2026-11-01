@@ -13,3 +13,5 @@ The local runtime migration remains open in [epic #1](https://github.com/litentr
 The default contribution license is Apache-2.0. Preserve existing file-level notices and third-party attribution; see [licensing](docs/wiki/licensing.md) before moving or importing code.
 
 The two browser applications and `design-system` use the root npm workspace and lockfile. Locally from the repository root, install with `npm ci --ignore-scripts`, then use the application’s existing `typecheck`, `test` and `build` commands. Keep one React installation for both apps and the shared components; do not restore declaration-only React aliases or per-app lockfiles. The separate `packages` workspace owns agent runtime dependencies and remains the image-build input.
+
+Full native regression is explicit: locally from the public checkout, run `python3 terrier test regression`. The nightly GitHub workflow reuses this lane and the existing service qualifications. Ordinary PRs retain affected selection. See [test lanes](docs/wiki/test-lanes.md#nightly-deterministic-workflow) for schedule, report and acceptance limits.

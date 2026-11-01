@@ -13,6 +13,7 @@ import time
 from . import contracts, affected
 
 COMPONENTS = ("protocol", "runtime", "broker", "signer", "relay", "bundler", "daemon", "storage", "cli", "ui", "display", "dsh", "managed", "contracts", "provisioner", "chain", "services", "agents")
+REGRESSION_TIMEOUT_SECONDS = 3600
 RUNTIME_SUITE = ("runtime", "agentkeys-runtime", "--lib", None, "")
 CORE = (
     ("protocol", "agentkeys-protocol", "--lib", None, ""),
@@ -131,6 +132,8 @@ def python_counts(result, output):
 def selection(lane, components):
     if lane != "qualification" and set(components) & {"chain", "services", "agents"}:
         raise ValueError("chain, services and agents require explicit qualification")
+    if lane == "regression" and components:
+        raise ValueError("regression runs the full native workspace; select component lanes separately")
     if lane == "qualification":
         if not components or any(component not in QUALIFICATIONS for component in components):
             raise ValueError("qualification requires a supported component: " + ", ".join(QUALIFICATIONS))
@@ -164,10 +167,12 @@ def run(repository, lane, components, online=False, report_path=None, plan=False
                 rust.append(suite)
     builds = affected_plan["rust_builds"] if affected_plan else []
     selected = [name + "-compile" for name, _ in builds] + [name for name, *_ in rust] + [value for value in components if value in ("ui", "display", "dsh", "managed", "contracts", "provisioner")]
-    if lane in ("source", "core", "affected"):
+    if lane in ("source", "core", "affected", "regression"):
         selected = [name for name, _ in SOURCE_COMMANDS] + selected
     qualification_scripts = list(dict.fromkeys(script for component in components for script in QUALIFICATIONS.get(component, ()))) if lane == "qualification" else []
     selected += [Path(script).stem for script in qualification_scripts]
+    if lane == "regression":
+        selected.append("workspace-native")
     if lane == "qualification" and "provisioner" in components:
         selected.append("provisioner-browser")
     if plan:
@@ -185,9 +190,9 @@ def run(repository, lane, components, online=False, report_path=None, plan=False
     diagnostics = Path(tempfile.mkdtemp(prefix="terrier-tests-"))
     checks = []
 
-    def check(name, phase, command, directory=repository, rust_test=False, extra_environment=None, python_test=False, contract_test=False):
+    def check(name, phase, command, directory=repository, rust_test=False, extra_environment=None, python_test=False, contract_test=False, timeout_seconds=600):
         log_path = diagnostics / f"{len(checks):02d}-{name}.log"
-        result = execute(command, directory, log_path, extra_environment=extra_environment)
+        result = execute(command, directory, log_path, timeout_seconds=timeout_seconds, extra_environment=extra_environment)
         if rust_test:
             rust_counts(result, log_path.read_text(errors="replace"))
         if contract_test:
@@ -199,13 +204,18 @@ def run(repository, lane, components, online=False, report_path=None, plan=False
         print(f"{name}: {result['status']} ({result['seconds']:.3f}s)", file=sys.stderr)
         return result, log_path
 
-    if online and (rust or builds or "managed" in components):
+    if online and (rust or builds or "managed" in components or lane == "regression"):
         setup, _ = check("dependencies", "setup", ["cargo", "fetch", "--locked"])
         if setup["status"] != "passed":
             rust, builds = [], []
-    if lane in ("source", "core", "affected"):
+    if lane in ("source", "core", "affected", "regression"):
         for name, command in SOURCE_COMMANDS:
             check(name, "execution", command, python_test=name == "python")
+    if lane == "regression" and all(result["status"] == "passed" for result in checks):
+        command = ["cargo", "test", "--offline", "--locked", "--workspace", "--all-targets"]
+        built, _ = check("workspace-native-build", "build", command + ["--no-run"], timeout_seconds=REGRESSION_TIMEOUT_SECONDS)
+        if built["status"] == "passed":
+            check("workspace-native", "execution", command, rust_test=True, timeout_seconds=REGRESSION_TIMEOUT_SECONDS)
     for package, binary in builds:
         check(package + "-compile", "build", ["cargo", "check", "--offline", "--locked", "-p", package, "--bin", binary])
     for name, package, target, target_name, test_filter in rust:
@@ -280,7 +290,7 @@ def run(repository, lane, components, online=False, report_path=None, plan=False
         check(Path(script).stem, "execution", [sys.executable, "scripts/tests/" + script],
               extra_environment=qualification_environment, python_test=True)
     elapsed = round(time.monotonic() - started, 3)
-    target = None if lane == "qualification" else (30 if lane == "focused" else 180)
+    target = None if lane in ("qualification", "regression") else (30 if lane == "focused" else 180)
     success = bool(checks) and all(check["status"] == "passed" for check in checks)
     revision = os.environ.get("GITHUB_SHA", "") if os.environ.get("GITHUB_ACTIONS") == "true" else ""
     report = {
@@ -293,10 +303,10 @@ def run(repository, lane, components, online=False, report_path=None, plan=False
         "queue_seconds": None, "cleanup_seconds": None,
         "checks": checks,
     }
+    print(f"Private diagnostic logs: {diagnostics}", file=sys.stderr)
     if report_path:
         descriptor = os.open(report_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
         with os.fdopen(descriptor, "w") as output:
             json.dump(report, output, indent=2)
             output.write("\n")
-    print(f"Private diagnostic logs: {diagnostics}", file=sys.stderr)
     return report, 0 if success else 1

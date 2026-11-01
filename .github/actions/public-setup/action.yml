@@ -1,0 +1,50 @@
+name: Public component setup
+description: Prepare selected public component dependencies on the hosted Linux runner
+inputs:
+  browser:
+    description: Prepare the browser workspace and shared WASM client
+    default: 'false'
+  plugins:
+    description: Prepare shared agent plugins
+    default: 'false'
+  contracts:
+    description: Install the pinned contract tools
+    default: 'false'
+  provisioner:
+    description: Prepare provisioner component dependencies
+    default: 'false'
+runs:
+  using: composite
+  steps:
+    - name: Prepare Node for selected components
+      if: inputs.browser == 'true' || inputs.plugins == 'true' || inputs.provisioner == 'true'
+      uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+      with:
+        node-version: '24'
+    - name: Prepare browser dependencies and shared client
+      if: inputs.browser == 'true'
+      env:
+        WASM_PACK_RELEASE: wasm-pack-v0.15.0-x86_64-unknown-linux-musl
+        WASM_PACK_SHA256: c09f971ecaed9a2efc80fdcea7a00ef6b53c7fadc8c57d1f61b53a6aa66b668a
+      shell: bash
+      run: |
+        npm ci --ignore-scripts
+        curl --fail --location --proto '=https' --tlsv1.2 --output "${RUNNER_TEMP}/wasm-pack.tar.gz" "https://github.com/wasm-bindgen/wasm-pack/releases/download/v0.15.0/${WASM_PACK_RELEASE}.tar.gz"
+        echo "${WASM_PACK_SHA256}  ${RUNNER_TEMP}/wasm-pack.tar.gz" | sha256sum --check
+        tar -xzf "${RUNNER_TEMP}/wasm-pack.tar.gz" --directory "${RUNNER_TEMP}" "${WASM_PACK_RELEASE}/wasm-pack"
+        export PATH="${RUNNER_TEMP}/${WASM_PACK_RELEASE}:${PATH}"
+        python3 scripts/build-browser-core.py
+    - name: Prepare plugin dependencies
+      if: inputs.plugins == 'true'
+      shell: bash
+      run: npm ci --prefix packages --ignore-scripts
+    - name: Prepare contract tooling
+      if: inputs.contracts == 'true'
+      uses: foundry-rs/foundry-toolchain@dba66c27052e63476d886f22216e119ba7e615bf
+      with:
+        version: v1.7.0
+        cache: false
+    - name: Prepare provisioner component dependencies
+      if: inputs.provisioner == 'true'
+      shell: bash
+      run: npm ci --prefix provisioner-scripts --ignore-scripts

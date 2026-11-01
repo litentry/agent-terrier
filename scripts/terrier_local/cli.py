@@ -21,7 +21,7 @@ def build_parser():
     stack_parser.add_argument("--model-dir", type=Path, help="Own a local model runner using predownloaded models")
     stack_parser.add_argument("--model-binary", type=Path, help="Installed Ollama executable; requires --model-dir")
     test_parser = commands.add_parser("test", help="Run measured source, core, focused or explicit qualification lanes")
-    test_parser.add_argument("lane", choices=["source", "core", "focused", "affected", "qualification"])
+    test_parser.add_argument("lane", choices=["source", "core", "focused", "affected", "regression", "qualification"])
     test_parser.add_argument("--component", action="append", default=[], choices=test_lanes.COMPONENTS)
     test_parser.add_argument("--changed-file", action="append", default=[], help="Changed repository-relative path; include old and new paths for renames")
     test_parser.add_argument("--changed-files-json", type=Path, help="JSON array of changed repository-relative paths")

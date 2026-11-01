@@ -1,3 +1,5 @@
+import errno
+import io
 import os
 from pathlib import Path
 import subprocess
@@ -97,6 +99,36 @@ class TestLaneExecutionTests(unittest.TestCase):
             plan, status = test_lanes.run(Path("."), "qualification", [component], plan=True)
             self.assertEqual(status, 0)
             self.assertTrue(any(name.startswith("qualify_local_") for name in plan["selected"]))
+
+    def test_regression_is_explicit_and_cannot_be_narrowed_to_components(self):
+        plan, status = test_lanes.run(Path("."), "regression", [], plan=True)
+        self.assertEqual(status, 0)
+        self.assertIn("workspace-native", plan["selected"])
+        self.assertIn("privacy", plan["selected"])
+        with self.assertRaises(ValueError):
+            test_lanes.run(Path("."), "regression", ["cli"], plan=True)
+
+    def test_report_disk_failure_still_identifies_private_diagnostics(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            repository = root / "source"
+            repository.mkdir()
+            diagnostics = root / "diagnostics"
+            diagnostics.mkdir()
+            output = io.StringIO()
+            def execute(command, directory, log_path, **options):
+                log_path.write_text("synthetic diagnostic")
+                return {"status": "passed", "exit_code": 0, "seconds": 0}
+            with patch.object(test_lanes, "SOURCE_COMMANDS", (("probe", ["synthetic"]),)), \
+                    patch.object(test_lanes, "execute", side_effect=execute), \
+                    patch.object(test_lanes.tempfile, "mkdtemp", return_value=str(diagnostics)), \
+                    patch.object(test_lanes.sys, "stderr", output), \
+                    patch.object(test_lanes.os, "open", side_effect=OSError(errno.ENOSPC, "synthetic disk full")):
+                with self.assertRaises(OSError):
+                    test_lanes.run(repository, "source", [], report_path=root / "report.json")
+            self.assertIn(f"Private diagnostic logs: {diagnostics}", output.getvalue())
+            self.assertEqual((diagnostics / "00-probe.log").read_text(), "synthetic diagnostic")
+            self.assertFalse((root / "report.json").exists())
 
     def test_child_does_not_inherit_host_provider_credentials(self):
         with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {"BROKER_PRIVATE_CANARY": "synthetic"}):
