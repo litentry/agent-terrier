@@ -121,7 +121,15 @@ fn receipt(action: &str, response: &Value) -> Value {
     let context_removed = cleanup
         .as_ref()
         .is_some_and(|outcome| outcome.context_removed);
-    let resources_kept = row.is_some_and(|row| row["resources_kept"] == true);
+    let relay_ready = if action == "archive" {
+        cleanup
+            .as_ref()
+            .is_some_and(|outcome| outcome.relay_revoked)
+    } else {
+        relay_ready
+    };
+    let resources_kept =
+        row.is_some_and(|row| row["resources_kept"] == true) || response["resources_kept"] == true;
     let complete = confirmed
         && relay_ready
         && if action == "spawn" {
@@ -242,6 +250,7 @@ pub async fn execute(context: &CommandContext, options: &AgentOptions) -> Result
                     .and_then(|mut response| {
                         response["device_key_hash"] = json!(record.device_key_hash);
                         response["actor_omni"] = json!(record.actor_omni);
+                        response["resources_kept"] = json!(record.resources_kept);
                         Ok(serde_json::to_string(&response)?)
                     });
             (record.action.name(), result)
@@ -318,8 +327,16 @@ mod tests {
             device_key_hash: response["device_key_hash"].as_str().unwrap().into(),
             context_removed: true,
             runtime_stopped: true,
+            relay_revoked: true,
             error: None,
         }]);
+        assert_eq!(receipt("archive", &response)["complete"], true);
+        response["ceremony"]["runtime_teardown"][0]["relay_revoked"] = json!(false);
+        assert_eq!(receipt("archive", &response)["complete"], false);
+        response["ceremony"]["runtime_teardown"][0]["relay_revoked"] = json!(true);
+        response["ceremony"]["archived"] = json!([]);
+        assert_eq!(receipt("archive", &response)["complete"], false);
+        response["resources_kept"] = json!(true);
         assert_eq!(receipt("archive", &response)["complete"], true);
         response["ceremony"]["runtime_teardown"][0]["context_removed"] = json!(false);
         response["ceremony"]["runtime_teardown"][0]["error"] = json!("spawn_context_delete_failed");

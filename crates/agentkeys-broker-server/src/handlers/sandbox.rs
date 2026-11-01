@@ -576,12 +576,14 @@ pub async fn teardown_for_confirmed_batch(
     call_data: &[u8],
 ) -> Vec<agentkeys_protocol::RuntimeTeardownOutcome> {
     let revoked = revoked_device_key_hashes(call_data);
+    let relay_config = crate::gate_admin::load_gate_admin_config();
     let mut outcomes = Vec::new();
     for device_key_hash in revoked {
         let mut outcome = agentkeys_protocol::RuntimeTeardownOutcome {
             device_key_hash: device_key_hash.clone(),
             context_removed: false,
             runtime_stopped: false,
+            relay_revoked: false,
             error: None,
         };
         match state.spawn_context_store.delete(&device_key_hash) {
@@ -596,6 +598,21 @@ pub async fn teardown_for_confirmed_batch(
             }
         }
         outcome.context_removed = outcome.error.is_none();
+        match &relay_config {
+            Some(Ok(config)) => {
+                match crate::gate_admin::deprovision_delegate(&state.http, config, &device_key_hash)
+                    .await
+                {
+                    Ok(_) => outcome.relay_revoked = true,
+                    Err(error) => {
+                        tracing::warn!(%device_key_hash, %error, "revoked relay cleanup failed");
+                        outcome.error = Some("relay_revocation_failed".into());
+                    }
+                }
+            }
+            Some(Err(_)) => outcome.error = Some("relay_misconfigured".into()),
+            None => outcome.error = Some("relay_not_configured".into()),
+        }
         let Some(backend) = state.sandbox.as_ref() else {
             outcome.error = Some("runtime_not_configured".into());
             outcomes.push(outcome);

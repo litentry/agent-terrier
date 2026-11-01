@@ -1,4 +1,4 @@
-**Status:** Protected creation and archive pass the real local-chain and Docker qualifier, including foreign-owner denial, revoked relay access and retained application data. Full model/browser journeys and complete recovery across broker restarts remain under development.
+**Status:** Protected creation and archive pass the real local-chain and Docker qualifier, including foreign-owner denial, revoked relay access and retained application data. Full model/browser journeys and recovery of missing creation context remain under development.
 
 ## Prepare
 
@@ -25,7 +25,7 @@ Local, from that same checkout and state directory, using `device_key_hash` from
   --device-key-hash "${AGENT_TERRIER_DEVICE_KEY_HASH:?Set the agent device key hash}"
 ```
 
-Archive revokes the selected delegate on chain, disables its model-relay key and requests runtime teardown. The wrapper always selects retained application resources and offers no data-delete flag. Ordinary runtime removal preserves the owned state volume. The broker separately reports runtime removal and deletion of its reconstruction context; a confirmed chain transaction does not conceal a cleanup failure. A different owner cannot archive the delegate.
+Archive revokes the selected delegate on chain, disables its model-relay key and requests runtime teardown. The wrapper always selects retained application resources and offers no data-delete flag. Ordinary runtime removal preserves the owned state volume. The broker independently reports runtime removal, deletion of its reconstruction context and relay revocation; a confirmed chain transaction does not conceal a cleanup failure. A different owner cannot archive the delegate.
 
 ## Interpret the receipt
 
@@ -35,7 +35,7 @@ An incomplete or pending operation prints its available operation/transaction id
 
 ## Check confirmation without resubmitting
 
-New operations save a protected record under the existing owner's `operations` directory before signing or submission. The record contains the canonical unsigned operation and its local owner, request-key, broker and chain binding. It contains no session bearer, private key or passkey assertion. A failed save stops submission, and existing records are never overwritten.
+New operations save a protected record under the existing owner's `operations` directory before signing or submission. The record contains the canonical unsigned operation, its local owner/request-key/broker/chain binding and the requested resource-retention choice. It contains no session bearer, private key or passkey assertion. A failed save stops submission, and existing records are never overwritten.
 
 Local, from the same public checkout and state directory, using the operation hash printed by the original command:
 
@@ -46,7 +46,7 @@ Local, from the same public checkout and state directory, using the operation ha
 
 The command validates the protected record and current session, then calls the existing authenticated confirmation endpoint. It does not read the development passkey, sign or submit a transaction. The broker independently verifies the operation's owner and chain receipt, and may finish the already-authorized local lifecycle work. Keep the original request key and use a current owner login. Records from another owner, request key, broker or chain are refused.
 
-Receipt confirmation is not a live health check. A missing record cannot be reconstructed from its hash alone by this command. Records are written only by the protected local commands introduced with this feature; older operations do not have them. A broker restart can lose pending ceremony details: chain confirmation can then succeed while lifecycle completion stays false. Such results still exit nonzero; complete lifecycle recovery across restarts remains open. Never resubmit solely to clear that status.
+Receipt confirmation is not a live health check. A missing record cannot be reconstructed from its hash alone by this command. Records are written only by the protected local commands introduced with this feature; older operations do not have them. Archive cleanup is reconstructed from the independently verified chain revocation, so a broker restart does not prevent retrying relay disablement, context removal or runtime teardown. It uses the shared cleanup owner and never submits a second transaction. The retained-data choice comes from the protected record or the original archive result; an older record without that choice stays incomplete if the original result is also unavailable. Missing creation context can likewise leave creation incomplete. These cases exit nonzero; never resubmit solely to clear that status.
 
 ## Explicit qualification
 
@@ -58,4 +58,4 @@ AGENT_TERRIER_TEST_DOCKER_SOCKET="${AGENT_TERRIER_DOCKER_SOCKET:?Set the local D
 python3 scripts/tests/qualify_local_agents.py
 ```
 
-The qualifier creates disposable owners, contracts and services. It checks session/file/owner denials for unchanged chain, relay and container state, then creates and archives an actual Docker runtime and verifies retained volume data and disabled relay access. It checks receipt recovery without the passkey, foreign and altered records, unchanged chain state on confirmation, and incomplete lifecycle evidence after a broker restart. A separate fast HTTP fixture simulates a lost submission response and proves recovery makes no second submission. It removes only its own labeled Docker resources. Failed runs retain a private diagnostic directory and report its path; review those files before sharing them. This heavier qualification is separate from ordinary CLI unit and HTTP checks.
+The qualifier creates disposable owners, contracts and services. It checks session/file/owner denials for unchanged chain, relay and container state, then creates and archives an actual Docker runtime and verifies retained volume data and disabled relay access. It checks receipt recovery without the passkey, foreign and altered records, unchanged chain state on confirmation, and archive cleanup after a broker restart. A controlled local admin fixture provisions a leftover relay credential: it remains usable after a foreign-owner recovery denial and becomes unusable after the rightful owner recovers the confirmed revocation. Older records without retention evidence remain incomplete. A separate fast HTTP fixture simulates a lost submission response and proves recovery makes no second submission. It removes only its own labeled Docker resources. Failed runs retain a private diagnostic directory and report its path; review those files before sharing them. This heavier qualification is separate from ordinary CLI unit and HTTP checks.
