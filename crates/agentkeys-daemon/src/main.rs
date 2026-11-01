@@ -344,16 +344,11 @@ struct Args {
 
     /// W3 real-memory: the on-chain-registered master device key hash (the cap-mint
     /// device binding). Must match the device registered via the W3 bootstrap.
-    /// Issue #196 makes this a FALLBACK — once the K11-finish register shell-out
-    /// runs, the daemon uses the freshly-registered hash automatically.
+    /// Retained enrollment metadata; worker proofs use the explicitly loaded device key.
     #[arg(long, env = "AGENTKEYS_MASTER_DEVICE_KEY_HASH")]
     master_device_key_hash: Option<String>,
 
-    /// Issue #196: path to `e2e/scripts/heima-register-first-master.sh`. When
-    /// set, the ui-bridge K11-finish handler shells out to it to register the
-    /// master device on chain (un-stubbing `chain_tx_hash`) under the session
-    /// omni, signed by the local deployer key. Unset ⇒ on-chain registration is
-    /// skipped and `GET /v1/onboarding/state` reports `chain: none` (dev/no-infra).
+    /// Legacy pairing/reset helper entry point. Owner registration uses --broker-url.
     #[arg(long, env = "AGENTKEYS_REGISTER_MASTER_SCRIPT")]
     register_master_script: Option<String>,
 

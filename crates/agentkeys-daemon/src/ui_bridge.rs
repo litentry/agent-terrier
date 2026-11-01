@@ -15,12 +15,9 @@
 //!   3. browser POST /v1/k11/enroll/finish  → daemon verifies
 //!      attestation via webauthn-rs, returns credentialId
 //!
-//! The on-chain register (registerFirstMasterDevice) is WIRED (issue #196):
-//! K11-finish shells out to `--register-master-script` and returns the real
-//! `chain_tx_hash` + `chain` status (+ `chain_error` on failure). It is skipped
-//! (`chain: none`) ONLY when no register script is configured (dev/no-infra) —
-//! the web app launcher (`dev.sh`) always passes one, so the onboarding
-//! ceremony is NOT deferred.
+//! Registration uses the shared broker build/submit protocol. The browser
+//! authorizes the operation with its passkey; no operator helper or deployer
+//! credential belongs to this registration path.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::convert::Infallible;
@@ -243,23 +240,15 @@ pub struct UiBridgeState {
     /// (by the submit receipt hashes on feed events). `None` ⇒ the decode
     /// stays a synthesized preview (dev / no-infra / tests).
     pub audit_worker_url: Option<String>,
-    /// The on-chain-registered master device key hash, sent as `device_key_hash` in
-    /// memory cap-mint. Must match the device registered via the W3 bootstrap
-    /// (`docs/plan/web-flow/w3-real-memory.md` §4). `None` ⇒ real chain disabled.
-    /// Issue #196 makes this a FALLBACK: once the K11-finish register shell-out
-    /// runs, `registered_master` holds the freshly-registered hash and takes
-    /// precedence, so the operator no longer has to pass `--master-device-key-hash`.
+    /// Legacy registration metadata; request proofs use the explicit device key.
     pub master_device_key_hash: Option<String>,
     pub device_key: Option<Arc<DeviceKey>>,
     /// Issue #196: the on-chain master-device registration result, populated by
-    /// the K11-finish handler's register shell-out. `Some` ⇒ the master device is
+    /// the broker-confirmed registration flow. `Some` ⇒ the master device is
     /// on chain with CAP_MINT. Enrollment metadata is separate from the
     /// explicitly injected request-signing device key.
     pub registered_master: RwLock<Option<RegisteredMaster>>,
-    /// Issue #196: path to `e2e/scripts/heima-register-first-master.sh` (the
-    /// §4.2 sanctioned shell-out). `None` ⇒ K11-finish does NOT submit the
-    /// on-chain register (chain stays "none"); set via `--register-master-script`
-    /// to enable the real web onboarding chain write.
+    /// Legacy reset/pairing helper configuration; never used for owner registration.
     pub register_master_script: Option<String>,
     /// Resolved chain profile (deployed contract registry + explorer + RPC) the
     /// chain-info + audit-decode endpoints serve to the web UI (#153). Resolved
@@ -288,24 +277,15 @@ pub struct UiBridgeState {
 /// `/v1/k11/enroll/finish` (build) and `/v1/master/register/submit`.
 #[derive(Clone, Debug)]
 pub struct PendingMasterRegister {
-    /// `erc4337-register-master.sh build` state file (ACCOUNT/NONCE/CALLDATA/…),
-    /// read back by the `submit` sub-command. Empty on the #278 D6 broker path.
-    pub state_file: String,
-    /// #278 D6: the broker `/v1/register/build` `WireUserOp` (with the non-empty
-    /// `initCode`). `Some` ⇒ submit forwards to the broker `/v1/register/submit`
-    /// (one sponsored op); `None` ⇒ the legacy deployer-funded shell-out path.
-    pub broker_user_op: Option<serde_json::Value>,
-    /// The deployed/predicted P256Account (the operatorMasterWallet-to-be).
-    pub account: String,
-    /// `master_cred_id_hash(omni)` — the account's signer key + a submit arg.
-    pub cred_id_hash: String,
+    pub user_op: agentkeys_protocol::WireUserOp,
+    pub user_op_hash: String,
     /// `keccak(operator_omni)` — what cap-mint sends once registered.
     pub device_key_hash: String,
     /// The session omni the master registers under.
     pub operator_omni: String,
 }
 
-/// Issue #196: outcome of the on-chain master-device registration shell-out.
+/// Confirmed on-chain owner registration metadata.
 #[derive(Clone, Debug)]
 pub struct RegisteredMaster {
     /// Device hash returned by the legacy enrollment flow. Worker requests
@@ -315,9 +295,6 @@ pub struct RegisteredMaster {
     /// (operator == actor for master-self). `cap.rs` requires
     /// `device.actor_omni == req.actor_omni`, so this must equal the cap-mint omni.
     pub operator_omni: String,
-    /// `registerFirstMasterDevice` tx hash. `None` on idempotent skip (the device
-    /// was already on chain from a prior login).
-    pub tx_hash: Option<String>,
     /// #225 / E7: the master's on-chain P256Account address (`operatorMasterWallet[omni]`),
     /// surfaced on the actor page. `None` for a pre-E7 / EOA-bound master.
     pub account: Option<String>,
@@ -374,18 +351,11 @@ pub struct EnrollFinishRequest {
 pub struct EnrollFinishResponse {
     pub credential_id: String,
     pub registered_at_unix: u64,
-    /// Issue #196: real `registerFirstMasterDevice` tx hash once the on-chain
-    /// register shell-out succeeds. `None` on idempotent skip (already on chain),
-    /// when no register script is configured, or when chain registration failed
-    /// (see `chain` / `chain_error`). No longer a hard-coded stub.
+    /// Enrollment builds the operation; its transaction receipt comes from submit.
     pub chain_tx_hash: Option<String>,
-    /// "master-registered" once the master device is on chain with CAP_MINT (new
-    /// tx OR idempotent-skip), else "none". Mirrors `GET /v1/onboarding/state`.
+    /// `register-pending`, `master-registered` or `none`.
     pub chain: String,
-    /// Populated only when the register shell-out FAILED — the passkey is still
-    /// enrolled (the `credential_id` above is valid), but the chain write didn't
-    /// land. The web UI surfaces this so the operator funds + retries instead of
-    /// hitting a confusing cap-mint failure at plant time (issue #90 fail-loud).
+    /// Registration configuration or broker failure; passkey enrollment is retained.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub chain_error: Option<String>,
     /// #225 / E7: when `chain == "register-pending"`, the userOpHash the browser
@@ -462,10 +432,7 @@ pub struct OnboardingStateResponse {
     pub omni: Option<String>,
     /// "enrolled" if a K11 passkey was registered this session, else "none".
     pub k11: String,
-    /// Issue #196: "master-registered" once the master device is on chain with
-    /// CAP_MINT (the K11-finish register shell-out landed or was idempotent-skip),
-    /// else "none". This is the last onboarding gate before the memory plant
-    /// button works end-to-end (real cap-mint resolves the on-chain device).
+    /// `master-registered` once the owner binding is confirmed, otherwise `none`.
     pub chain: String,
     /// Issue #220: the durable-session signal that drives restart-resume in the
     /// web `lib/client`:
@@ -1475,7 +1442,6 @@ async fn relogin_finish(
         RegisteredMaster {
             device_key_hash: coords.device_key_hash.clone(),
             operator_omni: coords.operator_omni.clone(),
-            tx_hash: None,
             account: None,
         },
     )
@@ -2191,7 +2157,6 @@ pub async fn rehydrate_master_session(state: &UiBridgeState) {
                 RegisteredMaster {
                     device_key_hash: record.device_key_hash.clone(),
                     operator_omni: record.operator_omni.clone(),
-                    tx_hash: None,
                     // `account` is chain-read when the probe answered; else None —
                     // the #233 chain reconciliation backfills it from
                     // operatorMasterWallet on the first actor read after restart.
@@ -2258,10 +2223,7 @@ async fn enroll_finish(
     State(state): State<SharedUiBridgeState>,
     Json(req): Json<EnrollFinishRequest>,
 ) -> Result<Json<EnrollFinishResponse>, (StatusCode, Json<ErrorBody>)> {
-    // Issue #196: pull the raw attestationObject (b64url) out of the credential
-    // JSON BEFORE `from_value` consumes it — the on-chain register shell-out
-    // forwards the K11 pubkey + rpIdHash extracted from it (the web path has no
-    // disk K11 file). Always present in a real registration response.
+    // Extract passkey material before the credential value is consumed.
     let attestation_object_b64 = req
         .credential
         .get("response")
@@ -2317,14 +2279,7 @@ async fn enroll_finish(
 
     drop(guard);
 
-    // Issue #196: submit registerFirstMasterDevice on chain (un-stub
-    // chain_tx_hash). The device is registered under the daemon's SESSION omni —
-    // cap.rs forces device.operator_omni == J1.omni_account == the cap-mint
-    // operator_omni, so a master-self memory cap resolves exactly this device.
-    // The deployer key signs the tx (msg.sender); the K11 pubkey is the browser
-    // passkey just enrolled. Best-effort: a chain failure does NOT void the
-    // passkey enrollment — it surfaces in `chain_error` so the operator funds +
-    // retries instead of hitting a confusing cap-mint failure at plant time.
+    // Passkey enrollment and confirmed chain registration remain separate stages.
     let build = finish_chain_register(
         &state,
         &credential_id_b64,
@@ -2343,16 +2298,7 @@ async fn enroll_finish(
     }))
 }
 
-/// K11-finish → on-chain register glue (issue #196). Returns
-/// `(chain_tx_hash, chain_status, chain_error)` and never errors out the
-/// enrollment (the passkey is already persisted). Chain registration is skipped
-/// — `("none", None)` with no error — when no register script is configured
-/// (dev / no-infra). A missing session or a shell-out failure returns a
-/// `chain_error` so the web UI can surface "fund + retry".
-/// #225 / E7 build-phase result. `chain`: `"register-pending"` (account built;
-/// the browser must sign `register_userop_hash` next via `/v1/master/register/submit`),
-/// `"master-registered"` (idempotent skip — the operator already has a master),
-/// or `"none"` (no script / error in `chain_error`).
+/// Registration progress is independent of local passkey enrollment.
 struct ChainRegisterBuild {
     register_userop_hash: Option<String>,
     register_account: Option<String>,
@@ -2373,13 +2319,16 @@ async fn finish_chain_register(
         chain: chain.to_string(),
         chain_error: err,
     };
-    // On-chain register needs EITHER a broker (the #278 D6 sponsored path) OR the
-    // legacy register script. Neither configured ⇒ a CLEAN skip (dev / no-infra),
-    // no error. (The per-path requirement is enforced below: the broker path needs
-    // broker_url; the legacy fallback needs register_master_script.)
-    if state.broker_url.is_none() && state.register_master_script.is_none() {
-        return none("none", None);
-    }
+    let Some(broker) = state
+        .broker_url
+        .as_deref()
+        .filter(|url| !url.trim().is_empty())
+    else {
+        return none(
+            "none",
+            Some("Configure the local broker before registering the owner".into()),
+        );
+    };
     let Some(session) = state.onboarding_session.read().await.clone() else {
         let msg = "K11 enrolled but no onboarding session — verify email first, \
                    then re-enroll to register the master device on chain"
@@ -2387,10 +2336,10 @@ async fn finish_chain_register(
         tracing::warn!("ui-bridge register-master: {msg}");
         return none("none", Some(msg));
     };
-    if session.omni.is_empty() {
+    if session.omni.is_empty() || session.j1.is_empty() {
         return none(
             "none",
-            Some("onboarding session has no EVM omni (managed-wallet attestation skipped)".into()),
+            Some("An authenticated owner session is required for registration".into()),
         );
     }
     let Some(att_b64) = attestation_object_b64 else {
@@ -2407,229 +2356,107 @@ async fn finish_chain_register(
         Ok(xy) => xy,
         Err(e) => return none("none", Some(e)),
     };
-    let cred_id_hash = match master_cred_id_hash_hex(&session.omni) {
-        Ok(h) => h,
-        Err(e) => return none("none", Some(format!("cred-id-hash: {e}"))),
-    };
     let omni0x = if session.omni.starts_with("0x") {
         session.omni.clone()
     } else {
         format!("0x{}", session.omni)
     };
 
-    // #278 D6 — when a broker is configured, collapse the register into ONE
-    // paymaster-sponsored UserOp via the broker's /v1/register/build (initCode +
-    // executeBatch([registerFirstMasterDevice])) instead of the deployer-funded
-    // 3-tx shell-out below. The browser signs the SAME userOpHash next; submit
-    // forwards to /v1/register/submit. The broker derives the omni-keyed values
-    // (cred-id / salt / device-key, actor==operator) and skip-gates 409 itself.
-    if let Some(broker) = state.broker_url.clone() {
-        let device_key_hash = master_device_key_hash_hex(&session.omni).unwrap_or_default();
-        let body = serde_json::json!({
-            "operator_omni": omni0x,
-            "owner_pubkey_x": pub_x,
-            "owner_pubkey_y": pub_y,
-            "rpid_hash": k11.rp_id_hash_hex,
-            "roles": 7, // CAP_MINT | RECOVERY | SCOPE_MGMT (§9 stage 4)
-        });
-        match broker_post_json(&broker, "/v1/register/build", &session.j1, &body).await {
-            Ok((st, v)) if st.is_success() => {
-                let user_op = v.get("user_op").cloned().unwrap_or(serde_json::Value::Null);
-                let userop_hash = v
-                    .get("user_op_hash")
-                    .and_then(|h| h.as_str())
-                    .unwrap_or_default()
-                    .to_string();
-                // sender IS the predicted CREATE2 master account (broker sets it).
-                let account = user_op
-                    .get("sender")
-                    .and_then(|s| s.as_str())
-                    .unwrap_or_default()
-                    .to_string();
-                if userop_hash.is_empty() || account.is_empty() {
-                    return none(
-                        "none",
-                        Some(format!(
-                            "broker /v1/register/build: no user_op_hash/sender: {v}"
-                        )),
-                    );
-                }
-                *state.pending_register.write().await = Some(PendingMasterRegister {
-                    state_file: String::new(),
-                    broker_user_op: Some(user_op),
-                    account: account.clone(),
-                    cred_id_hash,
-                    device_key_hash,
-                    operator_omni: omni0x.clone(),
-                });
-                tracing::info!(
-                    target: "agentkeys.daemon.ui_bridge",
-                    account = %account,
-                    "#278 D6: one-op sponsored master register built at the broker — awaiting the browser signature"
-                );
-                return ChainRegisterBuild {
-                    register_userop_hash: Some(userop_hash),
-                    register_account: Some(account),
-                    chain_tx_hash: None,
-                    chain: "register-pending".to_string(),
-                    chain_error: None,
-                };
-            }
-            // 409 = first-master-only: the operator already has a master on chain.
-            Ok((st, _)) if st == StatusCode::CONFLICT => {
-                mark_master_registered(
-                    state,
-                    RegisteredMaster {
-                        device_key_hash,
-                        operator_omni: omni0x.clone(),
-                        tx_hash: None,
-                        account: None,
-                    },
-                )
-                .await;
-                persist_master_session(state).await;
-                return ChainRegisterBuild {
-                    register_userop_hash: None,
-                    register_account: None,
-                    chain_tx_hash: None,
-                    chain: "master-registered".to_string(),
-                    chain_error: None,
-                };
-            }
-            // Any OTHER broker failure (5xx, route/paymaster misconfig, network): a
-            // broker IS configured, so it owns the register path — surface its failure
-            // LOUDLY + actionably. Do NOT silently fall back to the deployer-funded
-            // shell-out: that would hide a broken D6 sponsored register, re-introduce
-            // deployer txs without anyone noticing, and let onboarding "succeed" while
-            // masking the real error (stale-green). The operator fixes the broker
-            // (route / paymaster / deposit), then retries — the master is NOT bound, so
-            // downstream cap flows would fail `device_not_active` regardless.
-            Ok((st, v)) => {
-                tracing::error!(
-                    target: "agentkeys.daemon.ui_bridge",
-                    "#278 D6: broker /v1/register/build FAILED {st}: {v}"
-                );
-                return none(
-                    "none",
-                    Some(format!(
-                        "master register failed at the broker (/v1/register/build → {st}): {v} \
-                         — fix the broker register route / paymaster, then retry (the master is \
-                         NOT bound on chain)"
-                    )),
-                );
-            }
-            Err(e) => {
-                tracing::error!(
-                    target: "agentkeys.daemon.ui_bridge",
-                    "#278 D6: broker /v1/register/build unreachable: {e}"
-                );
-                return none(
-                    "none",
-                    Some(format!(
-                        "master register could not reach the broker: {e} — retry"
-                    )),
-                );
-            }
-        }
-    }
-
-    // Legacy deployer-funded shell-out path (reached only when no broker is
-    // configured — the D6 broker path above returns first). THIS path needs the
-    // register script; a broker-only daemon never gets here.
-    let Some(script) = state.register_master_script.clone() else {
-        return none("none", None);
+    let request = agentkeys_protocol::BuildRegisterUserOpRequest {
+        operator_omni: omni0x,
+        owner_pubkey_x: pub_x,
+        owner_pubkey_y: pub_y,
+        rpid_hash: k11.rp_id_hash_hex,
+        roles: 7,
     };
-    let state_file = register_state_file(&session.omni);
+    prepare_master_registration(state, broker, &session.j1, request).await
+}
 
-    // BUILD: deploy the P256Account + fund the 5-HEI deposit + assemble the
-    // register UserOp (deployer pays gas; the passkey authorizes). Returns the
-    // userOpHash the browser signs, OR a {skipped:"already-registered"}.
-    let json = match register_master_build(
-        &script,
-        &omni0x,
-        &pub_x,
-        &pub_y,
-        &cred_id_hash,
-        &k11.rp_id_hash_hex,
-        &state_file,
-    )
-    .await
-    {
-        Ok(v) => v,
-        Err(e) => {
-            tracing::error!("ui-bridge register-master build failed: {e}");
-            return none("none", Some(e));
-        }
+async fn prepare_master_registration(
+    state: &SharedUiBridgeState,
+    broker: &str,
+    bearer: &str,
+    request: agentkeys_protocol::BuildRegisterUserOpRequest,
+) -> ChainRegisterBuild {
+    let failed = |message: String| ChainRegisterBuild {
+        register_userop_hash: None,
+        register_account: None,
+        chain_tx_hash: None,
+        chain: "none".into(),
+        chain_error: Some(message),
     };
-
-    let device_key_hash = json
-        .get("device_key_hash")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default()
-        .to_string();
-    let account = json
-        .get("account")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default()
-        .to_string();
-    let operator_omni = json
-        .get("operator_omni")
-        .and_then(|v| v.as_str())
-        .unwrap_or(&omni0x)
-        .to_string();
-
-    // Idempotent skip: the operator already has a master on chain (no re-register).
-    if json.get("skipped").is_some() {
+    let device_key_hash = match master_device_key_hash_hex(&request.operator_omni) {
+        Ok(hash) => hash,
+        Err(error) => return failed(error),
+    };
+    let body = match serde_json::to_value(&request) {
+        Ok(body) => body,
+        Err(_) => return failed("Invalid registration request".into()),
+    };
+    let (status, response) =
+        match broker_post_json(broker, "/v1/register/build", bearer, &body).await {
+            Ok(response) => response,
+            Err(_) => return failed("The local broker registration service is unreachable".into()),
+        };
+    if status == StatusCode::CONFLICT {
+        let Some(registry) = registry_address(state) else {
+            return failed("Registration conflict cannot be verified without the registry".into());
+        };
+        let account = match probe_operator_master_wallet(
+            &state.chain_profile.rpc.http,
+            &registry,
+            &request.operator_omni,
+        )
+        .await
+        {
+            Ok(Some(account)) => account,
+            _ => return failed("Registration conflict has no confirmed owner binding".into()),
+        };
         mark_master_registered(
             state,
             RegisteredMaster {
                 device_key_hash,
-                operator_omni,
-                tx_hash: None,
-                account: (!account.is_empty()).then_some(account.clone()),
+                operator_omni: request.operator_omni,
+                account: Some(account.clone()),
             },
         )
         .await;
         persist_master_session(state).await;
         return ChainRegisterBuild {
             register_userop_hash: None,
-            register_account: (!account.is_empty()).then_some(account),
+            register_account: Some(account),
             chain_tx_hash: None,
-            chain: "master-registered".to_string(),
+            chain: "master-registered".into(),
             chain_error: None,
         };
     }
-
-    // Built: stash the pending register; the browser signs userop_hash next.
-    let userop_hash = json
-        .get("userop_hash")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default()
-        .to_string();
-    if userop_hash.is_empty() || account.is_empty() {
-        return none(
-            "none",
-            Some(format!("build returned no userop_hash/account: {json}")),
-        );
+    if !status.is_success() {
+        return failed(format!(
+            "Broker registration build failed (HTTP {})",
+            status.as_u16()
+        ));
     }
+    let built: agentkeys_protocol::BuildAcceptUserOpResponse =
+        match serde_json::from_value(response) {
+            Ok(built) => built,
+            Err(_) => return failed("Invalid broker registration response".into()),
+        };
+    if built.user_op_hash.is_empty() || built.user_op.sender.is_empty() {
+        return failed("Broker registration response has no operation hash or account".into());
+    }
+    let account = built.user_op.sender.clone();
+    let operation_hash = built.user_op_hash.clone();
     *state.pending_register.write().await = Some(PendingMasterRegister {
-        state_file,
-        broker_user_op: None,
-        account: account.clone(),
-        cred_id_hash,
+        user_op: built.user_op,
+        user_op_hash: operation_hash.clone(),
         device_key_hash,
-        operator_omni,
+        operator_omni: request.operator_omni,
     });
-    tracing::info!(
-        target: "agentkeys.daemon.ui_bridge",
-        account = %account,
-        "E7: master P256Account built + funded — awaiting the browser register signature"
-    );
     ChainRegisterBuild {
-        register_userop_hash: Some(userop_hash),
+        register_userop_hash: Some(operation_hash),
         register_account: Some(account),
         chain_tx_hash: None,
-        chain: "register-pending".to_string(),
+        chain: "register-pending".into(),
         chain_error: None,
     }
 }
@@ -2646,23 +2473,9 @@ fn split_cose_xy(cose_pubkey_hex: &str) -> Result<(String, String), String> {
     Ok((format!("0x{}", &h[2..66]), format!("0x{}", &h[66..130])))
 }
 
-/// `master_cred_id_hash(omni)` as `0x`-hex — the P256Account signer key (matches
-/// the accept's assertion; NOT `keccak(rawId)`).
-fn master_cred_id_hash_hex(operator_omni: &str) -> Result<String, String> {
-    let bare = operator_omni.trim().trim_start_matches("0x");
-    let bytes = hex::decode(bare).map_err(|e| format!("omni hex: {e}"))?;
-    let omni: [u8; 32] = bytes
-        .try_into()
-        .map_err(|_| "omni must be 32 bytes".to_string())?;
-    Ok(format!(
-        "0x{}",
-        hex::encode(agentkeys_core::erc4337::master_cred_id_hash(&omni))
-    ))
-}
-
 /// `master_device_key_hash(omni)` as `0x`-hex — `keccak256(raw omni bytes)`, the
 /// first master's `deviceKeyHash` (#278 D6 broker path; matches the broker-derived
-/// value + `_erc4337_lib.sh`'s `cast keccak "0x$OMNI"`).
+/// registry slot). This is registration metadata, not a request-signing key.
 fn master_device_key_hash_hex(operator_omni: &str) -> Result<String, String> {
     let bare = operator_omni.trim().trim_start_matches("0x");
     let bytes = hex::decode(bare).map_err(|e| format!("omni hex: {e}"))?;
@@ -2673,19 +2486,6 @@ fn master_device_key_hash_hex(operator_omni: &str) -> Result<String, String> {
         "0x{}",
         hex::encode(agentkeys_core::erc4337::master_device_key_hash(&omni))
     ))
-}
-
-/// Per-omni temp state-file path for the register `build`→`submit` handoff.
-fn register_state_file(operator_omni: &str) -> String {
-    let short: String = operator_omni
-        .trim_start_matches("0x")
-        .chars()
-        .take(16)
-        .collect();
-    std::env::temp_dir()
-        .join(format!("agentkeys-register-{short}"))
-        .to_string_lossy()
-        .into_owned()
 }
 
 /// Decode the attestationObject (b64url) → the on-chain K11 material (pubkey +
@@ -2699,111 +2499,6 @@ fn decode_web_k11(
         .decode(att_obj_b64url)
         .map_err(|e| format!("attestationObject not valid b64url: {e}"))?;
     agentkeys_cli::k11_webauthn::parse_web_k11(&bytes).map_err(|e| e.to_string())
-}
-
-/// Shell out to `heima-register-first-master.sh` (wire-real-paths.md §4.2) to
-/// submit `registerFirstMasterDevice` under the session omni, signed by the
-/// local deployer key (msg.sender). Parses the trailing JSON line for the
-/// device_key_hash (what cap-mint sends) + tx_hash (None on idempotent skip).
-async fn run_register_script(script: &str, args: &[&str]) -> Result<serde_json::Value, String> {
-    let output = tokio::process::Command::new("bash")
-        .arg(script)
-        .args(args)
-        .output()
-        .await
-        .map_err(|e| format!("spawn {script}: {e}"))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        // Surface the last few stderr lines (the script logs `fail <reason>`).
-        let tail: String = stderr
-            .lines()
-            .rev()
-            .take(8)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .collect::<Vec<_>>()
-            .join("\n");
-        return Err(format!("register script exited {}: {tail}", output.status));
-    }
-    // The script prints human logs on stderr and a single JSON line on stdout.
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let json_line = stdout
-        .lines()
-        .rev()
-        .find(|l| l.trim_start().starts_with('{'))
-        .ok_or_else(|| format!("register script produced no JSON on stdout: {stdout}"))?;
-    serde_json::from_str(json_line.trim()).map_err(|e| format!("register JSON parse: {e}"))
-}
-
-/// E7 BUILD: `erc4337-register-master.sh build` — deploy the P256Account + fund
-/// its EntryPoint deposit (5 HEI, deployer-paid) + assemble the register UserOp.
-/// Returns the JSON: `{userop_hash, account, device_key_hash}` OR
-/// `{skipped:"already-registered", …}` (operator already has a master).
-async fn register_master_build(
-    script: &str,
-    operator_omni: &str,
-    pub_x: &str,
-    pub_y: &str,
-    cred_id_hash: &str,
-    rpid_hash: &str,
-    state_file: &str,
-) -> Result<serde_json::Value, String> {
-    run_register_script(
-        script,
-        &[
-            "build",
-            "--operator-omni",
-            operator_omni,
-            "--pubx",
-            pub_x,
-            "--puby",
-            pub_y,
-            "--cred-id-hash",
-            cred_id_hash,
-            "--rpid-hash",
-            rpid_hash,
-            "--state-file",
-            state_file,
-        ],
-    )
-    .await
-}
-
-/// E7 SUBMIT: `erc4337-register-master.sh submit` — encode the browser assertion
-/// into the UserOp signature + `EntryPoint.handleOps`. Returns `{tx_hash, account, …}`.
-#[allow(clippy::too_many_arguments)]
-async fn register_master_submit(
-    script: &str,
-    state_file: &str,
-    cred_id_hash: &str,
-    authdata: &str,
-    clientdata: &str,
-    challenge_loc: &str,
-    r: &str,
-    s: &str,
-) -> Result<serde_json::Value, String> {
-    run_register_script(
-        script,
-        &[
-            "submit",
-            "--state-file",
-            state_file,
-            "--cred-id-hash",
-            cred_id_hash,
-            "--authdata",
-            authdata,
-            "--clientdata",
-            clientdata,
-            "--challenge-loc",
-            challenge_loc,
-            "--r",
-            r,
-            "--s",
-            s,
-        ],
-    )
-    .await
 }
 
 /// `POST /v1/master/register/submit` body (#225 / E7).
@@ -2821,7 +2516,7 @@ pub struct BrowserRegisterAssertion {
     pub client_data_json: String,
     pub signature: String,
     // `credential_id` (b64url) may also be present on the wire (serde ignores it) —
-    // the signer key is `cred_id_hash` from the pending build, not the raw id.
+    // the broker derives the signer key from the verified owner, not the raw id.
 }
 
 /// `POST /v1/master/register/submit` (#225 / E7) — phase 2 of the master register.
@@ -2840,180 +2535,136 @@ async fn master_register_submit(
         )
     })?;
 
-    // #278 D6: a broker-built pending register submits the ONE sponsored op to the
-    // broker's /v1/register/submit (the shared accept relay) — the browser assertion
-    // rides through verbatim; the broker encodes it into the UserOp signature and
-    // lands EntryPoint.handleOps (deploying the account from the initCode + running
-    // registerFirstMasterDevice in one tx).
-    if let Some(user_op) = pending.broker_user_op.clone() {
-        let broker = state.broker_url.clone().ok_or_else(|| {
-            err(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "no broker configured for the D6 register submit",
-                "no-broker",
-            )
-        })?;
-        let j1 = match state.onboarding_session.read().await.as_ref() {
-            Some(s) if !s.j1.is_empty() => s.j1.clone(),
-            _ => {
-                return Err(err(
-                    StatusCode::FORBIDDEN,
-                    "no master session",
-                    "no-session",
-                ))
-            }
-        };
-        let a = &req.assertion;
-        let body = serde_json::json!({
-            "user_op": user_op,
-            "assertion": {
-                "authenticator_data": &a.authenticator_data,
-                "client_data_json": &a.client_data_json,
-                "signature": &a.signature,
-                // the broker derives credIdHash from the verified J1 omni; raw id unused.
-                "credential_id": "",
-            },
-        });
-        let (resp, parsed) =
-            forward_to_broker_value(&broker, "/v1/register/submit", &j1, &body).await;
-        if !resp.status().is_success() {
-            // Surface the broker's REAL reason — it emits a precise error (e.g.
-            // "handleOps did not broadcast: bundler eth_sendUserOperation: <reason>"
-            // or a decoded handleOps revert). The old generic fallback hid every
-            // Base register failure behind one opaque line. Forward the broker's
-            // status too, so a 409 already-registered / 503 sponsored-only doesn't
-            // masquerade as a 502 gateway error.
-            let status = resp.status();
-            let detail = parsed.map(|v| v.to_string()).unwrap_or_else(|| {
-                "broker /v1/register/submit failed (broker returned an empty or non-JSON body)"
-                    .into()
-            });
-            tracing::warn!(
-                target: "agentkeys.daemon.ui_bridge",
-                account = %pending.account,
-                %status,
-                detail = %detail,
-                "#278 D6: master register submit FAILED at broker — UserOp not broadcast"
-            );
-            return Err(err(status, detail, "register-submit-failed"));
-        }
-        let v = parsed.unwrap_or(serde_json::Value::Null);
-        let (tx_hash, _) = submit_receipts(&v);
-        // CONFIRMATION GATE: the reused accept relay returns `pending: true` (and no
-        // tx_hash) when its receipt poll times out — the op MAY still land later. Do
-        // NOT persist the bound master on an unconfirmed op, or /v1/onboarding/state
-        // would falsely report `master-registered` and downstream cap/UI flows would
-        // run against an UNbound operatorMasterWallet. (The legacy shell path
-        // post-verified isActive on chain before reporting success — keep that
-        // guarantee.) Keep the register pending; the browser keeps polling onboarding
-        // state, and a retry (or a session rehydrate, which re-derives from chain)
-        // confirms it.
-        let unconfirmed =
-            v.get("pending").and_then(|p| p.as_bool()).unwrap_or(false) || tx_hash.is_none();
-        if unconfirmed {
-            tracing::warn!(
-                target: "agentkeys.daemon.ui_bridge",
-                account = %pending.account,
-                "#278 D6: register broadcast but receipt UNCONFIRMED — keeping it pending, NOT marking bound"
-            );
-            return Ok(Json(serde_json::json!({
-                "ok": true,
-                "chain": "register-pending",
-                "pending": true,
-                "account": pending.account,
-                "device_key_hash": pending.device_key_hash,
-                "user_op_hash": v.get("user_op_hash").cloned().unwrap_or(serde_json::Value::Null),
-            })));
-        }
-        let registered = RegisteredMaster {
-            device_key_hash: pending.device_key_hash.clone(),
-            operator_omni: pending.operator_omni.clone(),
-            tx_hash: tx_hash.clone(),
-            account: Some(pending.account.clone()),
-        };
-        tracing::info!(
-            target: "agentkeys.daemon.ui_bridge",
-            account = %pending.account,
-            tx = tx_hash.as_deref().unwrap_or("(pending)"),
-            "#278 D6: one-op sponsored master register landed — operatorMasterWallet bound"
-        );
-        let out = serde_json::json!({
-            "ok": true,
-            "chain": "master-registered",
-            "tx_hash": tx_hash,
-            "account": pending.account,
-            "device_key_hash": pending.device_key_hash,
-            "user_op_hash": v.get("user_op_hash").cloned().unwrap_or(serde_json::Value::Null),
-        });
-        mark_master_registered(&state, registered).await;
-        *state.pending_register.write().await = None;
-        persist_master_session(&state).await;
-        return Ok(Json(out));
-    }
-
-    let script = state.register_master_script.clone().ok_or_else(|| {
+    let broker = state.broker_url.as_deref().ok_or_else(|| {
         err(
             StatusCode::SERVICE_UNAVAILABLE,
-            "on-chain register not configured (no --register-master-script)",
-            "no-register-script",
+            "No broker configured",
+            "no-broker",
         )
     })?;
-
-    let a = req.assertion;
-    let dec = agentkeys_cli::k11_webauthn::decode_web_userop_assertion(
-        &a.authenticator_data,
-        &a.client_data_json,
-        &a.signature,
-    )
-    .map_err(|e| {
+    let bearer = match state.onboarding_session.read().await.as_ref() {
+        Some(session)
+            if !session.j1.is_empty()
+                && normalize_omni_0x(&session.omni)
+                    .eq_ignore_ascii_case(&pending.operator_omni) =>
+        {
+            session.j1.clone()
+        }
+        _ => {
+            return Err(err(
+                StatusCode::FORBIDDEN,
+                "Registration requires its original owner session",
+                "no-session",
+            ))
+        }
+    };
+    let assertion = req.assertion;
+    let body = agentkeys_protocol::SubmitAcceptUserOpRequest {
+        user_op: pending.user_op.clone(),
+        assertion: agentkeys_protocol::AcceptAssertion {
+            authenticator_data: assertion.authenticator_data,
+            client_data_json: assertion.client_data_json,
+            signature: assertion.signature,
+            credential_id: String::new(),
+        },
+    };
+    let body = serde_json::to_value(body).map_err(|_| {
         err(
             StatusCode::BAD_REQUEST,
-            format!("assertion decode: {e}"),
-            "assertion-decode",
+            "Invalid registration request",
+            "register-submit-invalid",
         )
     })?;
-
-    let loc = dec.challenge_location.to_string();
-    let json = register_master_submit(
-        &script,
-        &pending.state_file,
-        &pending.cred_id_hash,
-        &dec.authenticator_data_hex,
-        &dec.client_data_json_hex,
-        &loc,
-        &dec.r_hex,
-        &dec.s_hex,
+    let (status, response) = broker_post_json(broker, "/v1/register/submit", &bearer, &body)
+        .await
+        .map_err(|_| {
+            err(
+                StatusCode::BAD_GATEWAY,
+                "Broker registration service is unreachable",
+                "register-submit-failed",
+            )
+        })?;
+    if !status.is_success() {
+        return Err(err(
+            status,
+            "Broker refused registration submission",
+            "register-submit-failed",
+        ));
+    }
+    let submitted: agentkeys_protocol::SubmitAcceptUserOpResponse =
+        serde_json::from_value(response).map_err(|_| {
+            err(
+                StatusCode::BAD_GATEWAY,
+                "Invalid broker registration receipt",
+                "register-submit-invalid",
+            )
+        })?;
+    if !submitted.ok
+        || !submitted
+            .user_op_hash
+            .eq_ignore_ascii_case(&pending.user_op_hash)
+    {
+        return Err(err(
+            StatusCode::BAD_GATEWAY,
+            "Broker did not confirm the requested operation",
+            "register-submit-invalid",
+        ));
+    }
+    if submitted.pending == Some(true)
+        || submitted.tx_hash.is_empty()
+        || submitted.block_number.is_empty()
+    {
+        return Ok(Json(serde_json::json!({
+            "ok": true, "chain": "register-pending", "pending": true,
+            "account": pending.user_op.sender, "device_key_hash": pending.device_key_hash,
+            "user_op_hash": pending.user_op_hash,
+        })));
+    }
+    let registry = registry_address(&state).ok_or_else(|| {
+        err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Registry is not configured",
+            "registration-unconfirmed",
+        )
+    })?;
+    let onchain_account = probe_operator_master_wallet(
+        &state.chain_profile.rpc.http,
+        &registry,
+        &pending.operator_omni,
     )
     .await
-    .map_err(|e| err(StatusCode::BAD_GATEWAY, e, "register-submit-failed"))?;
-
-    let registered = RegisteredMaster {
-        device_key_hash: pending.device_key_hash.clone(),
-        operator_omni: pending.operator_omni.clone(),
-        tx_hash: json
-            .get("tx_hash")
-            .and_then(|v| v.as_str())
-            .map(String::from),
-        account: Some(pending.account.clone()),
-    };
-    tracing::info!(
-        target: "agentkeys.daemon.ui_bridge",
-        account = %pending.account,
-        operator_omni = %registered.operator_omni,
-        tx = registered.tx_hash.as_deref().unwrap_or("(none)"),
-        "E7: master P256Account registered — operatorMasterWallet bound"
-    );
-    let resp = serde_json::json!({
-        "ok": true,
-        "chain": "master-registered",
-        "tx_hash": registered.tx_hash,
-        "account": pending.account,
-        "device_key_hash": pending.device_key_hash,
+    .map_err(|_| {
+        err(
+            StatusCode::BAD_GATEWAY,
+            "Owner binding could not be verified",
+            "registration-unconfirmed",
+        )
+    })?;
+    if !onchain_account.is_some_and(|account| account.eq_ignore_ascii_case(&pending.user_op.sender))
+    {
+        return Err(err(
+            StatusCode::CONFLICT,
+            "Owner account is not confirmed on chain",
+            "registration-unconfirmed",
+        ));
+    }
+    let output = serde_json::json!({
+        "ok": true, "chain": "master-registered", "tx_hash": submitted.tx_hash,
+        "account": pending.user_op.sender, "device_key_hash": pending.device_key_hash,
+        "user_op_hash": pending.user_op_hash,
     });
-    mark_master_registered(&state, registered).await;
+    mark_master_registered(
+        &state,
+        RegisteredMaster {
+            device_key_hash: pending.device_key_hash,
+            operator_omni: pending.operator_omni,
+            account: Some(pending.user_op.sender),
+        },
+    )
+    .await;
     *state.pending_register.write().await = None;
     persist_master_session(&state).await;
-    Ok(Json(resp))
+    Ok(Json(output))
 }
 
 fn base64url_encode(bytes: &[u8]) -> String {
@@ -4453,7 +4104,6 @@ async fn master_register_state(
                             RegisteredMaster {
                                 device_key_hash: dkh,
                                 operator_omni: omni.clone(),
-                                tx_hash: None,
                                 account: Some(account.clone()),
                             },
                         )
@@ -8343,7 +7993,13 @@ async fn broker_post_json(
     body: &serde_json::Value,
 ) -> Result<(StatusCode, serde_json::Value), String> {
     let url = format!("{}{}", broker.trim_end_matches('/'), path);
-    let resp = reqwest::Client::new()
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(std::time::Duration::from_secs(200))
+        .build()
+        .map_err(|_| "broker HTTP client configuration failed".to_string())?;
+    let resp = client
         .post(&url)
         .bearer_auth(j1)
         .json(body)
@@ -12944,8 +12600,8 @@ async fn push_audit(state: &SharedUiBridgeState, evt: ApiAuditEvent) {
 //      `cargo llvm-cov -p agentkeys-daemon --lib ui_bridge`
 
 #[cfg(test)]
-#[path = "ui_bridge_bridge_tests.rs"]
-mod bridge_tests;
+#[path = "ui_bridge_http_tests.rs"]
+mod http_tests;
 
 #[cfg(test)]
 mod tests {
@@ -14510,7 +14166,6 @@ mod tests {
         *state.registered_master.write().await = Some(RegisteredMaster {
             device_key_hash: "0xdkh".into(),
             operator_omni: omni_a.clone(),
-            tx_hash: None,
             account: None,
         });
 
@@ -15862,7 +15517,6 @@ mod tests {
         *state.registered_master.write().await = Some(RegisteredMaster {
             device_key_hash: "0xdkh".into(),
             operator_omni: format!("0x{}", "77".repeat(32)),
-            tx_hash: None,
             account: None,
         });
         seed_actor_async(&state).await;
@@ -16148,7 +15802,6 @@ mod tests {
         *state.registered_master.write().await = Some(RegisteredMaster {
             device_key_hash: format!("0x{}", T233_MASTER_HASH.repeat(32)),
             operator_omni: format!("0x{}", T233_OMNI.repeat(32)),
-            tx_hash: None,
             account: None, // lost on restart — must be backfilled from chain
         });
 
@@ -16223,7 +15876,6 @@ mod tests {
             RegisteredMaster {
                 device_key_hash: format!("0x{}", T233_MASTER_HASH.repeat(32)),
                 operator_omni: format!("0x{}", T233_OMNI.repeat(32)),
-                tx_hash: None,
                 account: None,
             },
         )
@@ -16302,7 +15954,6 @@ mod tests {
         *state.registered_master.write().await = Some(RegisteredMaster {
             device_key_hash: format!("0x{}", T233_MASTER_HASH.repeat(32)),
             operator_omni: format!("0x{}", T233_OMNI.repeat(32)),
-            tx_hash: None,
             account: None,
         });
         assert!(state.actors.read().await.is_empty(), "restart: empty map");
@@ -16369,7 +16020,6 @@ mod tests {
         *state.registered_master.write().await = Some(RegisteredMaster {
             device_key_hash: format!("0x{}", T233_MASTER_HASH.repeat(32)),
             operator_omni: format!("0x{}", T233_OMNI.repeat(32)),
-            tx_hash: None,
             account: None,
         });
 
@@ -16444,7 +16094,6 @@ mod tests {
         *state.registered_master.write().await = Some(RegisteredMaster {
             device_key_hash: format!("0x{}", T233_MASTER_HASH.repeat(32)),
             operator_omni: format!("0x{}", T233_OMNI.repeat(32)),
-            tx_hash: None,
             account: None,
         });
         // A locally-known agent whose on-chain entry is REVOKED (the stub's
@@ -16756,7 +16405,6 @@ mod tests {
         *state.registered_master.write().await = Some(RegisteredMaster {
             device_key_hash: format!("0x{}", T233_MASTER_HASH.repeat(32)),
             operator_omni: format!("0x{}", T233_OMNI.repeat(32)),
-            tx_hash: None,
             account: None,
         });
         // The durable manifest (pre-seeded cache — the same doc the config
@@ -17530,67 +17178,6 @@ mod tests {
 
     // ─── Issue #196: on-chain master-device registration (K11-finish glue) ───
 
-    fn write_temp_script(name: &str, body: &str) -> String {
-        let path = std::env::temp_dir().join(format!("ak196-{name}.sh"));
-        std::fs::write(&path, body).unwrap();
-        path.to_string_lossy().into_owned()
-    }
-
-    #[tokio::test]
-    async fn run_register_script_parses_success() {
-        // E7 build output: userop_hash + account the daemon stashes as pending.
-        let script = write_temp_script(
-            "ok",
-            "#!/usr/bin/env bash\necho 'human log' >&2\n\
-             echo '{\"ok\":true,\"userop_hash\":\"0xUOH\",\"account\":\"0xACC\",\"device_key_hash\":\"0xdeadbeef\",\"operator_omni\":\"0xfeed\"}'\n",
-        );
-        let json = run_register_script(&script, &["build"])
-            .await
-            .expect("parse success JSON");
-        assert_eq!(
-            json.get("userop_hash").and_then(|v| v.as_str()),
-            Some("0xUOH")
-        );
-        assert_eq!(json.get("account").and_then(|v| v.as_str()), Some("0xACC"));
-        assert_eq!(
-            json.get("device_key_hash").and_then(|v| v.as_str()),
-            Some("0xdeadbeef")
-        );
-    }
-
-    #[tokio::test]
-    async fn run_register_script_parses_idempotent_skip() {
-        // Already-registered skip: a `skipped` marker, NO userop_hash/tx_hash.
-        let script = write_temp_script(
-            "skip",
-            "#!/usr/bin/env bash\n\
-             echo '{\"ok\":true,\"skipped\":\"already-registered\",\"device_key_hash\":\"0xabc\",\"operator_omni\":\"0xfeed\"}'\n",
-        );
-        let json = run_register_script(&script, &["build"])
-            .await
-            .expect("parse skip JSON");
-        assert_eq!(
-            json.get("skipped").and_then(|v| v.as_str()),
-            Some("already-registered")
-        );
-        assert!(json.get("tx_hash").is_none());
-    }
-
-    #[tokio::test]
-    async fn run_register_script_errors_on_nonzero_exit() {
-        let script = write_temp_script(
-            "fail",
-            "#!/usr/bin/env bash\necho '    fail cast send failed' >&2\nexit 1\n",
-        );
-        let err = run_register_script(&script, &["build"])
-            .await
-            .expect_err("non-zero exit must be an Err");
-        assert!(
-            err.contains("exited") || err.contains("cast send failed"),
-            "got: {err}"
-        );
-    }
-
     #[test]
     fn split_cose_xy_splits_uncompressed_pubkey() {
         let cose = format!("04{}{}", "ab".repeat(32), "cd".repeat(32));
@@ -17608,7 +17195,6 @@ mod tests {
         *state.registered_master.write().await = Some(RegisteredMaster {
             device_key_hash: "0xabc".into(),
             operator_omni: "0xfeed".into(),
-            tx_hash: Some("0xTX".into()),
             account: Some("0xACC0000000000000000000000000000000000001".into()),
         });
         let after = onboarding_state(State(state.clone())).await;
@@ -17616,57 +17202,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn finish_chain_register_skips_when_no_script() {
-        // No --register-master-script ⇒ on-chain register disabled (dev/no-infra),
-        // a CLEAN skip (chain "none", no error), not a failure.
-        let state = make_state();
-        let build = finish_chain_register(&state, "credid", Some("ignored")).await;
+    async fn finish_chain_register_requires_broker_and_session() {
+        let state = make_state_with_script("unavailable-operator-helper".into());
+        let build = finish_chain_register(&state, "credential", None).await;
         assert!(build.register_userop_hash.is_none());
-        assert_eq!(build.chain, "none");
-        assert!(
-            build.chain_error.is_none(),
-            "no-script is a clean skip: {:?}",
-            build.chain_error
-        );
-    }
-
-    #[tokio::test]
-    async fn finish_chain_register_errors_when_no_session() {
-        // Script configured but no onboarding session ⇒ can't determine the omni
-        // to register under; surfaces a chain_error (passkey still enrolled).
-        let script = write_temp_script("nosession", "#!/usr/bin/env bash\necho '{}'\n");
-        let state = build_state(
-            "localhost",
-            "http://localhost:3113",
-            "AgentKeys Test",
-            None,
-            None,
-            84532,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            Some(script),
-            None,
-            None,
-        )
-        .unwrap();
-        let build = finish_chain_register(&state, "credid", Some("ignored")).await;
+        assert!(build.chain_error.unwrap().contains("broker"));
+        let state = make_state_real(None);
+        let build = finish_chain_register(&state, "credential", None).await;
         assert!(build.register_userop_hash.is_none());
-        assert_eq!(build.chain, "none");
-        assert!(
-            build
-                .chain_error
-                .as_deref()
-                .unwrap_or("")
-                .contains("session"),
-            "should explain the missing session: {:?}",
-            build.chain_error
-        );
+        assert!(build.chain_error.unwrap().contains("session"));
     }
 
     // ─── #390 — per-kind curate gate + persona editor ────────────────────────

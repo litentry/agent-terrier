@@ -1,47 +1,12 @@
-//! #278 D6 — the broker `/v1/register/build` flow: the ONE sponsored UserOp that
-//! collapses the master register ceremony.
-//!
-//! The legacy register is 3 chain interactions (deployer `createAccount` +
-//! deployer `EntryPoint.depositTo` + a self-deposit-funded register UserOp — see
-//! `e2e/scripts/erc4337-register-master.sh`). D6 collapses them into a SINGLE
-//! paymaster-sponsored UserOp = `initCode` (counterfactual
-//! `P256AccountFactory.createAccount` deploy) + `executeBatch([
-//! registerFirstMasterDevice])`, gated by ONE master K11 Touch ID — zero deployer
-//! txs in the user path. It mirrors `/v1/accept/build` (the proven sponsored-batch
-//! shape); the companion `/v1/register/submit` route reuses
-//! [`crate::handlers::accept::accept_submit`] verbatim (the relay carries nothing
-//! register-specific — the `WireUserOp`'s non-empty `init_code` rides through
-//! `wire_to_packed` → the bundler → `EntryPoint.handleOps`, which deploys the
-//! account from the `initCode` before running the batch).
-//!
-//! Auth mirrors the accept: the J1_master session omni MUST equal the request
-//! `operator_omni`. The broker DERIVES every omni-keyed value (cred-id / CREATE2
-//! salt / device-key hashes via the shared `agentkeys_core::erc4337` helpers,
-//! `actor_omni == operator_omni` — a first master IS the operator) so a client
-//! can't drift them; the request carries only what the broker can't derive (the
-//! master passkey coords, the WebAuthn `rpid_hash`, the `roles` bitmap).
-//!
-//! **Skip-gate = the pre-flight.** `registerFirstMasterDevice` is first-master-only
-//! (`SidecarRegistry` reverts `DeviceAlreadyRegistered` once `operatorMasterWallet
-//! != 0`), so the handler checks `operatorMasterWallet(omni) == 0` AND
-//! `eth_getCode(predicted) == 0x` BEFORE assembling the op — a doomed (already
-//! registered) request returns 409 with NO Touch ID prompt and NO gas spent. The
-//! predicted sender is read from `factory.getAddress(...)` (authoritative — never
-//! recomputed in Rust), which also proves the factory is correctly configured +
-//! callable. (A full `eth_estimateUserOperationGas` pre-flight is not wired: the
-//! v0.7 EntryPoint has no on-chain `simulateHandleOp`, the in-house bundler does
-//! not implement the estimate RPC, and there is no signature at build time to
-//! validate — the already-registered skip-gate is the realistic doomed-before-
-//! biometric case for register.)
-//!
-//! Register is **sponsored-only**: a live `PAYMASTER_ADDRESS[_<CHAIN>]` is required
-//! (503 otherwise). Unlike accept it has no unsponsored fallback — the whole point
-//! of D6 is zero deployer txs in the user path.
+//! Build one sponsored owner-registration UserOp through the shared protocol.
+//! The verified session must match the operator; identity-derived values use
+//! the shared ERC-4337 helpers. Chain probes reject existing bindings before
+//! construction. The browser signs the operation and the existing accept relay
+//! submits it. This route still requires a configured paymaster.
 
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::Json;
-use serde::Deserialize;
 
 use agentkeys_core::erc4337::{
     master_account_salt, master_cred_id_hash, master_device_key_hash,
@@ -100,22 +65,7 @@ async fn bundler_not_ready_reason(state: &SharedState) -> Option<String> {
     ))
 }
 
-/// Broker-side mirror of `agentkeys_backend_client::protocol::BuildRegisterUserOpRequest`
-/// (the broker doesn't depend on that crate; the frozen key-set test there pins the
-/// shape). `POST /v1/register/build` body, J1_master-gated.
-#[derive(Debug, Clone, Deserialize)]
-pub struct BuildRegisterRequest {
-    pub operator_omni: String,
-    /// Master P-256 passkey X coordinate (`0x` + 64 hex, raw big-endian word).
-    pub owner_pubkey_x: String,
-    /// Master P-256 passkey Y coordinate (`0x` + 64 hex).
-    pub owner_pubkey_y: String,
-    /// WebAuthn RP-ID hash (`sha256(rpId)`, `0x` + 64 hex) — deployment/domain
-    /// specific, so the broker can't derive it.
-    pub rpid_hash: String,
-    /// `SidecarRegistry` role bitmap for the first master device.
-    pub roles: u8,
-}
+pub use agentkeys_protocol::BuildRegisterUserOpRequest as BuildRegisterRequest;
 
 /// The validated register inputs the broker can't derive (everything else —
 /// cred-id / CREATE2 salt / device-key hashes, `actor_omni` — is derived from
