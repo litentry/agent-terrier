@@ -284,12 +284,12 @@ export function ActorDetail({
             {isMaster && onResetMaster && (
               <button
                 className="btn danger"
-                title="Unbind the master so you can re-onboard a fresh passkey (e.g. after deleting the master passkey in your OS password manager). Clears BOTH the local binding AND the on-chain operatorMasterWallet (owner-gated resetMaster). Does NOT delete the OS passkey — do that manually."
+                title="Clear matching local state after an authorized chain recovery has completed"
                 onClick={() => {
-                  if (window.confirm('Unbind the master so you can re-onboard a fresh passkey?\n\n• Clears the local binding AND the on-chain operatorMasterWallet (so a fresh passkey can re-bind)\n• Does NOT delete the OS passkey — delete it in System Settings ▸ Passwords\n\nContinue?')) onResetMaster();
+                  if (window.confirm('Clear the recovered local binding? Chain recovery must already be complete; no transaction is submitted and your OS passkey is unchanged.')) onResetMaster();
                 }}
               >
-                reset master
+                clear recovered binding
               </button>
             )}
           </>

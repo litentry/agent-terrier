@@ -248,7 +248,7 @@ pub struct UiBridgeState {
     /// on chain with CAP_MINT. Enrollment metadata is separate from the
     /// explicitly injected request-signing device key.
     pub registered_master: RwLock<Option<RegisteredMaster>>,
-    /// Legacy reset/pairing helper configuration; never used for owner registration.
+    /// Legacy pairing helper configuration; never used for registration, reset or revocation.
     pub register_master_script: Option<String>,
     /// Resolved chain profile (deployed contract registry + explorer + RPC) the
     /// chain-info + audit-decode endpoints serve to the web UI (#153). Resolved
@@ -1496,7 +1496,9 @@ async fn master_register_preflight(
     State(state): State<SharedUiBridgeState>,
 ) -> Json<serde_json::Value> {
     let Some(broker) = state.broker_url.clone() else {
-        return Json(serde_json::json!({ "register_ready": true, "path": "script" }));
+        return Json(
+            serde_json::json!({ "register_ready": false, "path": "unavailable", "detail":"No broker is configured" }),
+        );
     };
     let j1 = state
         .onboarding_session
@@ -1519,445 +1521,134 @@ async fn master_register_preflight(
     }
 }
 
-/// `POST /v1/master/reset` (#225 E7, fleet teardown #243) — fully unbind the master
-/// so the operator can re-onboard with a FRESH passkey (used when the bound master
-/// passkey was deleted in the OS password manager, or got out of sync via a
-/// re-onboard). Three parts — the fleet teardown FIRST (it needs the still-live J1
-/// + intact actor map), then the unbind, then the local clear:
-///
-/// 0. **FLEET (#243, #260)** — decline every pending pairing row at the broker,
-///    revoke every paired agent device on chain, clear the actors/caps maps + the
-///    K11 enroll store. Who revokes depends on the master model (#260): an
-///    account-master's agents can ONLY be revoked by the master P256Account, so
-///    the UI runs ONE Touch-ID `executeBatch([revokeAgentDevice × N])` UserOp
-///    BEFORE calling this endpoint and this step verifies the chain reads
-///    `revoked` per agent; a legacy EOA-master's agents are revoked here via
-///    `heima-device-revoke.sh` (agent-tier, no K11). Failures land in the
-///    `fleet.failures` response field. ONE case aborts the whole reset: an
-///    account master with agents still bound on chain — unbinding first would
-///    permanently strand those bindings, so the response comes back
-///    `ok: false, needs_fleet_revoke: true` and nothing is mutated. Without
-///    the teardown, a reset left the old agents silently attached to the omni.
-///
-/// 1. **ON-CHAIN** — shell out to `heima-reset-master.sh`, which calls the registry's
-///    owner-gated `resetMaster(operatorOmni)` (the deployer key) to clear
-///    `operatorMasterWallet[omni]`. This is the part that actually lets a fresh passkey
-///    re-bind: `registerFirstMasterDevice` is first-master-ONLY, so WITHOUT this the
-///    immutable binding keeps the new passkey from binding and accept keeps failing
-///    SIG_VALIDATION. Best-effort + surfaced: a failure (registry pre-VERSION-0.3 / no
-///    `resetMaster`, missing deployer key) is reported in the response, not swallowed.
-/// 2. **LOCAL** — clear `registered_master` + any in-flight `pending_register` + the
-///    persisted master-session coords, so `GET /v1/onboarding/state` drops back to
-///    `chain: "none"` and the onboarding ceremony enrolls fresh (it normally SKIPS when
-///    a master is bound). Always runs, even if (1) fails, so the UI isn't stuck.
-///
-/// KEEPS the email/J1 session (re-onboard needs no re-verify). CANNOT touch the **OS
-/// passkey** (WebAuthn forbids a site from deleting a credential) — the UI must tell the
-/// operator to delete the master passkey in System Settings → Passwords.
+/// Clear local binding state only after independent confirmation of registry recovery.
 async fn master_reset(State(state): State<SharedUiBridgeState>) -> Json<serde_json::Value> {
-    // Capture the operator omni BEFORE clearing local state (the on-chain reset
-    // needs it) — registered master, then persisted coords, then live session.
-    let operator_omni = reset_target_omni(&state).await;
-
-    let skip_preflight = std::env::var("AGENTKEYS_RESET_SKIP_REGISTER_PREFLIGHT")
-        .map(|v| v.trim() == "1")
-        .unwrap_or(false);
-    if skip_preflight {
-        tracing::warn!(
-            target: "agentkeys.daemon.ui_bridge",
-            "reset: register-path preflight SKIPPED (AGENTKEYS_RESET_SKIP_REGISTER_PREFLIGHT=1)"
-        );
-    } else if let Some(broker) = state.broker_url.clone() {
-        let j1 = state
-            .onboarding_session
-            .read()
+    let confirmation = async {
+        let omni = reset_target_omni(&state)
             .await
-            .as_ref()
-            .map(|s| s.j1.clone())
-            .filter(|j| !j.is_empty());
-        if let (Some(j1), Some(omni)) = (j1, operator_omni.clone()) {
-            if let Some(detail) = broker_register_path_unavailable(&broker, &j1, &omni).await {
-                tracing::warn!(
-                    target: "agentkeys.daemon.ui_bridge",
-                    omni = %omni,
-                    "reset REFUSED — broker register path unavailable: {detail}"
-                );
-                return Json(serde_json::json!({
-                    "ok": false,
-                    "needs_register_path": true,
-                    "note": format!(
-                        "reset refused — this broker cannot re-register a master right now ({detail}). \
-                         Unbinding now would strand this identity with NO master and no way to \
-                         re-onboard on this stack. Fix the broker's sponsored-register runtime \
-                         before retrying; local state and chain authority were preserved."
-                    ),
-                }));
-            }
+            .ok_or("No owner identity is available for chain confirmation")?;
+        let registry = registry_address(&state).ok_or("No registry is configured")?;
+        let rpc = &state.chain_profile.rpc.http;
+        if probe_operator_master_wallet(rpc, &registry, &omni)
+            .await?
+            .is_some()
+        {
+            return Err(
+                "The master is still bound on chain; complete authorized registry recovery first"
+                    .to_string(),
+            );
         }
+        if !fetch_chain_fleet(rpc, &registry, &omni).await?.is_empty() {
+            return Err(
+                "Device bindings remain on chain; registry recovery is not complete".to_string(),
+            );
+        }
+        Ok::<_, String>(omni)
     }
+    .await;
+    let operator_omni = match confirmation {
+        Ok(omni) => omni,
+        Err(reason) => {
+            return Json(serde_json::json!({
+                "ok":false, "onchain":{"status":"aborted", "reason":"reset-not-confirmed"},
+                "note":format!("Local state was preserved. {reason}"),
+            }))
+        }
+    };
 
-    // (0) FLEET teardown (#243, #260) — BEFORE the master unbind so every
-    // sub-step still has its authority: the pending-pairing declines ride the
-    // (kept) J1 at the broker; EOA-master agent revokes are agent-tier via the
-    // deployer script (no K11 — the flow must also work when the OS passkey is
-    // already deleted, the very case reset exists for); account-master agent
-    // revokes happened in the browser's pre-reset Touch-ID fleet UserOp and are
-    // verified from chain here. Failures are collected + surfaced in the `fleet`
-    // response field. One case aborts (ok:false, nothing mutated): an account
-    // master whose agents are still bound — see the #260 hard stop below.
-    let mut fleet_failures: Vec<String> = Vec::new();
-
-    // (0a) Decline every pending pairing row at the broker, so claimed-but-
-    // unapproved agents stop reappearing on the pairing page after re-onboard.
     let mut pending_declined = 0usize;
-    {
-        let j1 = state
+    let mut failures = Vec::new();
+    if let Some(broker) = state.broker_url.as_deref() {
+        let session = state
             .onboarding_session
             .read()
             .await
             .as_ref()
-            .map(|s| s.j1.clone())
-            .filter(|j| !j.is_empty());
-        match (state.broker_url.clone(), j1) {
-            (Some(broker), Some(j1)) => {
-                match agentkeys_cli::agent_admin::agent_pending_value(&broker, &j1).await {
-                    Ok(v) => {
-                        let ids: Vec<String> = v
-                            .get("pending")
-                            .and_then(|p| p.as_array())
-                            .map(|rows| {
-                                rows.iter()
-                                    .filter_map(|b| {
-                                        b.get("request_id")
-                                            .and_then(serde_json::Value::as_str)
-                                            .map(str::to_string)
-                                    })
-                                    .collect()
-                            })
-                            .unwrap_or_default();
-                        for id in ids {
-                            let resp = forward_to_broker(
-                                &broker,
+            .map(|session| session.j1.clone())
+            .filter(|session| !session.is_empty());
+        if let Some(session) = session {
+            match agentkeys_cli::agent_admin::agent_pending_value(broker, &session).await {
+                Ok(value) => {
+                    if let Some(pending) =
+                        value.get("pending").and_then(serde_json::Value::as_array)
+                    {
+                        for binding in pending {
+                            let Some(request_id) = binding
+                                .get("request_id")
+                                .and_then(serde_json::Value::as_str)
+                            else {
+                                failures.push("Invalid pending pairing record".to_string());
+                                continue;
+                            };
+                            let response = forward_to_broker(
+                                broker,
                                 "/v1/agent/pairing/decline",
-                                &j1,
-                                &serde_json::json!({ "request_id": id }),
+                                &session,
+                                &serde_json::json!({"request_id":request_id}),
                             )
                             .await;
-                            if resp.status().is_success() {
+                            if response.status().is_success() {
                                 pending_declined += 1;
                             } else {
-                                fleet_failures
-                                    .push(format!("decline {id}: HTTP {}", resp.status()));
+                                failures.push(format!(
+                                    "Pending pairing decline failed: HTTP {}",
+                                    response.status()
+                                ));
                             }
                         }
+                    } else {
+                        failures.push("Invalid pending pairing response".to_string());
                     }
-                    Err(e) => fleet_failures.push(format!("pending-bindings list: {e:#}")),
                 }
+                Err(_) => failures.push("Could not read pending pairings".to_string()),
             }
-            (None, _) => {} // no broker configured (dev) — nothing to decline
-            (_, None) => fleet_failures.push(
-                "pending pairings not declined: no live master session (J1) — decline them \
-                 from the pairing page after re-onboarding"
-                    .into(),
-            ),
+        } else {
+            failures
+                .push("A current owner session is required to clear pending pairings".to_string());
         }
     }
-
-    // (0b) Revoke every paired agent device ON CHAIN and append an audit row per
-    // revocation. A binding is not gone until the chain says so; skipping this is
-    // exactly the silently-attached-fleet trap #243 closes. The fleet is
-    // reconciled FROM CHAIN first (#233): post-restart the in-memory map is empty
-    // while agents are still bound — without this, a restart-then-reset would
-    // revoke nothing while reporting a clean teardown.
-    //
-    // WHO revokes depends on the master model (#260): an account-master's agents
-    // can ONLY be revoked by the master P256Account itself — the browser runs ONE
-    // Touch-ID `executeBatch([revokeAgentDevice × N])` UserOp BEFORE calling this
-    // endpoint, and this step verifies the chain now reads `revoked` per agent.
-    // A legacy EOA-master's agents are revoked here via the deployer script
-    // (`heima-device-revoke.sh`, idempotent, agent-tier).
-    // evict_disowned = false: the #260 teardown below must still SEE
-    // chain-revoked rows to report them (already_revoked + audit); the reset
-    // clears the whole map afterwards, so no ghost can survive this path.
-    if let Err(e) = reconcile_actors_from_chain(&state, false).await {
-        fleet_failures.push(format!(
-            "chain fleet reconstruction failed ({e}) — revoking only the locally-known agents; \
-             re-run reset once the RPC is reachable"
-        ));
+    if !failures.is_empty() {
+        return Json(
+            serde_json::json!({"ok":false, "note":"Pending pairing cleanup is incomplete; local state was preserved",
+            "fleet":{"pending_declined":pending_declined, "agents_revoked":[], "actors_cleared":0, "k11_enroll_cleared":false, "failures":failures}}),
+        );
     }
-    let agents: Vec<(String, String, Option<String>)> = state
-        .actors
-        .read()
-        .await
-        .values()
-        .filter(|a| a.role == "agent")
-        .map(|a| (a.id.clone(), a.label.clone(), a.device_key_hash.clone()))
-        .collect();
-    let mut agents_revoked: Vec<serde_json::Value> = Vec::new();
-    if !agents.is_empty() {
-        // #260 ground truth: ONE chain-fleet read drives (a) the already-revoked
-        // skip — the pre-reset Touch-ID fleet revoke normally lands first, so
-        // agents arrive here pre-revoked — and (b) the account-master guard.
-        // Best-effort: an unreachable RPC degrades to the legacy script-per-agent
-        // behavior (reconcile already surfaced the failure above).
-        let registry = registry_address(&state);
-        let rpc = state.chain_profile.rpc.http.clone();
-        let norm_hash = |h: &str| h.trim().trim_start_matches("0x").to_lowercase();
-        let revoked_on_chain: std::collections::HashSet<String> = match (&registry, &operator_omni)
+    if let Some(store) = state.master_session_store.as_ref() {
+        if store
+            .clear_owner(
+                state.broker_url.as_deref().unwrap_or_default(),
+                &operator_omni,
+            )
+            .is_err()
         {
-            (Some(reg), Some(omni)) => match fetch_chain_fleet(&rpc, reg, omni).await {
-                Ok(fleet) => fleet
-                    .iter()
-                    .filter(|d| d.revoked)
-                    .map(|d| norm_hash(&d.device_key_hash))
-                    .collect(),
-                Err(e) => {
-                    tracing::warn!(
-                        target: "agentkeys.daemon.ui_bridge",
-                        "reset teardown: chain fleet read failed ({e}) — falling back to the \
-                         script path for every agent"
-                    );
-                    Default::default()
-                }
-            },
-            _ => Default::default(),
-        };
-        // The master model decides who CAN revoke a still-active agent: a passkey
-        // P256Account master (account has code) means NO EOA — incl. the deployer
-        // script — can sign revokeAgentDevice (#260). Unknown (RPC down / no
-        // master on chain) fails open to today's script behavior.
-        let master_is_account = match (&registry, &operator_omni) {
-            (Some(reg), Some(omni)) => match fetch_operator_master_wallet(&rpc, reg, omni).await {
-                Some(addr) => daemon_eth_address_has_code(&rpc, &addr)
-                    .await
-                    .unwrap_or(false),
-                None => false,
-            },
-            _ => false,
-        };
-
-        let mut needs_script: Vec<&(String, String, Option<String>)> = Vec::new();
-        let mut agents_still_bound: Vec<serde_json::Value> = Vec::new();
-        for agent in &agents {
-            let (id, label, device_key_hash) = agent;
-            let already_revoked = device_key_hash
-                .as_deref()
-                .map(|h| revoked_on_chain.contains(&norm_hash(h)))
-                .unwrap_or(false);
-            if already_revoked {
-                push_audit(
-                    &state,
-                    ApiAuditEvent {
-                        id: format!("e-reset-revoke-{}-{id}", now_unix()),
-                        ts: now_ts_hms(),
-                        actor_id: "master".into(),
-                        actor: "master".into(),
-                        kind: "device.revoked".into(),
-                        detail: format!(
-                            "{id} · master-reset fleet teardown · on-chain revokeAgentDevice \
-                             (already revoked — Touch-ID fleet revoke landed before the reset)"
-                        ),
-                        chip: "revoke".into(),
-                        sev: "bad".into(),
-                        tx_hash: None,
-                        audit_envelope_hashes: None,
-                    },
-                )
-                .await;
-                agents_revoked.push(serde_json::json!({
-                    "id": id, "label": label, "tx_hash": null, "already_revoked": true,
-                }));
-                continue;
-            }
-            if master_is_account {
-                // The EOA script is guaranteed to revert NotAuthorized here —
-                // don't even attempt it; the abort below routes the operator to
-                // the Touch-ID fleet revoke instead.
-                agents_still_bound.push(serde_json::json!({
-                    "id": id, "label": label, "device_key_hash": device_key_hash,
-                }));
-                fleet_failures.push(format!(
-                    "revoke {label}: still bound on chain and the master is a passkey \
-                     P256Account — no EOA script can sign revokeAgentDevice; approve the \
-                     Touch-ID fleet revoke first"
-                ));
-                continue;
-            }
-            needs_script.push(agent);
-        }
-
-        // #260 HARD STOP: unbinding the master clears operatorMasterWallet[omni],
-        // after which NOBODY can revoke these agents (until a new master re-binds
-        // under the same omni). Abort BEFORE the unbind; the UI runs the
-        // one-Touch-ID fleet revoke (/v1/revoke/{build,submit}) and re-POSTs the
-        // reset, which then sees the agents revoked and proceeds.
-        if !agents_still_bound.is_empty() {
-            let n = agents_still_bound.len();
-            return Json(serde_json::json!({
-                "ok": false,
-                "needs_fleet_revoke": true,
-                "onchain": {
-                    "status": "aborted",
-                    "reason": "account-master-agents-still-bound",
-                },
-                "fleet": {
-                    "pending_declined": pending_declined,
-                    "agents_revoked": agents_revoked,
-                    "actors_cleared": 0,
-                    "k11_enroll_cleared": false,
-                    "failures": fleet_failures,
-                    "agents_still_bound": agents_still_bound,
-                },
-                "note": format!(
-                    "reset aborted: {n} agent(s) are still bound on chain and only the master \
-                     P256Account can revoke them. Approve the Touch-ID fleet revoke (one \
-                     approval revokes all of them), then reset again. Nothing was unbound or \
-                     cleared."
-                ),
-            }));
-        }
-
-        if !needs_script.is_empty() {
-            let revoke_script = state
-                .register_master_script
-                .as_deref()
-                .and_then(|m| resolve_repo_script(m, "heima-device-revoke.sh"));
-            match revoke_script {
-                Some(script) => {
-                    for (id, label, device_key_hash) in needs_script {
-                        // Prefer the on-chain hash (works for chain-reconstructed
-                        // actors with no ~/.agentkeys/agents/<label>.json record);
-                        // fall back to the label-file path for legacy rows.
-                        let outcome = match device_key_hash {
-                            Some(hash) => revoke_agent_device_by_hash(&script, hash).await,
-                            None => revoke_agent_device(&script, label).await,
-                        };
-                        match outcome {
-                            Ok(tx) => {
-                                push_audit(
-                                    &state,
-                                    ApiAuditEvent {
-                                        id: format!("e-reset-revoke-{}-{id}", now_unix()),
-                                        ts: now_ts_hms(),
-                                        actor_id: "master".into(),
-                                        actor: "master".into(),
-                                        kind: "device.revoked".into(),
-                                        detail: format!(
-                                            "{id} · master-reset fleet teardown · on-chain \
-                                             revokeAgentDevice{}",
-                                            tx.as_ref()
-                                                .map(|h| format!(" tx={h}"))
-                                                .unwrap_or_else(|| " (already revoked)".into())
-                                        ),
-                                        chip: "revoke".into(),
-                                        sev: "bad".into(),
-                                        tx_hash: None,
-                                        audit_envelope_hashes: None,
-                                    },
-                                )
-                                .await;
-                                agents_revoked.push(serde_json::json!({
-                                    "id": id, "label": label, "tx_hash": tx,
-                                }));
-                            }
-                            Err(e) => fleet_failures.push(format!("revoke {label}: {e}")),
-                        }
-                    }
-                }
-                None => fleet_failures.push(format!(
-                    "{} paired agent(s) NOT revoked on chain: chain not configured (no \
-                     --register-master-script / heima-device-revoke.sh) — revoke them from the \
-                     actor pages once the chain is wired",
-                    needs_script.len()
-                )),
-            }
+            return Json(
+                serde_json::json!({"ok":false, "note":"Could not clear the matching persisted session; in-memory state was preserved"}),
+            );
         }
     }
-
-    // (0c) Local fleet clear: actors + their caps + the K11 enroll store, so a
-    // re-onboarded master starts with a clean slate and `GET /v1/onboarding/state`
-    // reports `k11: "none"` (the enroll record described a credential whose
-    // binding this reset just destroyed). NO K11 regeneration happens here — a
-    // passkey can only be minted by the browser at the next onboarding, and the
-    // OS passkey can only be deleted manually.
     let actors_cleared = {
-        let mut guard = state.actors.write().await;
-        let n = guard.len();
-        guard.clear();
-        n
+        let mut actors = state.actors.write().await;
+        let count = actors.len();
+        actors.clear();
+        count
     };
     state.caps.write().await.clear();
-    // #233: invalidate the chain sync — the next actor read re-reconciles the
-    // (now torn-down) chain instead of trusting this process's cleared map.
     invalidate_fleet_sync(&state);
     {
-        let mut enroll = state.enroll.write().await;
-        enroll.pending.clear();
-        enroll.registered.clear();
+        let mut enrollment = state.enroll.write().await;
+        enrollment.pending.clear();
+        enrollment.registered.clear();
     }
-    let fleet = serde_json::json!({
-        "pending_declined": pending_declined,
-        "agents_revoked": agents_revoked,
-        "actors_cleared": actors_cleared,
-        "k11_enroll_cleared": true,
-        "failures": fleet_failures,
-    });
-
-    // (1) ON-CHAIN unbind via the deployer-owned resetMaster.
-    let onchain = match (state.register_master_script.clone(), operator_omni.clone()) {
-        (Some(script), Some(omni)) => match reset_master_onchain(&script, &omni).await {
-            Ok(v) if v.get("skipped").is_some() => {
-                tracing::info!(target: "agentkeys.daemon.ui_bridge", omni = %omni, "master reset — on-chain already unbound");
-                serde_json::json!({ "status": "skipped", "reason": "already-unbound", "operator_omni": omni })
-            }
-            Ok(v) => {
-                let tx = v
-                    .get("tx_hash")
-                    .and_then(|t| t.as_str())
-                    .unwrap_or_default();
-                tracing::info!(target: "agentkeys.daemon.ui_bridge", omni = %omni, tx = %tx, "master reset — on-chain operatorMasterWallet cleared");
-                serde_json::json!({ "status": "reset", "tx_hash": tx, "operator_omni": omni })
-            }
-            Err(e) => {
-                tracing::warn!(target: "agentkeys.daemon.ui_bridge", omni = %omni, "master reset — on-chain unbind FAILED: {e}");
-                serde_json::json!({ "status": "failed", "error": e, "operator_omni": omni })
-            }
-        },
-        (None, _) => {
-            serde_json::json!({ "status": "skipped", "reason": "no-register-script-configured" })
-        }
-        (_, None) => serde_json::json!({ "status": "skipped", "reason": "no-operator-omni-known" }),
-    };
-
-    // (2) LOCAL clear (always — even if the on-chain step failed, so the UI isn't stuck).
     *state.registered_master.write().await = None;
     *state.pending_register.write().await = None;
     *state.master_session.write().await = None;
-    if let Some(store) = state.master_session_store.as_ref() {
-        if let Err(e) = store.clear_all() {
-            tracing::warn!("ui-bridge: master reset failed to clear persisted session: {e}");
-        }
-    }
-    tracing::info!(
-        target: "agentkeys.daemon.ui_bridge",
-        "master reset — local binding cleared; the OS passkey is NOT touched (WebAuthn forbids site deletion)"
-    );
-
-    let status = onchain.get("status").and_then(|s| s.as_str());
-    let onchain_cleared = status == Some("reset")
-        || (status == Some("skipped")
-            && onchain.get("reason").and_then(|s| s.as_str()) == Some("already-unbound"));
-    let note = if onchain_cleared {
-        "local + ON-CHAIN master binding cleared — delete the master passkey in your OS password \
-         manager (System Settings ▸ Passwords), then re-onboard with a fresh passkey."
-    } else {
-        "LOCAL master binding cleared, but the ON-CHAIN binding was NOT cleared (see onchain.error / \
-         onchain.reason). Re-onboarding will still fail with SIG_VALIDATION until it is — confirm the \
-         registry is VERSION>=0.3 (has resetMaster) and the deployer key is available, then retry, or \
-         run scripts/operator/chain/heima-reset-master.sh --operator-omni <omni> manually."
-    };
-
-    Json(serde_json::json!({ "ok": true, "onchain": onchain, "note": note, "fleet": fleet }))
+    Json(serde_json::json!({
+        "ok":true,
+        "onchain":{"status":"skipped", "reason":"already-unbound", "operator_omni":operator_omni},
+        "fleet":{"pending_declined":pending_declined, "agents_revoked":[], "actors_cleared":actors_cleared,
+                 "k11_enroll_cleared":true, "failures":[]},
+        "note":"Chain recovery was confirmed and matching local state cleared. No transaction was submitted; the OS passkey is unchanged.",
+    }))
 }
 
 /// Persist the current master session coordinates to
@@ -2666,32 +2357,6 @@ async fn daemon_eth_call(rpc: &str, to: &str, data: &str) -> Result<Vec<u8>, Str
         .and_then(|r| r.as_str())
         .ok_or_else(|| format!("eth_call no result: {resp}"))?;
     hex::decode(hexs.trim_start_matches("0x")).map_err(|e| format!("eth_call result hex: {e}"))
-}
-
-/// `eth_getCode(addr) != 0x` — true iff `addr` is a deployed contract. The
-/// #260 reset guard reads this on `operatorMasterWallet[omni]`: a passkey
-/// P256Account master (has code) means NO EOA — incl. the deployer script —
-/// can sign `revokeAgentDevice`, so still-bound agents need the Touch-ID
-/// fleet revoke instead.
-async fn daemon_eth_address_has_code(rpc: &str, addr_0x: &str) -> Result<bool, String> {
-    let body = serde_json::json!({
-        "jsonrpc": "2.0", "id": 1, "method": "eth_getCode",
-        "params": [addr_0x, "latest"]
-    });
-    let resp: serde_json::Value = reqwest::Client::new()
-        .post(rpc)
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| format!("eth_getCode send: {e}"))?
-        .json()
-        .await
-        .map_err(|e| format!("eth_getCode decode: {e}"))?;
-    let code = resp
-        .get("result")
-        .and_then(|r| r.as_str())
-        .ok_or_else(|| format!("eth_getCode no result: {resp}"))?;
-    Ok(code != "0x" && !code.is_empty())
 }
 
 /// Parse a `getOperatorDevices(bytes32) -> bytes32[]` return (offset, len, items).
@@ -4189,9 +3854,9 @@ async fn probe_operator_master_wallet(
         chain_selector("operatorMasterWallet(bytes32)")
     );
     let raw = daemon_eth_call(rpc, registry, &data).await?;
-    if raw.len() < 32 {
+    if raw.len() != 32 || raw[..12].iter().any(|byte| *byte != 0) {
         return Err(format!(
-            "operatorMasterWallet short return ({} bytes)",
+            "operatorMasterWallet invalid address return ({} bytes)",
             raw.len()
         ));
     }
@@ -8812,141 +8477,6 @@ async fn register_agent_device(
     Ok(tx)
 }
 
-/// Resolve a `<repo>/scripts/<name>` helper the same way `register_pairing` finds
-/// `heima-agent-create.sh`: a sibling of the master register script first
-/// (co-located dev case), then `<repo>/scripts/<name>` derived from it.
-fn resolve_repo_script(master_script: &str, name: &str) -> Option<std::path::PathBuf> {
-    let p = std::path::Path::new(master_script);
-    // A sibling of the register script wins — that is the harness/test override.
-    if let Some(sib) = p.parent().map(|d| d.join(name)) {
-        if sib.exists() {
-            return Some(sib);
-        }
-    }
-    // Then walk up for the CANONICAL home. The chain helpers live in
-    // scripts/operator/chain/, but this only ever tried <repo>/scripts/<name> —
-    // so it never found them and EVERY on-chain shell-out failed with
-    // "not found next to the register script" while the script sat in the repo
-    // the whole time. Live hit: `POST /v1/master/reset` cleared the LOCAL binding
-    // and left the on-chain operatorMasterWallet bound, so re-onboarding still
-    // died SIG_VALIDATION — a half-reset that reads like a chain bug. Same for
-    // heima-device-revoke.sh (2 call sites). Walk instead of hardcoding a depth,
-    // so moving either script again cannot silently re-break it.
-    let mut dir = p.parent();
-    for _ in 0..6 {
-        let Some(d) = dir else { break };
-        for rel in [
-            ["scripts", "operator", "chain"].as_slice(),
-            ["scripts"].as_slice(),
-        ] {
-            let mut c = d.to_path_buf();
-            for seg in rel {
-                c.push(seg);
-            }
-            c.push(name);
-            if c.exists() {
-                return Some(c);
-            }
-        }
-        dir = d.parent();
-    }
-    None
-}
-
-/// Shell out to `heima-device-revoke.sh --agent <label>` to submit
-/// `revokeAgentDevice` on chain (the script reads `~/.agentkeys/agents/<label>.json`
-/// and derives the device-key-hash itself). Agent-tier revocation needs no K11; the
-/// script is idempotent (skips when already revoked). Returns the tx hash (None on
-/// idempotent skip).
-async fn revoke_agent_device(
-    script: &std::path::Path,
-    label: &str,
-) -> Result<Option<String>, String> {
-    revoke_agent_device_args(script, "--agent", label.trim_end_matches(" (revoked)")).await
-}
-
-/// Like [`revoke_agent_device`] but keyed on the on-chain device key hash —
-/// the #233/#243 path for chain-reconstructed actors that never had a
-/// `~/.agentkeys/agents/<label>.json` record on this machine.
-async fn revoke_agent_device_by_hash(
-    script: &std::path::Path,
-    device_key_hash: &str,
-) -> Result<Option<String>, String> {
-    revoke_agent_device_args(script, "--device-key-hash", device_key_hash).await
-}
-
-async fn revoke_agent_device_args(
-    script: &std::path::Path,
-    flag: &str,
-    value: &str,
-) -> Result<Option<String>, String> {
-    let output = tokio::process::Command::new("bash")
-        .arg(script)
-        .arg(flag)
-        .arg(value)
-        .output()
-        .await
-        .map_err(|e| format!("spawn heima-device-revoke.sh: {e}"))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let mut lines: Vec<&str> = stderr.lines().rev().take(6).collect();
-        lines.reverse();
-        return Err(format!(
-            "heima-device-revoke.sh exited {}: {}",
-            output.status,
-            lines.join("\n")
-        ));
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let tx = stdout
-        .lines()
-        .rev()
-        .find(|l| l.trim_start().starts_with('{'))
-        .and_then(|l| serde_json::from_str::<serde_json::Value>(l).ok())
-        .and_then(|v| v.get("tx_hash").and_then(|t| t.as_str()).map(String::from));
-    Ok(tx)
-}
-
-/// Shell out to `heima-reset-master.sh --operator-omni <omni>` to clear the
-/// operator's ON-CHAIN `operatorMasterWallet` binding via the registry deployer
-/// (the owner-gated `resetMaster`). Without this the local reset alone cannot let
-/// the operator re-onboard: `registerFirstMasterDevice` is first-master-only, so
-/// the immutable binding would keep a fresh passkey from re-binding and accept
-/// would keep failing SIG_VALIDATION (#225 E7). Resolves the sibling script the
-/// same way agent revoke does. Returns the parsed JSON (`{ok, tx_hash, …}` or
-/// `{skipped:"already-unbound", …}`) or an error string the caller surfaces.
-async fn reset_master_onchain(
-    master_script: &str,
-    operator_omni: &str,
-) -> Result<serde_json::Value, String> {
-    let script = resolve_repo_script(master_script, "heima-reset-master.sh")
-        .ok_or_else(|| "heima-reset-master.sh not found next to the register script".to_string())?;
-    let output = tokio::process::Command::new("bash")
-        .arg(&script)
-        .arg("--operator-omni")
-        .arg(operator_omni)
-        .output()
-        .await
-        .map_err(|e| format!("spawn heima-reset-master.sh: {e}"))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let mut lines: Vec<&str> = stderr.lines().rev().take(8).collect();
-        lines.reverse();
-        return Err(format!(
-            "heima-reset-master.sh exited {}: {}",
-            output.status,
-            lines.join("\n")
-        ));
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let json_line = stdout
-        .lines()
-        .rev()
-        .find(|l| l.trim_start().starts_with('{'))
-        .ok_or_else(|| format!("reset script produced no JSON on stdout: {stdout}"))?;
-    serde_json::from_str(json_line.trim()).map_err(|e| format!("reset JSON parse: {e}"))
-}
-
 async fn list_master_memory(State(state): State<SharedUiBridgeState>) -> axum::response::Response {
     match resolve_categories(&state).await {
         Ok(categories) => (
@@ -12812,38 +12342,6 @@ mod tests {
         assert!(actors.contains_key("master"));
     }
 
-    /// The on-chain shell-outs must RESOLVE against the real repo layout. They
-    /// did not: the chain helpers live in scripts/operator/chain/ while the
-    /// lookup only tried <repo>/scripts/, so every reset/revoke failed with
-    /// "not found next to the register script" and `POST /v1/master/reset`
-    /// half-completed — local binding cleared, on-chain operatorMasterWallet
-    /// left bound, re-onboarding dying SIG_VALIDATION. Pinned against the actual
-    /// tree so moving a script re-breaks THIS instead of a live reset.
-    #[test]
-    fn resolve_repo_script_finds_the_real_chain_helpers() {
-        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .and_then(|p| p.parent())
-            .expect("repo root")
-            .to_path_buf();
-        let register = repo.join("e2e/scripts/erc4337-register-master.sh");
-        assert!(register.exists(), "fixture moved: {}", register.display());
-        for name in ["heima-reset-master.sh", "heima-device-revoke.sh"] {
-            let found = resolve_repo_script(register.to_str().unwrap(), name)
-                .unwrap_or_else(|| panic!("{name} unresolvable — the on-chain shell-out is dead"));
-            assert!(found.exists(), "{name} resolved to a missing path");
-            assert!(
-                found.ends_with(format!("scripts/operator/chain/{name}")),
-                "{name} resolved to an unexpected home: {}",
-                found.display()
-            );
-        }
-        assert!(
-            resolve_repo_script(register.to_str().unwrap(), "definitely-not-a-script.sh").is_none(),
-            "a missing script must resolve to None, not a bogus path"
-        );
-    }
-
     #[tokio::test]
     async fn identity_only_error_names_the_signer_not_the_worker() {
         let state = build_state(
@@ -15259,210 +14757,176 @@ mod tests {
         addr
     }
 
-    #[tokio::test]
-    async fn master_reset_tears_down_the_fleet() {
-        // Reset must leave NOTHING attached: pending pairings declined at the
-        // broker, paired agents revoked on chain (+ audit row each), actors/caps
-        // cleared, and the K11 enroll store emptied (k11: "none", chain: "none").
-        let tmp = tempfile::tempdir().unwrap();
-        std::fs::write(
-            tmp.path().join("heima-device-revoke.sh"),
-            "#!/usr/bin/env bash\necho '{\"ok\":true,\"tx_hash\":\"0xrevoketx\"}'\n",
-        )
-        .unwrap();
-
-        // Stub broker: two pending rows; every decline succeeds.
+    async fn reset_broker_fixture() -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+        let requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let reads = requests.clone();
+        let writes = requests.clone();
         let app = Router::new()
             .route(
                 "/v1/agent/pending-bindings",
-                axum::routing::get(|| async {
-                    Json(serde_json::json!({
-                        "pending": [ { "request_id": "req-1" }, { "request_id": "req-2" } ]
-                    }))
+                axum::routing::get(move || {
+                    reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    async {
+                        Json(serde_json::json!({"pending":[{"request_id":"synthetic-request"}]}))
+                    }
                 }),
             )
             .route(
                 "/v1/agent/pairing/decline",
-                post(|Json(b): Json<serde_json::Value>| async move {
-                    assert!(b.get("request_id").is_some());
-                    Json(serde_json::json!({ "ok": true }))
+                post(move |Json(body): Json<serde_json::Value>| {
+                    assert_eq!(body["request_id"], "synthetic-request");
+                    writes.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    async { Json(serde_json::json!({"ok":true})) }
                 }),
             );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
+        let endpoint = listener.local_addr().unwrap();
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        let chain = spawn_empty_chain_stub().await;
+        (format!("http://{endpoint}"), requests)
+    }
 
-        let mut state = build_state(
-            "localhost",
-            "http://localhost:3113",
-            "AgentKeys Test",
-            Some(format!("http://{addr}")),
-            None,
-            84532,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            Some(tmp.path().join("master.sh").to_string_lossy().into_owned()),
-            None,
-            None,
-        )
-        .unwrap();
-        set_chain_rpc(&mut state, &format!("http://{chain}"));
+    #[tokio::test]
+    async fn master_reset_confirms_empty_chain_before_clearing_local_state() {
+        let endpoint = spawn_empty_chain_stub().await;
+        let mut state = make_state();
+        set_chain_rpc(&mut state, &format!("http://{endpoint}"));
+        let (broker, broker_requests) = reset_broker_fixture().await;
+        Arc::get_mut(&mut state).unwrap().broker_url = Some(broker);
         *state.onboarding_session.write().await = Some(OnboardingSession {
-            email: "m@x".into(),
-            omni: format!("0x{}", "77".repeat(32)),
-            j1: "eyJ.fake.jwt".into(),
-            wallet: "0xW".into(),
+            email: "owner@example.com".into(),
+            omni: format!("0x{}", T233_OMNI.repeat(32)),
+            j1: "synthetic-session".into(),
+            wallet: String::new(),
             identity_only_reason: None,
         });
         *state.registered_master.write().await = Some(RegisteredMaster {
-            device_key_hash: "0xdkh".into(),
-            operator_omni: format!("0x{}", "77".repeat(32)),
+            device_key_hash: format!("0x{}", T233_MASTER_HASH.repeat(32)),
+            operator_omni: format!("0x{}", T233_OMNI.repeat(32)),
             account: None,
         });
         seed_actor_async(&state).await;
-        state.caps.write().await.insert(
-            "agent-folotoy".into(),
-            vec![ApiCapToken {
-                id: "cap-1".into(),
-                cap: "memory:read".into(),
-                scope: "family".into(),
-                ttl: "900s".into(),
-                minted: "now".into(),
-                danger: None,
-            }],
-        );
         state.enroll.write().await.registered.insert(
-            "user-1".into(),
+            "synthetic-user".into(),
             RegisteredCredential {
                 credential_id_b64: "Y3JlZA".into(),
                 registered_at_unix: 1,
             },
         );
-
-        let resp = master_reset(State(state.clone())).await.0;
-        let fleet = resp.get("fleet").expect("fleet in reset response");
-        assert_eq!(fleet["pending_declined"], 2);
-        assert_eq!(fleet["agents_revoked"].as_array().unwrap().len(), 1);
-        assert_eq!(fleet["agents_revoked"][0]["label"], "FoloToy bear");
-        assert_eq!(
-            fleet["failures"].as_array().unwrap().len(),
-            0,
-            "no failures expected: {fleet}"
-        );
-
-        assert!(state.actors.read().await.is_empty(), "actors cleared");
-        assert!(state.caps.read().await.is_empty(), "caps cleared");
-        let os = onboarding_state(State(state.clone())).await.0;
-        assert_eq!(os.k11, "none", "enroll store cleared");
-        assert_eq!(os.chain, "none", "registered master cleared");
-        let audit = state.audit.read().await;
-        assert!(
-            audit
-                .iter()
-                .any(|e| e.kind == "device.revoked" && e.detail.contains("fleet teardown")),
-            "per-agent revocation audit row"
-        );
+        let result = master_reset(State(state.clone())).await.0;
+        assert_eq!(broker_requests.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert_eq!(result["ok"], true);
+        assert_eq!(result["onchain"]["reason"], "already-unbound");
+        assert!(state.registered_master.read().await.is_none());
+        assert!(state.actors.read().await.is_empty());
+        assert!(state.enroll.read().await.registered.is_empty());
+        assert!(result["fleet"]["agents_revoked"]
+            .as_array()
+            .unwrap()
+            .is_empty());
     }
 
     #[tokio::test]
-    async fn master_reset_refuses_when_broker_register_path_is_down() {
-        let app = Router::new()
-            .route(
-                "/v1/register/build",
-                post(|| async {
-                    (
-                        axum::http::StatusCode::SERVICE_UNAVAILABLE,
-                        Json(serde_json::json!({
-                            "error": "env BROKER_SPONSOR_SIGNER_KEY not set"
-                        })),
-                    )
-                }),
-            )
-            .route(
-                "/v1/agent/pending-bindings",
-                // The panic proves the guard refused BEFORE the fleet teardown;
-                // the unreachable tail anchors the handler's return type (the
-                // bare `!` trips the Rust-2024 never-type-fallback deny).
-                axum::routing::get(|| async {
-                    panic!("reset must refuse before the fleet teardown");
-                    #[allow(unreachable_code)]
-                    Json(serde_json::Value::Null)
+    async fn master_reset_rejects_malformed_chain_confirmation_without_mutation() {
+        for raw in [
+            "0x".to_string(),
+            format!("0x{}", "00".repeat(33)),
+            format!("0x01{}", "00".repeat(31)),
+        ] {
+            let app = Router::new().route(
+                "/",
+                post(move || {
+                    let raw = raw.clone();
+                    async move { Json(serde_json::json!({"jsonrpc":"2.0", "id":1, "result":raw})) }
                 }),
             );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let endpoint = listener.local_addr().unwrap();
+            tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let mut state = make_state();
+            set_chain_rpc(&mut state, &format!("http://{endpoint}"));
+            *state.registered_master.write().await = Some(RegisteredMaster {
+                device_key_hash: format!("0x{}", T233_MASTER_HASH.repeat(32)),
+                operator_omni: format!("0x{}", T233_OMNI.repeat(32)),
+                account: None,
+            });
+            seed_actor_async(&state).await;
+            let before = serde_json::to_value(&*state.actors.read().await).unwrap();
+            let result = master_reset(State(state.clone())).await.0;
+            assert_eq!(result["ok"], false);
+            assert!(state.registered_master.read().await.is_some());
+            assert_eq!(
+                serde_json::to_value(&*state.actors.read().await).unwrap(),
+                before
+            );
+            assert!(state.audit.read().await.is_empty());
+        }
+    }
 
-        let state = build_state(
-            "localhost",
-            "http://localhost:3113",
-            "AgentKeys Test",
-            Some(format!("http://{addr}")),
-            None,
-            84532,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
-        .unwrap();
+    #[tokio::test]
+    async fn master_reset_reports_pending_cleanup_failure_without_local_clear() {
+        let chain_endpoint = spawn_empty_chain_stub().await;
+        let broker = Router::new().route(
+            "/v1/agent/pending-bindings",
+            axum::routing::get(|| async { StatusCode::SERVICE_UNAVAILABLE }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let broker_endpoint = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, broker).await.unwrap() });
+        let mut state = make_state();
+        set_chain_rpc(&mut state, &format!("http://{chain_endpoint}"));
+        Arc::get_mut(&mut state).unwrap().broker_url = Some(format!("http://{broker_endpoint}"));
         *state.onboarding_session.write().await = Some(OnboardingSession {
-            email: "m@x".into(),
-            omni: format!("0x{}", "77".repeat(32)),
-            j1: "eyJ.fake.jwt".into(),
-            wallet: "0xW".into(),
+            email: "owner@example.com".into(),
+            omni: format!("0x{}", T233_OMNI.repeat(32)),
+            j1: "synthetic-session".into(),
+            wallet: String::new(),
             identity_only_reason: None,
         });
-
-        let resp = master_reset(State(state.clone())).await.0;
+        seed_actor_async(&state).await;
+        let before = serde_json::to_value(&*state.actors.read().await).unwrap();
+        let result = master_reset(State(state.clone())).await.0;
+        assert_eq!(result["ok"], false);
+        assert_eq!(result["fleet"]["pending_declined"], 0);
         assert_eq!(
-            resp.get("ok").and_then(serde_json::Value::as_bool),
-            Some(false),
-            "reset must refuse: {resp}"
+            serde_json::to_value(&*state.actors.read().await).unwrap(),
+            before
         );
-        assert_eq!(
-            resp.get("needs_register_path")
-                .and_then(serde_json::Value::as_bool),
-            Some(true)
-        );
-        // Nothing mutated — the session survives the refusal.
         assert!(state.onboarding_session.read().await.is_some());
     }
 
     #[tokio::test]
-    async fn master_reset_surfaces_unrevoked_agents_when_chain_unconfigured() {
-        // No chain script + no broker: the reset still clears local state, but
-        // the response must LOUDLY carry what could not be torn down remotely.
-        let state = make_state();
+    async fn master_reset_preserves_state_until_chain_unbound() {
+        let endpoint = spawn_chain_stub().await;
+        let mut state = make_state();
+        set_chain_rpc(&mut state, &format!("http://{endpoint}"));
+        let (broker, broker_requests) = reset_broker_fixture().await;
+        Arc::get_mut(&mut state).unwrap().broker_url = Some(broker);
+        *state.onboarding_session.write().await = Some(OnboardingSession {
+            email: "owner@example.com".into(),
+            omni: format!("0x{}", T233_OMNI.repeat(32)),
+            j1: "synthetic-session".into(),
+            wallet: String::new(),
+            identity_only_reason: None,
+        });
+        *state.registered_master.write().await = Some(RegisteredMaster {
+            device_key_hash: format!("0x{}", T233_MASTER_HASH.repeat(32)),
+            operator_omni: format!("0x{}", T233_OMNI.repeat(32)),
+            account: None,
+        });
         seed_actor_async(&state).await;
-
-        let resp = master_reset(State(state.clone())).await.0;
-        let fleet = resp.get("fleet").expect("fleet in reset response");
-        assert_eq!(fleet["pending_declined"], 0);
-        assert_eq!(fleet["agents_revoked"].as_array().unwrap().len(), 0);
-        let failures = fleet["failures"].as_array().unwrap();
-        assert!(
-            failures
-                .iter()
-                .any(|f| f.as_str().unwrap_or("").contains("NOT revoked on chain")),
-            "unrevoked agents must be surfaced: {fleet}"
+        let before = serde_json::to_value(&*state.actors.read().await).unwrap();
+        let result = master_reset(State(state.clone())).await.0;
+        assert_eq!(broker_requests.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(
+            result["ok"], false,
+            "bound chain authority must refuse local reset"
         );
-        assert!(state.actors.read().await.is_empty(), "actors still cleared");
-        assert_eq!(onboarding_state(State(state)).await.0.k11, "none");
+        assert!(state.registered_master.read().await.is_some());
+        assert_eq!(
+            serde_json::to_value(&*state.actors.read().await).unwrap(),
+            before
+        );
+        assert!(state.audit.read().await.is_empty());
     }
 
     // ─── issue #233: actor tree reconstructed from chain after a restart ─────
@@ -15580,7 +15044,7 @@ mod tests {
     /// runs on parallel threads: a `set_var` here leaks into every concurrent
     /// `build_state`, whose state then eth_calls a stub whose owning test —
     /// runtime, server task, listener — may already be gone (the intermittent
-    /// `master_reset_tears_down_the_fleet` connection-refused flake), or worse,
+    /// reset qualification connection-refused flake), or worse,
     /// still alive and serving a foreign fleet.
     fn set_chain_rpc(state: &mut SharedUiBridgeState, rpc: &str) {
         let state =
@@ -15714,232 +15178,6 @@ mod tests {
                 > state.fleet_synced_gen.load(Ordering::Relaxed),
             "a reconcile that observed an older generation leaves a re-sync pending"
         );
-    }
-
-    #[tokio::test]
-    async fn master_reset_revokes_chain_reconstructed_agents_by_hash() {
-        // Restart-then-reset: the in-memory map is EMPTY but the chain still
-        // holds an active agent. Reset must reconstruct first (#233) and revoke
-        // that agent BY DEVICE KEY HASH (no ~/.agentkeys/agents/<label>.json
-        // exists for a reconstructed actor).
-        let addr = spawn_chain_stub().await;
-        let tmp = tempfile::tempdir().unwrap();
-        let args_file = tmp.path().join("revoke-args.txt");
-        std::fs::write(
-            tmp.path().join("heima-device-revoke.sh"),
-            format!(
-                "#!/usr/bin/env bash\necho \"$@\" >> {}\necho '{{\"ok\":true,\"tx_hash\":\"0xrevoketx\"}}'\n",
-                args_file.display()
-            ),
-        )
-        .unwrap();
-        let mut state = build_state(
-            "localhost",
-            "http://localhost:3113",
-            "AgentKeys Test",
-            None,
-            None,
-            84532,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            Some(tmp.path().join("master.sh").to_string_lossy().into_owned()),
-            None,
-            None,
-        )
-        .unwrap();
-        set_chain_rpc(&mut state, &format!("http://{addr}"));
-        *state.registered_master.write().await = Some(RegisteredMaster {
-            device_key_hash: format!("0x{}", T233_MASTER_HASH.repeat(32)),
-            operator_omni: format!("0x{}", T233_OMNI.repeat(32)),
-            account: None,
-        });
-        assert!(state.actors.read().await.is_empty(), "restart: empty map");
-
-        let resp = master_reset(State(state.clone())).await.0;
-        let fleet = resp.get("fleet").expect("fleet in reset response");
-        assert_eq!(
-            fleet["agents_revoked"].as_array().unwrap().len(),
-            1,
-            "the chain-reconstructed agent must be revoked: {fleet}"
-        );
-        let args = std::fs::read_to_string(&args_file).expect("revoke script invoked");
-        assert!(
-            args.contains(&format!(
-                "--device-key-hash 0x{}",
-                T233_AGENT_HASH.repeat(32)
-            )),
-            "revoke keyed on the on-chain hash, got: {args}"
-        );
-        assert!(state.actors.read().await.is_empty(), "fleet cleared");
-    }
-
-    #[tokio::test]
-    async fn master_reset_aborts_for_account_master_with_bound_agents() {
-        // #260: an account-master (operatorMasterWallet has code) with an agent
-        // still ACTIVE on chain must NOT unbind — no EOA script can sign
-        // revokeAgentDevice for it, and clearing operatorMasterWallet first
-        // would strand the binding. The reset returns ok:false +
-        // needs_fleet_revoke and mutates NOTHING (no script call, actors kept,
-        // master binding kept) so the UI can run the one-Touch-ID fleet revoke
-        // and retry.
-        let addr = spawn_chain_stub_with_master_model(true).await;
-        let tmp = tempfile::tempdir().unwrap();
-        let args_file = tmp.path().join("revoke-args.txt");
-        std::fs::write(
-            tmp.path().join("heima-device-revoke.sh"),
-            format!(
-                "#!/usr/bin/env bash\necho \"$@\" >> {}\necho '{{\"ok\":true,\"tx_hash\":\"0xrevoketx\"}}'\n",
-                args_file.display()
-            ),
-        )
-        .unwrap();
-        let mut state = build_state(
-            "localhost",
-            "http://localhost:3113",
-            "AgentKeys Test",
-            None,
-            None,
-            84532,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            Some(tmp.path().join("master.sh").to_string_lossy().into_owned()),
-            None,
-            None,
-        )
-        .unwrap();
-        set_chain_rpc(&mut state, &format!("http://{addr}"));
-        *state.registered_master.write().await = Some(RegisteredMaster {
-            device_key_hash: format!("0x{}", T233_MASTER_HASH.repeat(32)),
-            operator_omni: format!("0x{}", T233_OMNI.repeat(32)),
-            account: None,
-        });
-
-        let resp = master_reset(State(state.clone())).await.0;
-        assert_eq!(resp["ok"], false, "reset must refuse the unbind: {resp}");
-        assert_eq!(resp["needs_fleet_revoke"], true);
-        assert_eq!(resp["onchain"]["status"], "aborted");
-        assert_eq!(
-            resp["onchain"]["reason"],
-            "account-master-agents-still-bound"
-        );
-        let bound = resp["fleet"]["agents_still_bound"]
-            .as_array()
-            .expect("agents_still_bound in abort response");
-        assert_eq!(bound.len(), 1, "the active chain agent: {resp}");
-        assert_eq!(
-            bound[0]["device_key_hash"],
-            format!("0x{}", T233_AGENT_HASH.repeat(32))
-        );
-        assert!(
-            !args_file.exists(),
-            "the EOA revoke script must never run for an account master"
-        );
-        assert!(
-            state.registered_master.read().await.is_some(),
-            "master binding kept — nothing mutated on abort"
-        );
-        assert!(
-            !state.actors.read().await.is_empty(),
-            "actor map kept for the post-ceremony retry"
-        );
-    }
-
-    #[tokio::test]
-    async fn master_reset_skips_agents_already_revoked_on_chain_without_script() {
-        // #260: after the pre-reset Touch-ID fleet revoke, agents arrive at the
-        // teardown already revoked on chain. The teardown must report them
-        // (already_revoked, audit row) WITHOUT shelling the EOA script for
-        // them, and proceed with the rest of the reset.
-        let addr = spawn_chain_stub().await; // EOA master — script allowed
-        let tmp = tempfile::tempdir().unwrap();
-        let args_file = tmp.path().join("revoke-args.txt");
-        std::fs::write(
-            tmp.path().join("heima-device-revoke.sh"),
-            format!(
-                "#!/usr/bin/env bash\necho \"$@\" >> {}\necho '{{\"ok\":true,\"tx_hash\":\"0xrevoketx\"}}'\n",
-                args_file.display()
-            ),
-        )
-        .unwrap();
-        let mut state = build_state(
-            "localhost",
-            "http://localhost:3113",
-            "AgentKeys Test",
-            None,
-            None,
-            84532,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            Some(tmp.path().join("master.sh").to_string_lossy().into_owned()),
-            None,
-            None,
-        )
-        .unwrap();
-        set_chain_rpc(&mut state, &format!("http://{addr}"));
-        *state.registered_master.write().await = Some(RegisteredMaster {
-            device_key_hash: format!("0x{}", T233_MASTER_HASH.repeat(32)),
-            operator_omni: format!("0x{}", T233_OMNI.repeat(32)),
-            account: None,
-        });
-        // A locally-known agent whose on-chain entry is REVOKED (the stub's
-        // 0x33… device) — e.g. the fleet-revoke ceremony landed before reset.
-        let revoked_local = ApiActor {
-            device_key_hash: Some(format!("0x{}", T233_REVOKED_HASH.repeat(32))),
-            ..seed_actor_async(&state).await
-        };
-        state
-            .actors
-            .write()
-            .await
-            .insert(revoked_local.id.clone(), revoked_local);
-
-        let resp = master_reset(State(state.clone())).await.0;
-        assert_eq!(resp["ok"], true, "reset proceeds: {resp}");
-        let revoked = resp["fleet"]["agents_revoked"]
-            .as_array()
-            .expect("agents_revoked");
-        // Two rows: the pre-revoked local agent (skip, already_revoked) and the
-        // chain-reconstructed ACTIVE agent (script revoke).
-        assert_eq!(revoked.len(), 2, "{resp}");
-        assert!(
-            revoked
-                .iter()
-                .any(|r| r["already_revoked"] == true && r["tx_hash"].is_null()),
-            "the pre-revoked agent rides as a chain-verified skip: {resp}"
-        );
-        let args = std::fs::read_to_string(&args_file).expect("script ran for the active agent");
-        assert!(
-            args.contains(&T233_AGENT_HASH.repeat(32)),
-            "active agent revoked via script: {args}"
-        );
-        assert!(
-            !args.contains(&T233_REVOKED_HASH.repeat(32)),
-            "already-revoked agent must NOT hit the script: {args}"
-        );
-        assert!(state
-            .audit
-            .read()
-            .await
-            .iter()
-            .any(|e| e.kind == "device.revoked" && e.detail.contains("already revoked")));
     }
 
     #[tokio::test]

@@ -348,7 +348,7 @@ struct Args {
     #[arg(long, env = "AGENTKEYS_MASTER_DEVICE_KEY_HASH")]
     master_device_key_hash: Option<String>,
 
-    /// Legacy pairing/reset helper entry point. Owner registration uses --broker-url.
+    /// Legacy pairing helper entry point. Owner registration uses --broker-url.
     #[arg(long, env = "AGENTKEYS_REGISTER_MASTER_SCRIPT")]
     register_master_script: Option<String>,
 

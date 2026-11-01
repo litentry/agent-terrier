@@ -339,45 +339,29 @@ export interface ReloginResult {
   email?: string;
 }
 
-/** On-chain half of `POST /v1/master/reset` (#225 E7) — the owner-gated resetMaster. */
+/** Chain confirmation returned by native recovered-binding cleanup. */
 export interface MasterResetOnchain {
-  /** "reset" = operatorMasterWallet cleared this call; "skipped" = nothing to do / not wired;
-   *  "failed" = on-chain unbind errored; "aborted" = #260 hard stop — account-master agents
-   *  still bound, nothing mutated (run the Touch-ID fleet revoke, then reset again). */
+  /** Current cleanup returns skipped/already-unbound or aborted; older statuses remain readable. */
   status: 'reset' | 'skipped' | 'failed' | 'aborted';
-  /** Present on "skipped" — "already-unbound" | "no-register-script-configured" | "no-operator-omni-known". */
   reason?: string;
-  /** Present on "failed" — the script/cast error (e.g. registry pre-VERSION-0.3 has no resetMaster). */
   error?: string;
   tx_hash?: string;
   operator_omni?: string;
 }
 
-/** Fleet-teardown half of `POST /v1/master/reset` (#243): what the reset
- *  disconnected beyond the master binding. Best-effort — anything that could
- *  not be torn down remotely lands in `failures`, never silently dropped. */
 export interface MasterResetFleet {
-  /** Pending pairing requests declined at the broker. */
   pending_declined: number;
-  /** Paired agents revoked on chain (SidecarRegistry.revokeAgentDevice).
-   *  `already_revoked` rows were found revoked on chain (the pre-reset
-   *  Touch-ID fleet revoke landed them) — no script tx this call. */
+  /** Empty for confirmation-only cleanup: it submits no revocation transaction. */
   agents_revoked: { id: string; label: string; tx_hash?: string; already_revoked?: boolean }[];
-  /** Local actor records cleared (agents + master view rows). */
   actors_cleared: number;
-  /** The daemon's K11 enroll record was cleared (state reports k11: "none"). */
   k11_enroll_cleared: boolean;
-  /** What could NOT be torn down (no chain script, broker error, …). */
   failures: string[];
-  /** #260 abort only: agents still bound on chain that only the master
-   *  P256Account can revoke — feed their hashes to the Touch-ID fleet revoke. */
   agents_still_bound?: { id: string; label: string; device_key_hash?: string | null }[];
 }
 
 export interface RegisterPreflight {
   register_ready: boolean;
-  /** Which path vouched: 'broker' (probed live), 'script' (no broker — the
-   *  legacy local register script), 'indeterminate' (no session to probe with). */
+  /** Broker probe, unavailable configuration, or indeterminate session context. */
   path?: string;
   /** The broker's own error detail when register_ready is false. */
   detail?: string;
@@ -600,12 +584,7 @@ export interface AgentKeysClient {
   // daemon restores the full master session.
   reloginStart(): Promise<Result<ReloginStart>>;
   reloginFinish(challenge: string, assertion: RegisterMasterAssertion): Promise<Result<ReloginResult>>;
-  // #225 E7: fully unbind the master so the operator can re-onboard a fresh passkey —
-  // used when the bound master passkey was deleted in the OS password manager. Clears
-  // BOTH the LOCAL binding (registered_master + persisted coords) AND the ON-CHAIN
-  // operatorMasterWallet (owner-gated resetMaster via the deployer). `onchain` reports
-  // whether the on-chain unbind landed; `note` carries the operator guidance. Cannot
-  // delete the OS passkey (WebAuthn) — the operator does that manually.
+  // Confirm completed chain recovery, then clear only matching local binding state.
   resetMaster(): Promise<Result<MasterResetResult>>;
   registerPreflight(): Promise<Result<RegisterPreflight>>;
 

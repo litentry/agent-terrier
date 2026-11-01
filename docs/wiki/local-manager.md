@@ -52,3 +52,5 @@ python3 scripts/tests/qualify_local_services.py
 ```
 
 The real-service qualifier drives the same CLI: failed fresh startup with missing binaries, owned-chain cleanup, retry using the saved nondefault RPC port, idempotent start and full backend restart. It verifies preserved keys, exact credential bytes, signer identity, contract profile and relay authorization alongside the existing service isolation checks. Fast tests cover uncertain shutdown, partial status, foreign-process preservation and menu/CLI dispatch parity.
+
+The native console’s **clear recovered binding** action is separate from a destructive stack reset. It confirms that authorized registry recovery already removed the master and all device bindings, then clears matching local state. It cannot sign a recovery transaction or discover a deployer key. Failed chain confirmation or pending-pairing cleanup preserves local binding state. Other owners and broker sessions are retained.
