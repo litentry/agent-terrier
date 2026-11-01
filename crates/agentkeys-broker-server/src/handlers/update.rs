@@ -265,7 +265,7 @@ pub async fn agent_update(
     // Pre-flight BEFORE any kill: a delegate without a durable spawn context
     // (#546) would re-create chat-silent — refuse up front, never mid-flight.
     match state.spawn_context_store.get(&req.device_key_hash) {
-        Ok(Some(ctx)) if !ctx.k10_secret_hex.is_empty() || !ctx.k10_address.is_empty() => {}
+        Ok(Some(ctx)) if ctx.has_valid_device_address() => {}
         Ok(_) => {
             return Err(aerr(
                 StatusCode::CONFLICT,

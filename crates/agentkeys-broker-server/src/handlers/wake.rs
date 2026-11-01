@@ -333,7 +333,6 @@ mod tests {
             label: label.into(),
             chat_channel_id: format!("opchat-{label}"),
             k10_address: "0xabc".into(),
-            k10_secret_hex: String::new(),
             memory_ns: format!("app-{label}"),
             created_at: 1,
             preset_id: label.into(),

@@ -7,11 +7,9 @@
 //! writes it after confirmation, creation paths read it, and confirmed
 //! `revokeAgentDevice` deletes it.
 //!
-//! Local services select `AGENTKEYS_DELEGATE_KEYS=signer`: new rows hold the
-//! K10 address and an empty `k10_secret_hex`; recreation obtains a fresh
-//! session from the signer. Legacy secret-bearing rows remain a migration
-//! risk and are not evidence of protected custody. Reconstruction data is
-//! never authority: identities and grants are independently read from chain.
+//! Delegate keys remain in the configured signer. Rows contain only public
+//! identity and runtime reconstruction data, never authority. Old databases
+//! containing delegate key material are refused before schema migration.
 
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
@@ -35,9 +33,6 @@ pub struct SpawnContext {
     /// The delegate K10 EVM address (#552) — under signer custody it is all a
     /// re-create needs (the J1 `device_pubkey` claim); no secret exists.
     pub k10_address: String,
-    /// The delegate K10 secret (hex) — LEGACY rows only (§1a E2 plaintext,
-    /// pre-#552 spawns); EMPTY for signer-custodied delegates.
-    pub k10_secret_hex: String,
     /// #594 — the delegate's own `knowledge:<ns>` namespace (bare name). Injected
     /// as `AGENTKEYS_MEMORY_NS` on every create so the in-sandbox checkpoint
     /// loop addresses the right grant even when the namespace was INHERITED
@@ -71,6 +66,11 @@ pub struct SpawnContext {
 }
 
 impl SpawnContext {
+    pub fn has_valid_device_address(&self) -> bool {
+        agentkeys_core::device_crypto::device_key_hash(&self.k10_address)
+            .is_ok_and(|hash| norm(&hash) == norm(&self.device_key_hash))
+    }
+
     /// The parsed `bound_channels` (an unparseable / empty column = none —
     /// loud in the log, never a crash).
     pub fn bound_channels(&self) -> Vec<agentkeys_protocol::BoundChannel> {
@@ -97,7 +97,7 @@ impl SpawnContext {
 
 /// Columns an earlier schema had and the current one must not: dropped in
 /// place on open (see `init_schema`).
-const RETIRED_COLUMNS: [&str; 2] = ["operator_omni", "actor_omni"];
+const RETIRED_COLUMNS: [&str; 3] = ["operator_omni", "actor_omni", "k10_secret_hex"];
 
 /// SQLite-backed durable spawn-context store (#546).
 pub struct SpawnContextStore {
@@ -142,30 +142,62 @@ impl SpawnContextStore {
             .map_err(|e| BrokerError::Internal(format!("spawn-contexts mutex poisoned: {e}")))
     }
 
-    fn init_schema(&self) -> BrokerResult<()> {
-        self.lock()?
-            .execute_batch(
-                "PRAGMA journal_mode=WAL;
-                 PRAGMA synchronous=NORMAL;
-                 CREATE TABLE IF NOT EXISTS spawn_contexts (
-                    device_key_hash TEXT PRIMARY KEY,
-                    label           TEXT NOT NULL,
-                    chat_channel_id TEXT NOT NULL,
-                    k10_address     TEXT NOT NULL DEFAULT '',
-                    k10_secret_hex  TEXT NOT NULL,
-                    memory_ns       TEXT NOT NULL DEFAULT '',
-                    created_at      INTEGER NOT NULL,
-                    preset_id       TEXT NOT NULL DEFAULT '',
-                    bound_channels  TEXT NOT NULL DEFAULT '',
-                    availability    TEXT NOT NULL DEFAULT '',
-                    memory_namespaces TEXT NOT NULL DEFAULT '',
-                    tz_offset_minutes INTEGER NOT NULL DEFAULT 0
-                 );",
+    fn reject_legacy_keys(connection: &Connection) -> BrokerResult<()> {
+        let has_key_column = connection
+            .prepare(
+                "SELECT 1 FROM pragma_table_info('spawn_contexts') WHERE name = 'k10_secret_hex'",
             )
-            .map_err(|e| BrokerError::Internal(format!("init spawn-contexts schema: {e}")))?;
-        // In-place column migrations for pre-existing DBs (#552 k10_address,
-        // #594 memory_ns). "duplicate column name" = already migrated (or
-        // fresh) — a no-op.
+            .and_then(|mut statement| statement.exists([]))
+            .map_err(|error| {
+                BrokerError::Internal(format!("inspect spawn-context schema: {error}"))
+            })?;
+        if has_key_column {
+            let has_keys: bool = connection
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM spawn_contexts WHERE k10_secret_hex IS NOT NULL
+                    AND length(CAST(k10_secret_hex AS BLOB)) > 0)",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(|error| {
+                    BrokerError::Internal(format!("inspect legacy spawn context: {error}"))
+                })?;
+            if has_keys {
+                return Err(BrokerError::Internal(
+                    "spawn-context database contains legacy delegate key material; startup refused without migration. Preserve this database privately and use a fresh local development state or an explicitly reviewed recovery procedure".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn init_schema(&self) -> BrokerResult<()> {
+        let mut connection = self.lock()?;
+        let transaction = connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|error| {
+                BrokerError::Internal(format!("begin spawn-context migration: {error}"))
+            })?;
+        Self::reject_legacy_keys(&transaction)?;
+        transaction
+            .execute_batch(
+                "CREATE TABLE IF NOT EXISTS spawn_contexts (
+                device_key_hash TEXT PRIMARY KEY,
+                label TEXT NOT NULL,
+                chat_channel_id TEXT NOT NULL,
+                k10_address TEXT NOT NULL DEFAULT '',
+                memory_ns TEXT NOT NULL DEFAULT '',
+                created_at INTEGER NOT NULL,
+                preset_id TEXT NOT NULL DEFAULT '',
+                bound_channels TEXT NOT NULL DEFAULT '',
+                availability TEXT NOT NULL DEFAULT '',
+                memory_namespaces TEXT NOT NULL DEFAULT '',
+                tz_offset_minutes INTEGER NOT NULL DEFAULT 0
+            );",
+            )
+            .map_err(|error| {
+                BrokerError::Internal(format!("init spawn-context schema: {error}"))
+            })?;
         for (col, ddl) in [
             (
                 "k10_address",
@@ -205,7 +237,7 @@ impl SpawnContextStore {
                 "ALTER TABLE spawn_contexts ADD COLUMN context_hash TEXT NOT NULL DEFAULT ''",
             ),
         ] {
-            match self.lock()?.execute(ddl, []) {
+            match transaction.execute(ddl, []) {
                 Ok(_) => {}
                 Err(e) if e.to_string().contains("duplicate column name") => {}
                 Err(e) => {
@@ -215,59 +247,49 @@ impl SpawnContextStore {
                 }
             }
         }
-        // The #546 branch's first schema (d372deb3, 2026-07-23) carried
-        // `operator_omni` / `actor_omni TEXT NOT NULL`. It never reached main,
-        // but CI deploys PR heads to the test brokers, and 77f351ca dropped the
-        // columns from the CREATE without a migration. A table created by that
-        // binary refused every later upsert (`NOT NULL constraint failed:
-        // spawn_contexts.operator_omni`): measured on the AWS test slot
-        // 2026-10-04, 19 failed persists, so no install there could be sealed
-        // again. The row carries no omnis by design (D1), so exactly these
-        // retired columns are dropped in place — never "every column the
-        // current schema lacks", which an older binary after a rollback would
-        // turn into dropping a newer column.
-        for col in RETIRED_COLUMNS {
-            let conn = self.lock()?;
-            let present = conn
+        for column in RETIRED_COLUMNS {
+            let present = transaction
                 .prepare("SELECT 1 FROM pragma_table_info('spawn_contexts') WHERE name = ?1")
-                .and_then(|mut stmt| stmt.exists(params![col]))
-                .map_err(|e| {
-                    BrokerError::Internal(format!("inspect spawn-contexts ({col}): {e}"))
+                .and_then(|mut statement| statement.exists(params![column]))
+                .map_err(|error| {
+                    BrokerError::Internal(format!("inspect spawn-context column: {error}"))
                 })?;
             if present {
-                conn.execute(&format!("ALTER TABLE spawn_contexts DROP COLUMN {col}"), [])
-                    .map_err(|e| {
-                        BrokerError::Internal(format!(
-                            "drop retired spawn-contexts column {col}: {e}"
-                        ))
+                transaction
+                    .execute(
+                        &format!("ALTER TABLE spawn_contexts DROP COLUMN {column}"),
+                        [],
+                    )
+                    .map_err(|error| {
+                        BrokerError::Internal(format!("drop retired spawn-context column: {error}"))
                     })?;
-                tracing::warn!(
-                    column = col,
-                    "spawn-contexts: dropped a retired NOT NULL column left by a pre-squash #546 \
-                     build — every upsert into this table had been failing"
-                );
             }
         }
+        transaction.commit().map_err(|error| {
+            BrokerError::Internal(format!("commit spawn-context migration: {error}"))
+        })?;
+        connection
+            .execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")
+            .map_err(|error| {
+                BrokerError::Internal(format!("configure spawn-context database: {error}"))
+            })?;
         Ok(())
     }
 
-    /// Insert-or-replace the delegate's context. A respawn after archive mints
-    /// a NEW device_key_hash, so a replace only ever fires on a re-submitted
-    /// ceremony for the same binding — last write wins.
+    /// Insert or replace public reconstruction data for the same device binding.
     pub fn upsert(&self, ctx: &SpawnContext) -> BrokerResult<()> {
         self.lock()?
             .execute(
                 "INSERT OR REPLACE INTO spawn_contexts
-                 (device_key_hash, label, chat_channel_id, k10_address, k10_secret_hex,
+                 (device_key_hash, label, chat_channel_id, k10_address,
                   memory_ns, created_at, preset_id, bound_channels, availability,
                   memory_namespaces, tz_offset_minutes, context_version, context_hash)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
                 params![
                     norm(&ctx.device_key_hash),
                     ctx.label,
                     ctx.chat_channel_id,
                     ctx.k10_address,
-                    ctx.k10_secret_hex,
                     ctx.memory_ns,
                     ctx.created_at,
                     ctx.preset_id,
@@ -286,7 +308,7 @@ impl SpawnContextStore {
     pub fn get(&self, device_key_hash: &str) -> BrokerResult<Option<SpawnContext>> {
         self.lock()?
             .query_row(
-                "SELECT device_key_hash, label, chat_channel_id, k10_address, k10_secret_hex,
+                "SELECT device_key_hash, label, chat_channel_id, k10_address,
                         memory_ns, created_at, preset_id, bound_channels, availability,
                         memory_namespaces, tz_offset_minutes, context_version, context_hash
                  FROM spawn_contexts WHERE device_key_hash = ?1",
@@ -304,7 +326,7 @@ impl SpawnContextStore {
         let conn = self.lock()?;
         let mut stmt = conn
             .prepare(
-                "SELECT device_key_hash, label, chat_channel_id, k10_address, k10_secret_hex,
+                "SELECT device_key_hash, label, chat_channel_id, k10_address,
                         memory_ns, created_at, preset_id, bound_channels, availability,
                         memory_namespaces, tz_offset_minutes, context_version, context_hash
                  FROM spawn_contexts ORDER BY created_at",
@@ -317,9 +339,7 @@ impl SpawnContextStore {
             .map_err(|e| BrokerError::Internal(format!("list spawn contexts: {e}")))
     }
 
-    /// Delete on confirmed revoke (archive / unpair / fleet revoke) — bounds
-    /// the K10-at-rest window to the binding's live lifetime. Returns whether
-    /// a row existed (a device binding or a pre-#546 delegate has none).
+    /// Delete reconstruction data on confirmed revocation; return whether a row existed.
     pub fn delete(&self, device_key_hash: &str) -> BrokerResult<bool> {
         let n = self
             .lock()?
@@ -340,16 +360,15 @@ fn row_to_ctx(row: &rusqlite::Row<'_>) -> rusqlite::Result<SpawnContext> {
         label: row.get(1)?,
         chat_channel_id: row.get(2)?,
         k10_address: row.get(3)?,
-        k10_secret_hex: row.get(4)?,
-        memory_ns: row.get(5)?,
-        created_at: row.get(6)?,
-        preset_id: row.get(7)?,
-        bound_channels_json: row.get(8)?,
-        availability: row.get(9)?,
-        memory_namespaces: row.get(10)?,
-        tz_offset_minutes: row.get(11)?,
-        context_version: row.get(12)?,
-        context_hash: row.get(13)?,
+        memory_ns: row.get(4)?,
+        created_at: row.get(5)?,
+        preset_id: row.get(6)?,
+        bound_channels_json: row.get(7)?,
+        availability: row.get(8)?,
+        memory_namespaces: row.get(9)?,
+        tz_offset_minutes: row.get(10)?,
+        context_version: row.get(11)?,
+        context_hash: row.get(12)?,
     })
 }
 
@@ -357,13 +376,53 @@ fn row_to_ctx(row: &rusqlite::Row<'_>) -> rusqlite::Result<SpawnContext> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn key_bearing_legacy_database_is_rejected_without_modification() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("legacy.sqlite");
+        let synthetic_secret = "synthetic-key-must-stay-in-fixture";
+        {
+            let connection = Connection::open(&path).unwrap();
+            connection
+                .execute_batch(
+                    "CREATE TABLE spawn_contexts (device_key_hash TEXT PRIMARY KEY,
+                    label TEXT NOT NULL, chat_channel_id TEXT NOT NULL,
+                    k10_secret_hex TEXT NOT NULL, created_at INTEGER NOT NULL);",
+                )
+                .unwrap();
+            connection
+                .execute(
+                    "INSERT INTO spawn_contexts VALUES ('aa', 'label', 'chat', ?1, 1)",
+                    params![synthetic_secret],
+                )
+                .unwrap();
+        }
+        let original_bytes = std::fs::read(&path).unwrap();
+        let error = match SpawnContextStore::open(&path) {
+            Ok(_) => panic!("key-bearing database was accepted"),
+            Err(error) => error.to_string(),
+        };
+        assert!(error.contains("legacy delegate key material"), "{error}");
+        assert!(!error.contains(synthetic_secret));
+        assert_eq!(std::fs::read(&path).unwrap(), original_bytes);
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+        let connection = Connection::open(&path).unwrap();
+        let retained: String = connection
+            .query_row(
+                "SELECT k10_secret_hex FROM spawn_contexts WHERE device_key_hash = 'aa'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(retained, synthetic_secret);
+    }
+
     fn ctx(dkh: &str) -> SpawnContext {
         SpawnContext {
             device_key_hash: dkh.to_string(),
             label: "watchdog".into(),
             chat_channel_id: "opchat-watchdog".into(),
             k10_address: "0xabcd".into(),
-            k10_secret_hex: "0xdead".into(),
             memory_ns: "watchdog".into(),
             created_at: 1_700_000_000,
             preset_id: String::new(),
@@ -441,13 +500,12 @@ mod tests {
                     k10_secret_hex  TEXT NOT NULL,
                     created_at      INTEGER NOT NULL
                  );
-                 INSERT INTO spawn_contexts VALUES ('aa', 'w', 'opchat-w', '0xdead', 1);",
+                 INSERT INTO spawn_contexts VALUES ('aa', 'w', 'opchat-w', '', 1);",
             )
             .unwrap();
         }
         let store = SpawnContextStore::open(&path).unwrap();
         let legacy = store.get("aa").unwrap().expect("legacy row");
-        assert_eq!(legacy.k10_secret_hex, "0xdead");
         assert_eq!(legacy.k10_address, "");
         // #594 — pre-#594 rows migrate with an empty ns (daemon derives from
         // the channel id).
@@ -463,11 +521,6 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
-    /// The AWS test slot's table (created by the pre-squash #546 build,
-    /// d372deb3) had `operator_omni` / `actor_omni TEXT NOT NULL`, and every
-    /// upsert failed `NOT NULL constraint failed: spawn_contexts.operator_omni`
-    /// (measured 2026-10-04). Opening drops exactly those columns, keeps the
-    /// legacy rows, and upserts work again.
     #[test]
     fn open_drops_the_retired_omni_columns_so_upserts_work_again() {
         let path = std::env::temp_dir().join(format!(
@@ -487,7 +540,7 @@ mod tests {
                     k10_secret_hex  TEXT NOT NULL,
                     created_at      INTEGER NOT NULL
                  );
-                 INSERT INTO spawn_contexts VALUES ('aa', '0xop', '0xac', 'w', 'opchat-w', '0xdead', 1);",
+                 INSERT INTO spawn_contexts VALUES ('aa', '0xop', '0xac', 'w', 'opchat-w', '', 1);",
             )
             .unwrap();
         }
@@ -508,10 +561,7 @@ mod tests {
             );
         }
         let legacy = store.get("aa").unwrap().expect("the legacy row survives");
-        assert_eq!(
-            (legacy.label.as_str(), legacy.k10_secret_hex.as_str()),
-            ("w", "0xdead")
-        );
+        assert_eq!(legacy.label, "w");
         store.upsert(&ctx(&"bb".repeat(32))).unwrap();
         assert_eq!(
             store.get(&"bb".repeat(32)).unwrap().unwrap().label,
@@ -526,6 +576,30 @@ mod tests {
     }
 
     #[test]
+    fn runtime_identity_requires_an_address_matching_its_device_hash() {
+        let key = k256::ecdsa::SigningKey::random(&mut rand_core::OsRng);
+        let address = agentkeys_core::device_crypto::evm_address(key.verifying_key());
+        let hash = agentkeys_core::device_crypto::device_key_hash(&address).unwrap();
+        let mut context = ctx(&hash);
+        context.k10_address = address;
+        assert!(context.has_valid_device_address());
+        context.device_key_hash = "00".repeat(32);
+        assert!(!context.has_valid_device_address());
+        context.k10_address.clear();
+        assert!(!context.has_valid_device_address());
+    }
+
+    #[test]
+    fn fresh_schema_has_no_delegate_key_column() {
+        let store = SpawnContextStore::open_in_memory().unwrap();
+        let key_columns: usize = store.lock().unwrap().query_row(
+            "SELECT count(*) FROM pragma_table_info('spawn_contexts') WHERE name = 'k10_secret_hex'",
+            [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(key_columns, 0);
+    }
+
+    #[test]
     fn round_trips_and_normalizes_the_key() {
         let store = SpawnContextStore::open_in_memory().unwrap();
         store
@@ -535,7 +609,7 @@ mod tests {
         let got = store.get(&"ab".repeat(32)).unwrap().expect("row");
         assert_eq!(got.device_key_hash, "ab".repeat(32));
         assert_eq!(got.chat_channel_id, "opchat-watchdog");
-        assert_eq!(got.k10_secret_hex, "0xdead");
+        assert_eq!(got.k10_address, "0xabcd");
     }
 
     #[test]
@@ -549,14 +623,14 @@ mod tests {
     }
 
     #[test]
-    fn upsert_replaces_and_delete_bounds_the_at_rest_window() {
+    fn upsert_replaces_and_delete_removes_reconstruction_data() {
         let store = SpawnContextStore::open_in_memory().unwrap();
         let dkh = "11".repeat(32);
         store.upsert(&ctx(&dkh)).unwrap();
         let mut newer = ctx(&dkh);
-        newer.k10_secret_hex = "0xbeef".into();
+        newer.label = "updated-label".into();
         store.upsert(&newer).unwrap();
-        assert_eq!(store.get(&dkh).unwrap().unwrap().k10_secret_hex, "0xbeef");
+        assert_eq!(store.get(&dkh).unwrap().unwrap().label, "updated-label");
         assert!(store.delete(&format!("0x{dkh}")).unwrap());
         assert!(store.get(&dkh).unwrap().is_none());
         assert!(!store.delete(&dkh).unwrap());

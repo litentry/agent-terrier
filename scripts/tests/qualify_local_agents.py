@@ -3,6 +3,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -162,6 +163,32 @@ class LocalAgentQualification(LocalOwnerFixture):
             self.assertEqual(container["HostConfig"]["NetworkMode"], "none")
             self.assertTrue(all(secret not in json.dumps(container["Config"]["Env"]) for secret in secrets),
                 "Docker metadata exposed owner credentials")
+            self.assertFalse(any(value.startswith("AGENTKEYS_DEVICE_KEY_HEX=")
+                for value in container["Config"]["Env"]), "broker injected a delegate private key")
+            context_database = state / "services/broker/spawn_contexts.sqlite"
+            with sqlite3.connect(context_database.as_uri() + "?mode=ro", uri=True) as database:
+                columns = [row[1] for row in database.execute("PRAGMA table_info(spawn_contexts)")]
+                self.assertIn("k10_address", columns)
+                self.assertNotIn("k10_secret_hex", columns)
+                self.assertEqual(database.execute("SELECT count(*) FROM spawn_contexts").fetchone()[0], 1)
+            with sqlite3.connect(context_database) as database:
+                stored_address = database.execute("SELECT k10_address FROM spawn_contexts").fetchone()[0]
+                database.execute("UPDATE spawn_contexts SET k10_address = ''")
+            self.services(state, "stop")
+            running = self.services(state, "start")
+            self.assertEqual(running["services"]["broker"]["url"], broker)
+            before = snapshot()
+            invalid_context = command("receipt", "--user-op-hash", created["user_op_hash"], incomplete=True)
+            self.assertFalse(invalid_context["runtime_ready"])
+            self.assertEqual(snapshot(), before, "invalid context recovery changed chain, relay or runtime")
+            with sqlite3.connect(context_database) as database:
+                database.execute("UPDATE spawn_contexts SET k10_address = ?", (stored_address,))
+            resumed = command("receipt", "--user-op-hash", created["user_op_hash"])
+            self.assertTrue(resumed["runtime_ready"])
+            self.assertEqual(chain.rpc(node["rpc_http"], "eth_blockNumber"), before[0], "recovery submitted a chain transaction")
+            containers = owned("container")
+            self.assertEqual(len(containers), 1)
+            container = json.loads(docker("inspect", containers[0]))[0]
             mounts = container["Mounts"]
             self.assertEqual(len(mounts), 1)
             self.assertEqual(mounts[0]["Type"], "volume")

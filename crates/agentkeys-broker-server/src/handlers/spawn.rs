@@ -12,24 +12,10 @@
 //! (the on-chain business quota; exhausted ⇒ the whole batch reverts, and
 //! the build pre-checks `agentSlots` for a loud early 409).
 //!
-//! Build → submit context threading: the ceremony context the confirmed
-//! calldata can't carry (the delegate K10 secret for sandbox injection, the
-//! preset id, label, memory-namespace decision, keep-vs-delete choice) lives
-//! in [`PendingCeremonyStore`] — **in-memory by design**, unlike the SQLite
-//! pairing store: the pending-spawn row holds the delegate's PRIVATE KEY,
-//! which must never sit at rest. A broker restart inside the build→submit
-//! window (seconds, while the master Touch-IDs) drops the row; the finalize
-//! hook then WARNs loudly and the recovery is archive + respawn.
-//!
-//! **K10 custody (#552 / §1a E1):** on a stack flipped to
-//! `AGENTKEYS_DELEGATE_KEYS=signer` the delegate key is DERIVED in the
-//! SIGNER's device HKDF domain at build time (master-bearer + label
-//! parentage arm) — the broker sees only {address, device_key_hash,
-//! pop_sig}, the pending row carries NO secret, and the sandbox boots on a
-//! broker-minted J1. LEGACY (unflipped) stacks keep the phase-1 posture:
-//! broker-side keygen, secret held ONLY in the pending row, injected at
-//! confirm, dropped. A half-configured flip 503s loudly (never a silent
-//! fallback).
+//! Pending ceremony context contains public identity and reconstruction data.
+//! Delegate private keys remain in the configured signer; creation and recovery
+//! verify its device proof. The runtime receives a scoped session. A lost pending
+//! row requires an existing durable context or explicit sealed-context recovery.
 
 use std::collections::HashMap;
 use std::sync::RwLock;
@@ -38,7 +24,9 @@ use std::time::{Duration, Instant};
 use agentkeys_core::audit::{
     envelope_for, AuditClient, AuditOpKind, AuditResult, DelegateArchiveBody, DelegateSpawnBody,
 };
-use agentkeys_core::device_crypto::{agent_pop_payload, eip191_sign, evm_address, keccak256};
+use agentkeys_core::device_crypto::keccak256;
+#[cfg(test)]
+use agentkeys_core::device_crypto::{agent_pop_payload, eip191_sign, evm_address};
 use agentkeys_core::erc4337::decode_execute_batch;
 use agentkeys_core::erc4337::{ExtraScope, ScopeGrant};
 use agentkeys_protocol::{
@@ -71,40 +59,32 @@ const PENDING_CEREMONY_TTL: Duration = Duration::from_secs(900);
 /// grants — which DO — are never in the spawn template).
 const TEMPLATE_CAP: &str = "0";
 
-/// #552 — who custodies a NEW delegate's K10 at spawn-build.
-#[derive(Debug)]
-pub(crate) enum DelegateKeyCustody {
-    /// Phase-1 broker-side keygen (§1a E1) — until the stack flips.
-    Legacy,
-    /// Signer-derived (device HKDF domain); the value is the signer base URL.
-    Signer(String),
-}
-
-/// Resolve the custody mode from the broker env pair (PURE — env is read at
-/// the call site so tests inject). `AGENTKEYS_DELEGATE_KEYS=signer` flips the
-/// stack; it then REQUIRES `AGENTKEYS_SIGNER_URL` — a half-configured flip is
-/// an Err (the caller 503s; never a silent legacy fallback).
-pub(crate) fn delegate_key_custody(
+pub(crate) fn delegate_signer_url(
     mode: Option<&str>,
     signer_url: Option<&str>,
-) -> Result<DelegateKeyCustody, String> {
-    match mode.map(str::trim) {
-        Some("signer") => match signer_url
-            .map(|u| u.trim().trim_end_matches('/').to_string())
-            .filter(|u| !u.is_empty())
-        {
-            Some(url) => Ok(DelegateKeyCustody::Signer(url)),
-            None => Err(
-                "AGENTKEYS_DELEGATE_KEYS=signer but AGENTKEYS_SIGNER_URL is unset — refusing \
-                 to fall back to broker-side keygen; fix the broker env (#552)"
-                    .into(),
-            ),
-        },
-        Some("") | None => Ok(DelegateKeyCustody::Legacy),
-        Some(other) => Err(format!(
-            "AGENTKEYS_DELEGATE_KEYS='{other}' is not a custody mode (expected 'signer' or unset)"
-        )),
+) -> Result<String, String> {
+    if !matches!(mode.map(str::trim), None | Some("") | Some("signer")) {
+        return Err("unsupported delegate custody mode; only signer custody is supported".into());
     }
+    signer_url.map(|url| url.trim().trim_end_matches('/').to_owned())
+        .filter(|url| !url.is_empty())
+        .ok_or_else(|| "AGENTKEYS_SIGNER_URL is required for delegate custody; broker key generation is unavailable".into())
+}
+
+pub(crate) fn validate_derived_device(
+    derived: &agentkeys_core::signer_client::DerivedDevice,
+    expected_device_key_hash: Option<&str>,
+) -> Result<(), String> {
+    let address =
+        agentkeys_core::registry::verify_agent_pop(&derived.device_key_hash, &derived.pop_sig)
+            .map_err(|_| "signer returned an invalid delegate device proof".to_owned())?;
+    if !address.eq_ignore_ascii_case(&derived.address)
+        || expected_device_key_hash
+            .is_some_and(|expected| norm_omni(expected) != norm_omni(&derived.device_key_hash))
+    {
+        return Err("signer device identity does not match the delegate binding".into());
+    }
+    Ok(())
 }
 
 // ─── pending-ceremony store (in-memory, deliberately — see module doc) ───────
@@ -113,10 +93,7 @@ pub struct PendingSpawn {
     pub operator_omni: String,
     pub actor_omni: String,
     pub device_key_hash: String,
-    /// The delegate K10 EVM address — under #552 signer custody it is the
-    /// SIGNER-derived address (no secret exists broker-side); legacy keygen
-    /// fills it from the generated key. Rides into the J1 `device_pubkey`
-    /// claim + the durable spawn context.
+    /// Public address returned by the signer.
     pub k10_address: String,
     pub label: String,
     pub preset_id: String,
@@ -124,10 +101,6 @@ pub struct PendingSpawn {
     pub memory_inherited: bool,
     pub chat_channel_id: String,
     pub services: Vec<String>,
-    /// The delegate K10 secret (hex) — LEGACY custody only (§1a E1): RAM-only,
-    /// injected into the sandbox at confirm, dropped with the row. EMPTY under
-    /// #552 signer custody — no secret ever exists broker-side.
-    pub k10_secret_hex: String,
     /// The anchor seal this ceremony carries (2026-09-22): the context
     /// document's version + hash, written to the row at confirm.
     pub context_version: u64,
@@ -679,60 +652,20 @@ pub async fn spawn_build(
     let actor_omni = agentkeys_core::actor_omni::child_omni_hex(&session_omni, &req.label)
         .map_err(|e| aerr(StatusCode::BAD_REQUEST, format!("child omni: {e}")))?;
 
-    // Delegate K10 custody (#552 endgame b): SIGNER-custodied once the stack
-    // flips (AGENTKEYS_DELEGATE_KEYS=signer + AGENTKEYS_SIGNER_URL in the
-    // broker env) — the key is DERIVED in the signer's device HKDF domain and
-    // the broker fetches only {address, device_key_hash, pop_sig}, authorized
-    // by the MASTER's own bearer + the HDKD parentage label. Until the flip:
-    // the phase-1 broker-side keygen (§1a E1). A half-configured flip is a
-    // LOUD 503, never a silent legacy fallback.
-    let custody = delegate_key_custody(
+    let signer_url = delegate_signer_url(
         std::env::var("AGENTKEYS_DELEGATE_KEYS").ok().as_deref(),
         std::env::var("AGENTKEYS_SIGNER_URL").ok().as_deref(),
     )
-    .map_err(|e| aerr(StatusCode::SERVICE_UNAVAILABLE, e))?;
-    let (k10_address, device_key_hash, pop_sig, k10_secret_hex) = match &custody {
-        DelegateKeyCustody::Signer(signer_url) => {
-            let master_bearer = bearer(&headers)?;
-            let derived = agentkeys_core::signer_client::DeviceSignerClient::new(signer_url)
-                .derive_device(&actor_omni, Some(&req.label), &master_bearer)
-                .await
-                .map_err(|e| {
-                    aerr(
-                        StatusCode::BAD_GATEWAY,
-                        format!("signer derive-device (#552): {e}"),
-                    )
-                })?;
-            tracing::info!(
-                actor_omni = %actor_omni,
-                address = %derived.address,
-                "#552 spawn-build: delegate K10 signer-derived (no broker-side secret)"
-            );
-            (
-                derived.address,
-                derived.device_key_hash,
-                derived.pop_sig,
-                String::new(),
-            )
-        }
-        DelegateKeyCustody::Legacy => {
-            // Broker-side K10 (phase-1 custody posture — module doc + §1a E1):
-            // fresh secp256k1, address → device_key_hash, pop_sig over the
-            // standard agent-pop payload.
-            let k10_sk = k256::ecdsa::SigningKey::random(&mut rand_core::OsRng);
-            let k10_address = evm_address(k10_sk.verifying_key());
-            let device_key_hash = agentkeys_core::device_crypto::device_key_hash(&k10_address)
-                .map_err(|e| aerr(StatusCode::INTERNAL_SERVER_ERROR, format!("k10: {e}")))?;
-            let pop_sig = eip191_sign(&k10_sk, &agent_pop_payload(&device_key_hash))
-                .map_err(|e| aerr(StatusCode::INTERNAL_SERVER_ERROR, format!("pop_sig: {e}")))?;
-            (
-                k10_address,
-                device_key_hash,
-                pop_sig,
-                format!("0x{}", hex::encode(k10_sk.to_bytes())),
-            )
-        }
-    };
+    .map_err(|error| aerr(StatusCode::SERVICE_UNAVAILABLE, error))?;
+    let master_bearer = bearer(&headers)?;
+    let derived = agentkeys_core::signer_client::DeviceSignerClient::new(&signer_url)
+        .derive_device(&actor_omni, Some(&req.label), &master_bearer)
+        .await
+        .map_err(|_| aerr(StatusCode::BAD_GATEWAY, "delegate signer derivation failed"))?;
+    validate_derived_device(&derived, None)
+        .map_err(|error| aerr(StatusCode::BAD_GATEWAY, error))?;
+    let (k10_address, device_key_hash, pop_sig) =
+        (derived.address, derived.device_key_hash, derived.pop_sig);
 
     // The grant set: today's S2 template for a blank / role-preset spawn, or
     // the #663 manifest compile for an app install (fail-closed on any
@@ -835,7 +768,6 @@ pub async fn spawn_build(
         chat_channel_id: chat_channel_id.clone(),
         services: services.clone(),
         k10_address: k10_address.clone(),
-        k10_secret_hex,
         context_version: context_seal
             .as_ref()
             .map(|s| s.context_version)
@@ -1077,8 +1009,7 @@ async fn finalize_spawn(
     device_key_hash: &str,
     actor_omni: &str,
 ) -> serde_json::Value {
-    let row = state.pending_ceremonies.take_spawn(device_key_hash);
-    if row.is_none() {
+    let Some(row) = state.pending_ceremonies.take_spawn(device_key_hash) else {
         match state.spawn_context_store.get(device_key_hash) {
             Ok(Some(context)) => {
                 let sandbox = crate::handlers::sandbox::ensure_for_delegate(
@@ -1097,52 +1028,18 @@ async fn finalize_spawn(
                 return serde_json::json!({"device_key_hash":device_key_hash,"actor_omni":actor_omni,"context_recovered":false,"error":format!("spawn context read failed: {error}")})
             }
         }
-    }
+    };
 
-    #[allow(clippy::type_complexity)]
-    let (label, preset_id, memory_ns, memory_inherited, chat_channel_id, k10_secret, k10_address) =
-        match &row {
-            Some(r) => (
-                r.label.clone(),
-                r.preset_id.clone(),
-                r.memory_ns.clone(),
-                r.memory_inherited,
-                r.chat_channel_id.clone(),
-                // Legacy custody carries the secret; #552 signer custody is "".
-                Some(r.k10_secret_hex.clone()).filter(|s| !s.is_empty()),
-                r.k10_address.clone(),
-            ),
-            None => {
-                // Broker restarted (or TTL elapsed) between build and submit:
-                // the chain row is FINAL but the ceremony context is gone —
-                // Loud; recovery = archive (frees the slot) + respawn.
-                tracing::warn!(
-                    device_key_hash = %device_key_hash,
-                    "#427 spawn finalize: NO pending row for a confirmed registerDelegate — \
-                     ceremony context lost (broker restart between build and \
-                     submit?). The delegate is registered but credential-less; archive + respawn."
-                );
-                (
-                    String::new(),
-                    String::new(),
-                    String::new(),
-                    false,
-                    String::new(),
-                    None,
-                    String::new(),
-                )
-            }
-        };
+    let label = row.label.clone();
+    let preset_id = row.preset_id.clone();
+    let memory_ns = row.memory_ns.clone();
+    let memory_inherited = row.memory_inherited;
+    let chat_channel_id = row.chat_channel_id.clone();
+    let k10_address = row.k10_address.clone();
 
-    // 0. #546 — persist the ceremony context DURABLY (device_key_hash →
-    //    label/chat_channel_id/omnis/K10) BEFORE any create: the resolve/poll
-    //    ensure path re-injects this exact set whenever the runtime is
-    //    re-created (runtime exit, backend desync, wake cold-start), so a
-    //    re-created sandbox is never chat-silent. The row dies with the
-    //    binding (deleted on confirmed revoke — custody note in
-    //    `storage::spawn_contexts`). Best-effort + loud: a write failure
-    //    costs future re-create chat, never the spawn itself.
-    let ctx_row = row.as_ref().map(|r| {
+    // Persist reconstruction data before starting the runtime.
+    let ctx_row = {
+        let r = &row;
         let created_at = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
@@ -1152,7 +1049,6 @@ async fn finalize_spawn(
             label: r.label.clone(),
             chat_channel_id: r.chat_channel_id.clone(),
             k10_address: r.k10_address.clone(),
-            k10_secret_hex: r.k10_secret_hex.clone(),
             // #594 — the RESOLVED namespace (label-defaulted or #425 O2
             // inherited): what every re-create injects for the checkpoint.
             memory_ns: r.memory_ns.clone(),
@@ -1166,9 +1062,9 @@ async fn finalize_spawn(
             context_version: r.context_version as i64,
             context_hash: r.context_hash.clone(),
         }
-    });
-    if let Some(ctx) = &ctx_row {
-        let persist = state.spawn_context_store.upsert(ctx);
+    };
+    {
+        let persist = state.spawn_context_store.upsert(&ctx_row);
         if let Err(e) = persist {
             tracing::warn!(
                 device_key_hash = %device_key_hash,
@@ -1202,11 +1098,7 @@ async fn finalize_spawn(
     //    starts the loop only when the FULL set is present (partial = loud
     //    warn there, never silent). ONE owner (#546): the same assembly the
     //    resolve/poll re-create path injects from the durable spawn context.
-    // #552 signer custody: there is no key to inject — the sandbox gets a
-    // broker-minted J1 instead (its bearer toward the signer's device-domain
-    // endpoints until the first resolve rotates it). Legacy rows keep the
-    // key injection; the no-row WARN path injects neither.
-    let session_jwt = if row.is_some() && k10_secret.is_none() && !k10_address.is_empty() {
+    let session_jwt = if !k10_address.is_empty() {
         crate::handlers::sandbox::mint_delegate_session_jwt(
             state,
             actor_omni,
@@ -1222,7 +1114,6 @@ async fn finalize_spawn(
     extra_envs.extend(crate::handlers::sandbox::delegate_identity_envs(
         actor_omni,
         &format!("0x{}", hex::encode(session_omni)),
-        k10_secret.as_deref(),
         session_jwt.as_deref(),
         &chat_channel_id,
         &service_environment,
@@ -1242,9 +1133,7 @@ async fn finalize_spawn(
     ));
     // #660 — the app-runtime set (template, bound feeds, availability, mirror
     // namespaces, tz): the same values every re-create injects from the row.
-    if let Some(ctx) = &ctx_row {
-        extra_envs.extend(crate::handlers::sandbox::app_runtime_envs(ctx));
-    }
+    extra_envs.extend(crate::handlers::sandbox::app_runtime_envs(&ctx_row));
     let sandbox = crate::handlers::sandbox::ensure_for_delegate_with_envs(
         state,
         device_key_hash,
@@ -1290,7 +1179,7 @@ async fn finalize_spawn(
         "memory_ns": memory_ns,
         "memory_inherited": memory_inherited,
         "chat_channel_id": chat_channel_id,
-        "context_recovered": row.is_some(),
+        "context_recovered": true,
         "gate": { "status": gate_status, "error": gate_error },
         "sandbox": sandbox_json,
         "audit_envelope_hash": anchor,
@@ -1381,7 +1270,6 @@ mod tests {
             memory_inherited: false,
             chat_channel_id: "opchat-watchdog".into(),
             services: vec!["knowledge:watchdog".into()],
-            k10_secret_hex: "0xdead".into(),
             context_version: 0,
             context_hash: String::new(),
             app: AppRuntimeFacts::default(),
@@ -1396,25 +1284,43 @@ mod tests {
     }
 
     #[test]
-    fn delegate_key_custody_flip_is_loud_never_silent() {
-        // #552 — unset/empty = legacy; 'signer' + URL = signer custody; a
-        // half-configured or unknown flip is an Err (503), never a fallback.
-        assert!(matches!(
-            delegate_key_custody(None, None),
-            Ok(DelegateKeyCustody::Legacy)
-        ));
-        assert!(matches!(
-            delegate_key_custody(Some(""), Some("https://signer.x")),
-            Ok(DelegateKeyCustody::Legacy)
-        ));
-        match delegate_key_custody(Some("signer"), Some("https://signer.x/")) {
-            Ok(DelegateKeyCustody::Signer(url)) => assert_eq!(url, "https://signer.x"),
-            other => panic!("expected signer custody, got {:?}", other.is_ok()),
+    fn delegate_custody_always_requires_the_signer() {
+        for mode in [None, Some(""), Some("signer")] {
+            for missing in [None, Some(" "), Some("/")] {
+                assert!(delegate_signer_url(mode, missing)
+                    .unwrap_err()
+                    .contains("AGENTKEYS_SIGNER_URL"));
+            }
+            assert_eq!(
+                delegate_signer_url(mode, Some(" https://signer.example/ ")).unwrap(),
+                "https://signer.example"
+            );
         }
-        let err = delegate_key_custody(Some("signer"), None).unwrap_err();
-        assert!(err.contains("AGENTKEYS_SIGNER_URL"), "{err}");
-        let err = delegate_key_custody(Some("broker"), None).unwrap_err();
-        assert!(err.contains("custody mode"), "{err}");
+        let invalid_mode = "synthetic-unsupported-value";
+        let error =
+            delegate_signer_url(Some(invalid_mode), Some("https://signer.example")).unwrap_err();
+        assert!(error.contains("custody mode"));
+        assert!(!error.contains(invalid_mode));
+    }
+
+    #[test]
+    fn signer_identity_and_recovered_binding_must_match_the_proof() {
+        let key = k256::ecdsa::SigningKey::random(&mut rand_core::OsRng);
+        let address = evm_address(key.verifying_key());
+        let device_key_hash = agentkeys_core::device_crypto::device_key_hash(&address).unwrap();
+        let mut derived = agentkeys_core::signer_client::DerivedDevice {
+            address,
+            pop_sig: eip191_sign(&key, &agent_pop_payload(&device_key_hash)).unwrap(),
+            device_key_hash,
+            key_version: 1,
+        };
+        validate_derived_device(&derived, None).unwrap();
+        validate_derived_device(&derived, Some(&derived.device_key_hash)).unwrap();
+        assert!(validate_derived_device(&derived, Some(&"00".repeat(32))).is_err());
+        derived.address = format!("0x{}", "00".repeat(20));
+        assert!(validate_derived_device(&derived, None).is_err());
+        derived.pop_sig = "invalid".into();
+        assert!(validate_derived_device(&derived, None).is_err());
     }
 
     #[test]

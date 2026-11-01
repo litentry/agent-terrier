@@ -443,38 +443,30 @@ pub async fn rehydrate(
             "context_doc: actor_omni does not match the chain binding of this device",
         ));
     }
-    // The K10: signer custody re-derives it; a legacy keygen stack has no way
-    // to bring the secret back — the row is still rebuilt (address only) so
-    // the delegate is at least known, loudly.
-    let custody = crate::handlers::spawn::delegate_key_custody(
+    let signer_url = crate::handlers::spawn::delegate_signer_url(
         std::env::var("AGENTKEYS_DELEGATE_KEYS").ok().as_deref(),
         std::env::var("AGENTKEYS_SIGNER_URL").ok().as_deref(),
     )
-    .map_err(|e| aerr(StatusCode::SERVICE_UNAVAILABLE, e))?;
-    let (k10_address, k10_secret_hex) = match &custody {
-        crate::handlers::spawn::DelegateKeyCustody::Signer(signer_url) => {
-            let master_bearer = crate::handlers::accept::bearer(&headers)?;
-            let derived = agentkeys_core::signer_client::DeviceSignerClient::new(signer_url)
-                .derive_device(&chain_actor, Some(&doc.label), &master_bearer)
-                .await
-                .map_err(|e| aerr(StatusCode::BAD_GATEWAY, format!("signer derive: {e}")))?;
-            (derived.address, String::new())
-        }
-        _ => {
-            tracing::warn!(
-                device_key_hash = %doc.device_key_hash,
-                "anchor rehydrate: legacy broker-side keygen — the K10 secret cannot be restored from a document; row rebuilt with the address only"
-            );
-            (doc.k10_address.clone(), String::new())
-        }
-    };
+    .map_err(|error| aerr(StatusCode::SERVICE_UNAVAILABLE, error))?;
+    let master_bearer = crate::handlers::accept::bearer(&headers)?;
+    let derived = agentkeys_core::signer_client::DeviceSignerClient::new(&signer_url)
+        .derive_device(&chain_actor, Some(&doc.label), &master_bearer)
+        .await
+        .map_err(|_| aerr(StatusCode::BAD_GATEWAY, "delegate signer derivation failed"))?;
+    crate::handlers::spawn::validate_derived_device(&derived, Some(&doc.device_key_hash))
+        .map_err(|error| aerr(StatusCode::CONFLICT, error))?;
+    let k10_address = derived.address;
     let existing = state
         .spawn_context_store
         .get(&doc.device_key_hash)
         .map_err(|e| aerr(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     let row_state = match &existing {
         None => "created",
-        Some(c) if c.context_version as u64 >= doc.version && !c.context_hash.is_empty() => {
+        Some(c)
+            if c.context_version as u64 >= doc.version
+                && !c.context_hash.is_empty()
+                && c.has_valid_device_address() =>
+        {
             "current"
         }
         Some(_) => "updated",
@@ -484,11 +476,6 @@ pub async fn rehydrate(
             .as_ref()
             .map(|c| c.created_at)
             .unwrap_or(now_unix() as i64);
-        let secret = existing
-            .as_ref()
-            .map(|c| c.k10_secret_hex.clone())
-            .filter(|s| !s.is_empty())
-            .unwrap_or(k10_secret_hex);
         state
             .spawn_context_store
             .upsert(&crate::storage::SpawnContext {
@@ -496,7 +483,6 @@ pub async fn rehydrate(
                 label: doc.label.clone(),
                 chat_channel_id: doc.chat_channel_id.clone(),
                 k10_address,
-                k10_secret_hex: secret,
                 memory_ns: doc.memory_ns.clone(),
                 created_at,
                 preset_id: doc.preset_id.clone(),
