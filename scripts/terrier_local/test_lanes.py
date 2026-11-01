@@ -144,7 +144,8 @@ def run(repository, lane, components, online=False, report_path=None, plan=False
         for suite in affected_plan["rust_suites"]:
             if not any(existing[1:] == suite[1:] for existing in rust):
                 rust.append(suite)
-    selected = [name for name, *_ in rust] + [value for value in components if value in ("ui", "display", "dsh", "managed")]
+    builds = affected_plan["rust_builds"] if affected_plan else []
+    selected = [name + "-compile" for name, _ in builds] + [name for name, *_ in rust] + [value for value in components if value in ("ui", "display", "dsh", "managed")]
     if lane in ("source", "core", "affected"):
         selected = [name for name, _ in SOURCE_COMMANDS] + selected
     qualification_scripts = list(dict.fromkeys(script for component in components for script in QUALIFICATIONS.get(component, ()))) if lane == "qualification" else []
@@ -176,13 +177,15 @@ def run(repository, lane, components, online=False, report_path=None, plan=False
         print(f"{name}: {result['status']} ({result['seconds']:.3f}s)", file=sys.stderr)
         return result, log_path
 
-    if online and (rust or "managed" in components):
+    if online and (rust or builds or "managed" in components):
         setup, _ = check("dependencies", "setup", ["cargo", "fetch", "--locked"])
         if setup["status"] != "passed":
-            rust = []
+            rust, builds = [], []
     if lane in ("source", "core", "affected"):
         for name, command in SOURCE_COMMANDS:
             check(name, "execution", command, python_test=name == "python")
+    for package, binary in builds:
+        check(package + "-compile", "build", ["cargo", "check", "--offline", "--locked", "-p", package, "--bin", binary])
     for name, package, target, target_name, test_filter in rust:
         command = ["cargo", "test", "--offline", "--locked", "-p", package, target]
         if target_name:
