@@ -12,7 +12,7 @@ import time
 
 from . import contracts, affected
 
-COMPONENTS = ("protocol", "runtime", "broker", "signer", "relay", "bundler", "daemon", "storage", "cli", "ui", "display", "dsh", "managed", "contracts", "provisioner", "chain", "services", "agents", "website")
+COMPONENTS = ("protocol", "runtime", "broker", "signer", "relay", "bundler", "daemon", "storage", "cli", "ui", "display", "dsh", "managed", "contracts", "provisioner", "chain", "services", "agents", "website", "security")
 REGRESSION_TIMEOUT_SECONDS = 3600
 RUNTIME_SUITE = ("runtime", "agentkeys-runtime", "--lib", None, "")
 CORE = (
@@ -40,6 +40,7 @@ RUST_COMPONENTS = {
             ("cli-agent-transport", "agentkeys-cli", "--test", "local_agent_transport", "")],
 }
 QUALIFICATIONS = {
+    "security": (),
     "contracts": (),
     "provisioner": (),
     "chain": ("qualify_local_chain.py", "qualify_local_signing.py", "qualify_local_binding.py", "qualify_local_owner.py", "qualify_local_login.py", "qualify_local_bundler.py"),
@@ -54,6 +55,7 @@ QUALIFICATIONS = {
     ),
 }
 QUALIFICATION_RUST = {
+    "security": [],
     "contracts": [], "provisioner": [], "chain": [], "services": [], "agents": [], "website": [],
     "ui": [],
     "storage": [*RUST_COMPONENTS["storage"],
@@ -131,8 +133,8 @@ def python_counts(result, output):
 
 
 def selection(lane, components):
-    if lane != "qualification" and set(components) & {"chain", "services", "agents", "website"}:
-        raise ValueError("chain, services, agents and website require explicit qualification")
+    if lane != "qualification" and set(components) & {"chain", "services", "agents", "website", "security"}:
+        raise ValueError("chain, services, agents, website and security require explicit qualification")
     if lane == "regression" and components:
         raise ValueError("regression runs the full native workspace; select component lanes separately")
     if lane == "qualification":
@@ -195,7 +197,14 @@ def rust_test_executables(repository, metadata, output, suites):
     return selected
 
 
-def run(repository, lane, components, online=False, report_path=None, plan=False, changed_files=None):
+def run(repository, lane, components, online=False, report_path=None, plan=False, changed_files=None, source_revision=None):
+    security_selected = lane == "qualification" and "security" in components
+    if security_selected and (components != ["security"] or online):
+        raise ValueError("Security qualification runs alone using downloaded dependencies")
+    if security_selected and not re.fullmatch(r"[0-9a-f]{40}", source_revision or ""):
+        raise ValueError("Security qualification requires an exact reviewed --revision")
+    if source_revision and not security_selected:
+        raise ValueError("--revision is only accepted by security qualification")
     affected_plan = None
     if lane == "affected":
         if components:
@@ -217,6 +226,8 @@ def run(repository, lane, components, online=False, report_path=None, plan=False
         selected = [name for name, _ in SOURCE_COMMANDS] + selected
     qualification_scripts = list(dict.fromkeys(script for component in components for script in QUALIFICATIONS.get(component, ()))) if lane == "qualification" else []
     selected += [Path(script).stem for script in qualification_scripts]
+    if security_selected:
+        selected.append("isolated-security-guards")
     if lane == "regression":
         selected.append("workspace-native")
     if lane == "qualification" and "provisioner" in components:
@@ -334,6 +345,11 @@ def run(repository, lane, components, online=False, report_path=None, plan=False
     for script in qualification_scripts:
         check(Path(script).stem, "execution", [sys.executable, "scripts/tests/" + script],
               extra_environment=qualification_environment, python_test=True)
+    security_provenance = None
+    if security_selected:
+        from . import security_qualification
+        security_checks, security_provenance = security_qualification.run(repository, source_revision, diagnostics)
+        checks.extend(security_checks)
     elapsed = round(time.monotonic() - started, 3)
     target = None if lane in ("qualification", "regression") else (30 if lane == "focused" else 180)
     success = bool(checks) and all(check["status"] == "passed" for check in checks)
@@ -341,11 +357,12 @@ def run(repository, lane, components, online=False, report_path=None, plan=False
     report = {
         "schema_version": 1, "lane": lane, "selected": selected, "success": success, "affected": affected_plan,
         "revision": revision if re.fullmatch(r"[0-9a-f]{40}", revision) else None,
+        "security_qualification": security_provenance,
         "runner": {"system": platform.system(), "architecture": platform.machine()},
         "seconds": elapsed, "warm_target_seconds": target, "target_exceeded": elapsed > target if target is not None else None,
         "phase_seconds": {phase: round(sum(check["seconds"] for check in checks if check["phase"] == phase), 3)
                           for phase in ("setup", "build", "execution")},
-        "queue_seconds": None, "cleanup_seconds": None,
+        "queue_seconds": None, "cleanup_seconds": round(sum(check["seconds"] for check in checks if check["phase"] == "cleanup"), 3) if security_selected else None,
         "checks": checks,
     }
     print(f"Private diagnostic logs: {diagnostics}", file=sys.stderr)
