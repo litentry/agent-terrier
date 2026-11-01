@@ -51,6 +51,7 @@ QUALIFICATION_RUST = {
 }
 SOURCE_COMMANDS = (
     ("privacy", ["python3", "scripts/check-public.py"]),
+    ("cli-reference", ["python3", "scripts/generate-cli-reference.py", "--check"]),
     ("python", ["python3", "-m", "unittest", "discover", "-s", "scripts/tests"]),
     ("web-server", ["node", "--test", "scripts/tests/web-ssr-server.test.mjs"]),
     ("closure", ["cargo", "metadata", "--offline", "--locked", "--no-deps", "--format-version", "1"]),

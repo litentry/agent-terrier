@@ -42,15 +42,15 @@ The [local chain guide](docs/wiki/local-chain.md) covers `terrier chain start/de
 
 The [local owner guide](docs/wiki/local-owner.md) covers headless owner registration, device/delegate binding and grant revocation. The [local model guide](docs/wiki/local-models.md) covers `terrier models config/probe` and a reproducible macOS qualification with external networking blocked.
 
-The [local storage guide](docs/wiki/local-storage.md) documents the isolated object service, its fast negative tests and explicit real-chain qualification. Product worker integration remains in progress.
+The [local storage guide](docs/wiki/local-storage.md) documents the isolated object service, its fast negative tests and explicit real-chain qualification. The explicit storage qualification covers real-chain, worker and CLI integration; browser acceptance remains open.
 
 The [local services guide](docs/wiki/local-services.md) covers `terrier services start/status/doctor/logs/stop`, real broker login, private persistent state and safe startup-failure cleanup. It uses the product binaries and keeps test orchestration separate.
 
 The [local agent image guide](docs/wiki/local-agent-image.md) covers the shared plugin composition, reproducible image build, fast process checks and real-model qualification through an explicit local-service connection with container networking disabled. Complete lifecycle and service composition remain under development.
 
-The [local agent guide](docs/wiki/local-agents.md) covers protected `terrier agent spawn/archive/receipt` commands, structured completion receipts and real-chain/Docker qualification. Archive retains application data; pending or incomplete operations exit nonzero.
+The [local agent guide](docs/wiki/local-agents.md) covers protected `terrier agent spawn/archive/receipt/bridge` commands, structured completion receipts and real-chain/Docker qualification. Archive retains application data; pending or incomplete operations exit nonzero.
 
-The [local manager guide](docs/wiki/local-manager.md) covers the lightweight terminal menu (`terrier manage`) and scriptable whole-backend start/status/doctor/logs/stop/restart (`terrier stack`). Both use the existing lifecycle controllers.
+The [local manager guide](docs/wiki/local-manager.md) covers the lightweight terminal menu (`terrier manage`) and scriptable whole-backend start/status/doctor/logs/stop/restart (`terrier stack`). Both use the existing lifecycle controllers. The [generated CLI reference](docs/wiki/cli-reference.md) lists every public command and option.
 
 ## License
 
