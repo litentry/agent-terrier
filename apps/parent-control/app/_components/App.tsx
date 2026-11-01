@@ -386,77 +386,9 @@ function InteractiveApp({ hosted, onSessionEnd }: { hosted: boolean; onSessionEn
     if (!sticky) setTimeout(() => setToast(null), 2600);
   };
 
-  // #225 E7 — fully unbind the master so the operator can re-onboard a fresh passkey
-  // (used when the bound passkey was deleted in the OS password manager, or an accept
-  // fails with a wrong-passkey signature after a re-onboard). The daemon clears BOTH
-  // local state AND the on-chain operatorMasterWallet (owner-gated resetMaster), which
-  // is what actually lets the fresh passkey re-bind. Cannot delete the OS passkey
-  // (WebAuthn) — the toast tells the operator to do that manually.
   const resetMaster = async () => {
-    if (hosted) { showToast('This console uses your existing account. Sign in with an approved passkey; browser access never requires a master reset.'); return; }
+    if (hosted) { showToast('Sign in with an approved passkey. This action is for a recovered local binding.'); return; }
     if (status.kind !== 'connected') { showToast('Connect a daemon first.'); return; }
-    const pre = await client.registerPreflight();
-    if (pre.ok && pre.data.register_ready === false) {
-      akLog('reset: refused — broker register path down', { detail: pre.data.detail });
-      showToast(
-        `Reset blocked — this broker can't re-register a master right now (${pre.data.detail ?? '503'}). ` +
-          'Unbinding would strand your identity with no way to re-onboard on this stack. ' +
-          'Fix the broker’s sponsored-register runtime, or reset from a stack whose broker can re-register.',
-        true,
-      );
-      return;
-    }
-    // #260 — an account-master's agents can ONLY be revoked by the master
-    // P256Account itself, and resetMaster clears operatorMasterWallet (after
-    // which NOBODY can revoke them). So revoke the whole fleet FIRST: ONE
-    // executeBatch([revokeAgentDevice × N]) UserOp, ONE Touch ID, before the
-    // unbind. This also runs before the localStorage clear below — the
-    // assertion wants the stored master cred id.
-    const fleetHashes = actors
-      .filter((a) => a.role === 'agent' && a.deviceKeyHash)
-      .map((a) => a.deviceKeyHash as string);
-    if (fleetHashes.length > 0) {
-      akLog('reset: building fleet revoke (one Touch ID for all paired agents)', {
-        count: fleetHashes.length,
-      });
-      const built = await client.revokeBuild({ deviceKeyHashes: fleetHashes });
-      if (built.ok) {
-        showToast(`Approve with Touch ID — one approval revokes ${fleetHashes.length} paired agent(s)…`);
-        let assertion;
-        try {
-          const masterCred = getMasterCredId() || null;
-          assertion = await getAssertionOverHash(
-            built.data.user_op_hash,
-            masterCred ? [masterCred] : undefined,
-          );
-        } catch {
-          showToast('Touch ID cancelled — reset aborted; the fleet is still bound.');
-          return;
-        }
-        const submitted = await client.revokeSubmit({ user_op: built.data.user_op, assertion });
-        if (!submitted.ok) {
-          const detail = submitted.status?.detail ?? 'handleOps error';
-          akLog('reset: fleet revoke submit FAILED ❌', { detail });
-          showToast(`Fleet revoke failed — reset aborted (${detail}). The agents are still bound; retry.`);
-          return;
-        }
-        akLog('reset: fleet revoke landed ✅', {
-          txHash: submitted.data.txHash,
-          auditEnvelopeHashes: submitted.data.auditEnvelopeHashes,
-        });
-      } else {
-        const detail = built.status?.detail ?? '';
-        // legacy EOA master → the daemon's script teardown signs these;
-        // nothing-to-revoke → the fleet is already revoked on chain. Anything
-        // else would strand the bindings once the master unbinds — abort.
-        if (!/legacy EOA|nothing to revoke/i.test(detail)) {
-          akLog('reset: fleet revoke build FAILED ❌', { detail });
-          showToast(`Fleet revoke build failed — reset aborted (${detail || 'check master session + chain'}).`);
-          return;
-        }
-        akLog('reset: no Touch-ID fleet revoke needed', { detail });
-      }
-    }
     const r = await client.resetMaster();
     if (!r.ok) {
       akLog('reset: FAILED ❌', { detail: r.status?.detail });
@@ -464,57 +396,14 @@ function InteractiveApp({ hosted, onSessionEnd }: { hosted: boolean; onSessionEn
       return;
     }
     if (r.data.ok === false) {
-      // #260 hard stop: the daemon refused the unbind (account-master agents
-      // still bound on chain) and mutated NOTHING — keep the view intact so the
-      // operator can run the fleet revoke and retry.
-      akLog('reset: daemon aborted — fleet still bound', { fleet: r.data.fleet });
-      showToast(
-        `Reset blocked — ${r.data.note ?? 'agents are still bound on chain; approve the Touch-ID fleet revoke, then reset again.'}`,
-        true,
-      );
+      showToast(`Local cleanup blocked — ${r.data.note ?? 'chain recovery could not be confirmed'}`, true);
       return;
     }
-    const cleared = getMasterCredId() || null;
-    akLog('reset: clearing master binding (local + on-chain; OS passkey untouched)', {
-      clearedCredentialId: cleared,
-    });
-    // Per-chain wipe: only THIS chain's master pointer (the other chain's
-    // master, if any, stays bound).
     clearMasterIdentity();
-    const onchain = r.data.onchain;
-    const fleet = r.data.fleet;
-    akLog('reset: done', { onchain, fleet });
-    // #243: the daemon tore the fleet down too — mirror it in the view state so
-    // the UI doesn't show ghost agents/pairings until the next refetch.
     setActors([]);
     setPairingRequests([]);
     setProposals(null);
-    // The fleet summary rides every outcome toast; failures are spelled out —
-    // a partially-torn-down fleet must never read as fully disconnected.
-    const fleetBits: string[] = [];
-    if (fleet) {
-      fleetBits.push(`${fleet.agents_revoked.length} agent(s) revoked on chain`);
-      fleetBits.push(`${fleet.pending_declined} pending pairing(s) declined`);
-      if (fleet.failures.length > 0) fleetBits.push(`⚠ ${fleet.failures.join(' · ')}`);
-    }
-    const fleetNote = fleetBits.length ? `  Fleet: ${fleetBits.join(', ')}.` : '';
-    const onchainCleared =
-      onchain?.status === 'reset' ||
-      (onchain?.status === 'skipped' && onchain?.reason === 'already-unbound');
-    if (onchainCleared) {
-      showToast(
-        `Master unbound (local + on-chain).${fleetNote} Delete the master passkey in System Settings ▸ Passwords, then re-onboard once.`,
-        true,
-      );
-    } else {
-      // On-chain unbind didn't land — re-onboarding will still SIG_VALIDATION-fail until
-      // it does. Surface the reason so the operator (or dev) can fix it.
-      const why = onchain?.error ?? onchain?.reason ?? 'unknown';
-      showToast(
-        `Local binding cleared, but the ON-CHAIN unbind did NOT land (${why}).${fleetNote} Re-onboarding will still fail until it does — ensure the registry has resetMaster (VERSION ≥ 0.3) + the deployer key, then retry.`,
-        true,
-      );
-    }
+    showToast('Chain recovery confirmed. Matching local binding cleared; sign in again. Your OS passkey is unchanged.', true);
   };
 
   // The header's ⋯ menu is a plain <details>: close it on an outside click,
@@ -684,9 +573,9 @@ function InteractiveApp({ hosted, onSessionEnd }: { hosted: boolean; onSessionEn
       akLog('scope: submit FAILED ❌', { actor: actor.id, detail });
       if (!hosted && /SIG_VALIDATION|wrong passkey|reverted on-chain/i.test(detail)) {
         showToast(
-          `Scope commit failed (${detail}). Your signing passkey ≠ the one bound to your master account — reset, delete the old passkey, re-onboard once.`,
+          `Scope commit failed (${detail}). Your signing passkey ≠ the one bound to your master account — use the bound passkey, or complete authorized recovery before clearing the local binding.`,
           true,
-          { label: 'Reset master', fn: resetMaster },
+          { label: 'Clear recovered binding', fn: resetMaster },
         );
       } else {
         showToast(`Scope commit failed — ${detail}`);
@@ -883,9 +772,9 @@ function InteractiveApp({ hosted, onSessionEnd }: { hosted: boolean; onSessionEn
       // OS password manager (the picker then has nothing to sign with).
       if (hosted) { showToast('Touch ID cancelled. Your account and grants are unchanged. Try again when you are ready.', true); return; }
       showToast(
-        'Touch ID cancelled — or your master passkey was deleted. If you deleted it, reset + re-onboard once.',
+        'Touch ID cancelled — or your master passkey was deleted. If it was deleted, complete authorized recovery before clearing the local binding.',
         true,
-        { label: 'Reset master', fn: resetMaster },
+        { label: 'Clear recovered binding', fn: resetMaster },
       );
       return;
     }
@@ -897,15 +786,11 @@ function InteractiveApp({ hosted, onSessionEnd }: { hosted: boolean; onSessionEn
         signingCredentialId: assertion.credential_id,
         detail,
       });
-      // A SIG_VALIDATION_FAILED / on-chain revert here almost always means the signing
-      // passkey ≠ the one bound to the master account — typically a stale binding after a
-      // passkey was deleted/regenerated. The reset path now unbinds on-chain (owner-gated
-      // resetMaster) so a fresh enroll CAN re-bind. Offer the reset + re-onboard path.
       if (!hosted && /SIG_VALIDATION|wrong passkey|reverted on-chain/i.test(detail)) {
         showToast(
-          `Accept failed (${detail}). Your signing passkey ≠ the one bound to your master account — reset, delete the old passkey, re-onboard once.`,
+          `Accept failed (${detail}). Your signing passkey ≠ the one bound to your master account — use the bound passkey, or complete authorized recovery before clearing the local binding.`,
           true,
-          { label: 'Reset master', fn: resetMaster },
+          { label: 'Clear recovered binding', fn: resetMaster },
         );
       } else {
         showToast(`Accept submit failed — ${detail}`);
@@ -1186,9 +1071,9 @@ function InteractiveApp({ hosted, onSessionEnd }: { hosted: boolean; onSessionEn
           akLog('revoke: submit FAILED ❌', { actor: actor.id, detail });
           if (!hosted && /SIG_VALIDATION|wrong passkey|reverted on-chain/i.test(detail)) {
             showToast(
-              `Revoke failed (${detail}). Your signing passkey ≠ the one bound to your master account — reset, delete the old passkey, re-onboard once.`,
+              `Revoke failed (${detail}). Your signing passkey ≠ the one bound to your master account — use the bound passkey, or complete authorized recovery before clearing the local binding.`,
               true,
-              { label: 'Reset master', fn: resetMaster },
+              { label: 'Clear recovered binding', fn: resetMaster },
             );
           } else {
             showToast(`Revoke submit failed — ${detail}`);
@@ -1315,15 +1200,12 @@ function InteractiveApp({ hosted, onSessionEnd }: { hosted: boolean; onSessionEn
               {!hosted && <button
                 className="menu-item"
                 style={{ color: 'var(--danger)' }}
-                title="Unbind the master (local + on-chain) so you can re-onboard a fresh passkey — e.g. after the master passkey was deleted in your OS password manager, or an accept fails with SIG_VALIDATION."
+                title="Clear matching local state after an authorized chain recovery has completed"
                 onClick={() => {
-                  // #243: state the blast radius — reset tears down the whole fleet.
-                  const agentCount = actors.filter((a) => a.role === 'agent').length;
-                  const pendingCount = pairingRequests.length;
-                  if (window.confirm(`Unbind the master so you can re-onboard a fresh passkey?\n\n• Clears the local binding AND the on-chain operatorMasterWallet (so a fresh passkey can re-bind)\n• Disconnects your whole fleet: revokes ${agentCount} paired agent(s) on chain (ONE Touch ID approval covers all of them, asked first) + declines ${pendingCount} pending pairing request(s) — re-pairing needs a fresh ceremony\n• Does NOT delete the OS passkey — delete it in System Settings ▸ Passwords\n\nContinue?`)) resetMaster();
+                  if (window.confirm('Clear local binding state after chain recovery?\n\nThe daemon first verifies that the master and device bindings are absent on chain. It submits no transaction and preserves local state if confirmation fails. Your OS passkey is unchanged.')) resetMaster();
                 }}
               >
-                reset master · re-onboard passkey
+                clear recovered binding
               </button>}
               <div className="menu-info">
                 K6 · session JWT<br />{hosted ? 'browser · session in this tab' : status.kind === 'connected' ? `daemon · ${status.via}` : 'daemon · offline'}<br />K11 · master device

@@ -192,15 +192,20 @@ impl MasterSessionStore {
         newest
     }
 
-    /// Remove every `daemon-*/master-session.json` under the root. Logout reset
-    /// (issue #220 acceptance: the same email re-verifies to the same omni, so
-    /// nothing durable is lost). The master plane is singular per machine, so this
-    /// is a full reset, not a cross-wallet wipe.
-    pub fn clear_all(&self) -> std::io::Result<()> {
-        let Ok(rd) = std::fs::read_dir(&self.base) else {
-            return Ok(());
+    pub fn clear_owner(&self, broker_url: &str, operator_omni: &str) -> std::io::Result<()> {
+        let entries = match std::fs::read_dir(&self.base) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error),
         };
-        for entry in rd.flatten() {
+        if !std::fs::symlink_metadata(&self.base)?.is_dir() {
+            return Err(std::io::Error::other(
+                "Session root must be a real directory",
+            ));
+        }
+        let mut matching = Vec::new();
+        for entry in entries {
+            let entry = entry?;
             if !entry
                 .file_name()
                 .to_string_lossy()
@@ -208,10 +213,35 @@ impl MasterSessionStore {
             {
                 continue;
             }
-            let path = entry.path().join(MASTER_SESSION_FILE);
-            if path.exists() {
-                let _ = std::fs::remove_file(&path);
+            if !entry.file_type()?.is_dir() {
+                return Err(std::io::Error::other(
+                    "Session entry must be a real directory",
+                ));
             }
+            let path = entry.path().join(MASTER_SESSION_FILE);
+            match std::fs::symlink_metadata(&path) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error),
+                Ok(_) => {}
+            }
+            let text = agentkeys_core::protected_file::read_text(
+                path.to_str()
+                    .ok_or_else(|| std::io::Error::other("Invalid session path"))?,
+            )
+            .map_err(std::io::Error::other)?;
+            let session: PersistedMasterSession =
+                serde_json::from_str(&text).map_err(std::io::Error::other)?;
+            if normalize_broker(&session.broker_url) == normalize_broker(broker_url)
+                && session
+                    .operator_omni
+                    .trim_start_matches("0x")
+                    .eq_ignore_ascii_case(operator_omni.trim_start_matches("0x"))
+            {
+                matching.push(path);
+            }
+        }
+        for path in matching {
+            std::fs::remove_file(path)?;
         }
         Ok(())
     }
@@ -395,14 +425,52 @@ mod tests {
     }
 
     #[test]
-    fn clear_all_wipes_every_master_record_and_is_idempotent() {
+    fn clear_owner_preserves_other_owners_and_brokers() {
         let (store, _tmp) = temp_store();
-        store.save(&sample("0xA", 1, 2)).expect("save a");
-        store.save(&sample("0xB", 2, 3)).expect("save b");
-        store.clear_all().expect("clear all");
-        assert!(store.load_latest(TEST_BROKER).is_none());
-        // Second clear on an already-empty root is a no-op, not an error.
-        store.clear_all().expect("clear all again");
+        let target = sample("0xA", 1, 2);
+        let mut other_owner = sample("0xB", 2, 3);
+        other_owner.operator_omni = "different-owner".into();
+        let mut other_broker = sample("0xC", 3, 4);
+        other_broker.broker_url = "https://secondary.example".into();
+        for session in [&target, &other_owner, &other_broker] {
+            store.save(session).unwrap();
+        }
+        let snapshots: Vec<_> = [&other_owner, &other_broker]
+            .map(|session| {
+                (
+                    store.session_path(&session.wallet),
+                    std::fs::read(store.session_path(&session.wallet)).unwrap(),
+                )
+            })
+            .into();
+        store
+            .clear_owner(TEST_BROKER, &target.operator_omni)
+            .unwrap();
+        store
+            .clear_owner(TEST_BROKER, &target.operator_omni)
+            .unwrap();
+        assert!(!store.session_path(&target.wallet).exists());
+        for (path, bytes) in snapshots {
+            assert_eq!(std::fs::read(path).unwrap(), bytes);
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn clear_owner_rejects_linked_records_before_deleting_anything() {
+        let (store, _temporary) = temp_store();
+        let target = sample("0xA", 1, 2);
+        store.save(&target).unwrap();
+        let bytes = std::fs::read(store.session_path(&target.wallet)).unwrap();
+        let link = store.base.join("daemon-linked");
+        std::os::unix::fs::symlink(store.session_dir(&target.wallet), &link).unwrap();
+        assert!(store
+            .clear_owner(TEST_BROKER, &target.operator_omni)
+            .is_err());
+        assert_eq!(
+            std::fs::read(store.session_path(&target.wallet)).unwrap(),
+            bytes
+        );
     }
 
     #[test]
