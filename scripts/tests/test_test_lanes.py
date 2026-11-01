@@ -62,6 +62,25 @@ class TestLaneExecutionTests(unittest.TestCase):
         self.assertEqual(result["status"], "passed")
         self.assertEqual(result["tests"], {"passed": 2, "failed": 0, "ignored": 1})
 
+    def test_qualification_selection_is_explicit_and_reuses_canonical_scenarios(self):
+        for components in ([], ["cli"], ["storage", "ui"]):
+            with self.assertRaises(ValueError):
+                test_lanes.selection("qualification", components)
+        plan, status = test_lanes.run(Path("."), "qualification", ["storage"], plan=True)
+        self.assertEqual(status, 0)
+        self.assertIn("worker-authority", plan["selected"])
+        self.assertIn("qualify_local_broker_storage", plan["selected"])
+        self.assertIn("qualify_local_channel", plan["selected"])
+        self.assertNotIn("qualify_local_broker_storage", test_lanes.run(Path("."), "core", ["storage"], plan=True)[0]["selected"])
+
+    def test_empty_or_skipped_python_qualification_is_not_a_pass(self):
+        for output in ("", "Ran 0 tests in 0.000s\n\nOK\n", "Ran 1 test in 0.000s\n\nOK (skipped=1)\n"):
+            self.assertEqual(test_lanes.python_counts({"status": "passed"}, output)["status"], "empty-or-failed-suite")
+        result = test_lanes.python_counts({"status": "passed"}, "Ran 2 tests in 0.100s\n\nOK (skipped=1)\n")
+        self.assertEqual(result["status"], "passed")
+        self.assertEqual(result["tests"], {"passed": 1, "ignored": 1})
+        self.assertEqual(test_lanes.python_counts({"status": "failed"}, "Ran 1 test in 0.1s\nFAILED\n")["status"], "failed")
+
     def test_child_does_not_inherit_host_provider_credentials(self):
         with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {"BROKER_PRIVATE_CANARY": "synthetic"}):
             root = Path(directory)

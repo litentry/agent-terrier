@@ -1,0 +1,170 @@
+{
+  "schema_version": 1,
+  "lane": "qualification",
+  "selected": [
+    "storage",
+    "worker-authority",
+    "qualify_local_storage",
+    "qualify_local_credentials",
+    "qualify_local_config",
+    "qualify_local_memory",
+    "qualify_local_channel",
+    "qualify_local_broker_storage",
+    "qualify_local_credential_cli"
+  ],
+  "success": true,
+  "revision": null,
+  "runner": {
+    "system": "Darwin",
+    "architecture": "arm64"
+  },
+  "seconds": 134.185,
+  "warm_target_seconds": null,
+  "target_exceeded": null,
+  "phase_seconds": {
+    "setup": 0,
+    "build": 21.229,
+    "execution": 112.945
+  },
+  "queue_seconds": null,
+  "cleanup_seconds": null,
+  "checks": [
+    {
+      "status": "passed",
+      "exit_code": 0,
+      "seconds": 8.301,
+      "name": "storage-build",
+      "phase": "build",
+      "log": "00-storage-build.log"
+    },
+    {
+      "status": "passed",
+      "exit_code": 0,
+      "seconds": 1.262,
+      "tests": {
+        "passed": 4,
+        "failed": 0,
+        "ignored": 0
+      },
+      "name": "storage",
+      "phase": "execution",
+      "log": "01-storage.log"
+    },
+    {
+      "status": "passed",
+      "exit_code": 0,
+      "seconds": 12.928,
+      "name": "worker-authority-build",
+      "phase": "build",
+      "log": "02-worker-authority-build.log"
+    },
+    {
+      "status": "passed",
+      "exit_code": 0,
+      "seconds": 3.135,
+      "tests": {
+        "passed": 11,
+        "failed": 0,
+        "ignored": 4
+      },
+      "name": "worker-authority",
+      "phase": "execution",
+      "log": "03-worker-authority.log"
+    },
+    {
+      "status": "passed",
+      "exit_code": 0,
+      "seconds": 18.673,
+      "tests": {
+        "passed": 1,
+        "ignored": 0
+      },
+      "name": "qualify_local_storage",
+      "phase": "execution",
+      "log": "04-qualify_local_storage.log"
+    },
+    {
+      "status": "passed",
+      "exit_code": 0,
+      "seconds": 20.496,
+      "tests": {
+        "passed": 1,
+        "ignored": 0
+      },
+      "name": "qualify_local_credentials",
+      "phase": "execution",
+      "log": "05-qualify_local_credentials.log"
+    },
+    {
+      "status": "passed",
+      "exit_code": 0,
+      "seconds": 14.106,
+      "tests": {
+        "passed": 1,
+        "ignored": 0
+      },
+      "name": "qualify_local_config",
+      "phase": "execution",
+      "log": "06-qualify_local_config.log"
+    },
+    {
+      "status": "passed",
+      "exit_code": 0,
+      "seconds": 14.412,
+      "tests": {
+        "passed": 1,
+        "ignored": 0
+      },
+      "name": "qualify_local_memory",
+      "phase": "execution",
+      "log": "07-qualify_local_memory.log"
+    },
+    {
+      "status": "passed",
+      "exit_code": 0,
+      "seconds": 14.136,
+      "tests": {
+        "passed": 1,
+        "ignored": 0
+      },
+      "name": "qualify_local_channel",
+      "phase": "execution",
+      "log": "08-qualify_local_channel.log"
+    },
+    {
+      "status": "passed",
+      "exit_code": 0,
+      "seconds": 12.68,
+      "tests": {
+        "passed": 1,
+        "ignored": 0
+      },
+      "name": "qualify_local_broker_storage",
+      "phase": "execution",
+      "log": "09-qualify_local_broker_storage.log"
+    },
+    {
+      "status": "passed",
+      "exit_code": 0,
+      "seconds": 14.045,
+      "tests": {
+        "passed": 1,
+        "ignored": 0
+      },
+      "name": "qualify_local_credential_cli",
+      "phase": "execution",
+      "log": "10-qualify_local_credential_cli.log"
+    }
+  ],
+  "source_base_revision": "19e704f1acb959cbf69335da1a42a6a2cd1c9a5c",
+  "qualification_source_sha256": {
+    "scripts/terrier_local/test_lanes.py": "f49fa0ec9420c37e9a22f68924e0bc3e2589f43739f74c206a73f4596efac6e0",
+    "scripts/tests/qualify_local_storage.py": "98054e97bc91bc9c8d383daa32c89c687d5ab1966ad18f18f7474a4c81166b84",
+    "scripts/tests/qualify_local_credentials.py": "3db0eab0cef35844560158de1c769603173af47a101113ba80b519ece3321935",
+    "scripts/tests/qualify_local_config.py": "6a2218a325673bafab27a20cfcba19fd85cfea857c4f8e3127008224bf495af5",
+    "scripts/tests/qualify_local_memory.py": "242158c4c888c62fd04ccffcd21f9c604cd0bcf6f5c64d3da97e5f2e3648bae5",
+    "scripts/tests/qualify_local_channel.py": "993afca651bfe8ef20c8080bf4f3764ad4af0d44158d65c6c875369eba54e1aa",
+    "scripts/tests/qualify_local_broker_storage.py": "8553da183023d1aeaa0fb2f2cbf039ec50ada2237c853c2d470fffcf776aa6f8",
+    "scripts/tests/qualify_local_credential_cli.py": "8534a1d6869b1a3bba23d8eab0ebf9feb007be278d68f0ad6e5e9a736adb8c1b"
+  }
+}
