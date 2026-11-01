@@ -16,6 +16,12 @@ Local, from the public checkout and the same state directory used for owner logi
 
 Optional `--preset-id`, `--memory-ns` and `--memory-inherited` use the existing broker ceremony and its canonical protocol types. The command builds an operation, checks its chain, EntryPoint and operation hash, signs with the owner's protected development passkey and submits through the existing broker/bundler path. Contracts independently check the signature and authority. Guarded local profiles with zero configured fees use the shared checked live gas quote; explicit fees and nonlocal profile behavior remain unchanged. A failed quote stops the build. The broker derives delegate keys through the configured local signer; the CLI does not generate a second identity implementation.
 
+## Delegate key custody
+
+The broker requires the configured signer for creation and context recovery. Unset or empty `AGENTKEYS_DELEGATE_KEYS` also means signer custody; any other nonempty value is refused. Missing `AGENTKEYS_SIGNER_URL` fails instead of generating a key in the broker. Signer responses must prove the returned device identity; recovery must match the existing chain binding. The runtime receives a scoped session, never a broker-generated delegate private key.
+
+Broker reconstruction rows contain the public address and runtime metadata. Startup refuses old databases with nonempty delegate-key fields before migrating their schema. It does not erase, export or migrate those keys. Preserve such state privately; use a separate fresh development state or an explicitly reviewed recovery procedure. Empty legacy key columns are removed while metadata is retained. Rows without a matching public address cannot recreate a runtime until their sealed context is restored. This schema change makes no claim about erasing historical database pages or backups.
+
 ## Archive while retaining data
 
 Local, from that same checkout and state directory, using `device_key_hash` from the creation receipt:

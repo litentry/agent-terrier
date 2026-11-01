@@ -126,7 +126,6 @@ pub async fn provision_delegate_envs(
 pub(crate) fn delegate_identity_envs(
     actor_omni: &str,
     operator_omni: &str,
-    k10_secret_hex: Option<&str>,
     session_jwt: Option<&str>,
     chat_channel_id: &str,
     service_environment: &[(String, String)],
@@ -153,12 +152,6 @@ pub(crate) fn delegate_identity_envs(
     if let Some(token) = bridge_token.filter(|t| !t.trim().is_empty()) {
         envs.push((env_names::BRIDGE_TOKEN.to_string(), token.to_string()));
     }
-    if let Some(secret) = k10_secret_hex.filter(|s| !s.trim().is_empty()) {
-        envs.push((env_names::DEVICE_KEY_HEX.to_string(), secret.to_string()));
-    }
-    // #552 signer custody: the broker-minted J1 is the sandbox's credential
-    // toward the signer's device-domain endpoints (rotated by resolve).
-    // Exactly one of DEVICE_KEY_HEX / SESSION_JWT rides per spawn.
     if let Some(jwt) = session_jwt.filter(|j| !j.trim().is_empty()) {
         envs.push((env_names::SESSION_JWT.to_string(), jwt.trim().to_string()));
     }
@@ -386,13 +379,19 @@ pub async fn ensure_for_delegate_extra(
             None
         }
     };
+    if ctx
+        .as_ref()
+        .is_some_and(|context| !context.has_valid_device_address())
+    {
+        return Some(SandboxProvision {
+            agent_url: None, sandbox_id: None, status: None,
+            error: Some("delegate context has no matching signer address; restore its sealed context before resuming".into()),
+        });
+    }
     let (base_envs, gate_label) = match &ctx {
         Some(c) => {
             let service_environment = delegate_service_environment(|name| std::env::var(name).ok());
-            // Legacy rows carry the K10 secret; #552 signer-custodied rows
-            // carry only the derived address — mint a FRESH J1 per create so
-            // a re-created sandbox always boots with a live signer credential.
-            let session_jwt = if c.k10_secret_hex.is_empty() && !c.k10_address.is_empty() {
+            let session_jwt = if !c.k10_address.is_empty() {
                 mint_delegate_session_jwt(
                     state,
                     actor_omni,
@@ -406,7 +405,6 @@ pub async fn ensure_for_delegate_extra(
             let mut envs = delegate_identity_envs(
                 actor_omni,
                 operator_omni,
-                Some(&c.k10_secret_hex),
                 session_jwt.as_deref(),
                 &c.chat_channel_id,
                 &service_environment,
@@ -792,8 +790,7 @@ mod tests {
         let envs = delegate_identity_envs(
             &format!("0x{}", "AB".repeat(32)),
             &"CD".repeat(32),
-            Some("0xdead"),
-            None,
+            Some("synthetic-session"),
             "opchat-watchdog",
             &[(
                 agentkeys_protocol::sandbox_env::BROKER_URL.into(),
@@ -804,7 +801,7 @@ mod tests {
             Some("sbt1_feed"),
         );
         let keys: Vec<&str> = envs.iter().map(|(k, _)| k.as_str()).collect();
-        for required in agentkeys_protocol::sandbox_env::CHAT_REQUIRED {
+        for required in agentkeys_protocol::sandbox_env::CHAT_COMMON {
             assert!(keys.contains(&required), "missing {required}: {keys:?}");
         }
         let get = |k: &str| {
@@ -824,6 +821,8 @@ mod tests {
             format!("0x{}", "cd".repeat(32))
         );
         assert_eq!(get("AGENTKEYS_CHAT_CHANNEL_ID"), "opchat-watchdog");
+        assert_eq!(get("AGENTKEYS_SESSION_JWT"), "synthetic-session");
+        assert!(!keys.contains(&"AGENTKEYS_DEVICE_KEY_HEX"));
         assert_eq!(get("AGENTKEYS_BROKER_URL"), "https://broker.example.cn");
         assert!(!keys.contains(&"AGENTKEYS_CHANNEL_WORKER_URL"));
         // #577 — the management bearer rides every armed create.
@@ -923,7 +922,6 @@ mod tests {
         let envs = delegate_identity_envs(
             &"ab".repeat(32),
             &"cd".repeat(32),
-            None,
             None,
             "",
             &[(

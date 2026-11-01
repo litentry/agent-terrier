@@ -252,7 +252,7 @@ async fn sweep_once(state: &SharedState, cfg: &SweeperConfig) {
     for row in rows {
         // A row with no credential (pre-#546-era write) would re-create
         // chat-silent — same pre-flight as the #577 handler.
-        if row.k10_address.is_empty() && row.k10_secret_hex.is_empty() {
+        if !row.has_valid_device_address() {
             continue;
         }
         // D1 gate: act only on a POSITIVE chain read of an active TIER_AGENT
