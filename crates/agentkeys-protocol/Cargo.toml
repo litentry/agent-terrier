@@ -3,7 +3,7 @@ license.workspace = true
 name = "agentkeys-protocol"
 version = "0.1.0"
 edition = "2021"
-description = "Broker/worker wire protocol — the transport-agnostic, wasm-safe serde shapes shared by agentkeys-backend-client (native client + STS) and agentkeys-web-core (browser fetch client). Pure serde (no reqwest/tokio/aws), so it compiles to wasm32. The single owner of the cap-mint + worker request/response shapes (#203); the parity-ladder rung-3 split that lets the browser share the wire types without dragging native transport into the wasm build."
+description = "Broker/worker wire protocol — the transport-agnostic, wasm-safe serde shapes shared by agentkeys-backend-client (native client) and agentkeys-web-core (browser fetch client). Pure serde (no native transport), so it compiles to wasm32. The single owner of the cap-mint + worker request/response shapes (#203); the parity-ladder rung-3 split that lets the browser share the wire types without dragging native transport into the wasm build."
 
 [dependencies]
 serde = { workspace = true }

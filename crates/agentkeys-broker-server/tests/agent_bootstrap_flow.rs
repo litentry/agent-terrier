@@ -18,39 +18,21 @@ use agentkeys_broker_server::jwt::issue::mint_session_jwt;
 use agentkeys_broker_server::jwt::verify::verify_session_jwt;
 use agentkeys_broker_server::oidc::OidcKeypair;
 use agentkeys_broker_server::state::AppState;
-use agentkeys_broker_server::sts::{AssumedCredentials, StsClient, StubStsClient};
 use agentkeys_core::device_crypto::DeviceKey;
 use serde_json::{json, Value};
 use tempfile::TempDir;
 
 const TEST_ISSUER: &str = "https://oidc.test.invalid";
 
-fn stub_creds() -> AssumedCredentials {
-    AssumedCredentials {
-        access_key_id: "ASIA-stub".into(),
-        secret_access_key: "stub".into(),
-        session_token: "stub".into(),
-        expiration_unix: 9_999_999_999,
-    }
-}
-
 async fn spawn_broker() -> (String, Arc<AppState>) {
     let tmp = Box::leak(Box::new(TempDir::new().unwrap()));
     let keypair_path = tmp.path().join("oidc-keypair.json");
     let oidc = OidcKeypair::generate_and_persist(&keypair_path).unwrap();
-    let sts: Arc<dyn StsClient> = Arc::new(StubStsClient::ok(stub_creds()));
     let config = BrokerConfig {
         login_config: None,
         login_access: Default::default(),
-        data_role_arn: "arn:aws:iam::000:role/test".into(),
-        memory_role_arn: String::new(),
-        speech_role_arn: String::new(),
-        channel_role_arn: String::new(),
-        channel_sts_token: String::new(),
-        sts_provider: "aws".into(),
+        channel_wake_token: String::new(),
         audit_db_path: PathBuf::from(":memory:"),
-        aws_region: "us-east-1".into(),
-        session_duration_seconds: 3600,
         shutdown_grace_seconds: 5,
         oidc_issuer: TEST_ISSUER.into(),
         oidc_keypair_path: keypair_path,
@@ -60,7 +42,7 @@ async fn spawn_broker() -> (String, Arc<AppState>) {
         audit_anchors: "sqlite".into(),
         refuse_to_boot_strict: false,
         client_id: agentkeys_broker_server::identity::DEFAULT_CLIENT_ID.to_string(),
-        sts_audience: "sts.amazonaws.com".into(),
+        oidc_audience: "https://relying-party.example".into(),
     };
     let http = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(2))
@@ -90,7 +72,6 @@ async fn spawn_broker() -> (String, Arc<AppState>) {
         config,
         http,
         audit: AuditLog::open_in_memory().unwrap(),
-        sts,
         oidc: Arc::new(oidc),
         session_keypair: Arc::new(session_keypair),
         registry,

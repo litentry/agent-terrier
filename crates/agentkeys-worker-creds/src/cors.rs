@@ -23,7 +23,7 @@ mod tests {
     use axum::{body::Body, http::Request, routing::post, Router};
     use tower::ServiceExt;
     #[tokio::test]
-    async fn preflight_allows_exact_origin_and_sts_headers_only() {
+    async fn preflight_allows_exact_origin_and_local_headers_only() {
         let app = Router::new()
             .route("/data", post(|| async { "ok" }))
             .layer(browser_cors_layer("https://console.example.test"));
@@ -48,10 +48,9 @@ mod tests {
                 let headers = response.headers()["access-control-allow-headers"]
                     .to_str()
                     .unwrap();
-                for name in agentkeys_protocol::browser_origins::WORKER_CORS_HEADERS {
-                    assert!(headers.contains(name));
-                }
-                assert!(!headers.contains('*'));
+                let mut allowed_headers = headers.split(',').map(str::trim).collect::<Vec<_>>();
+                allowed_headers.sort_unstable();
+                assert_eq!(allowed_headers, ["authorization", "content-type"]);
             }
         }
     }

@@ -6,34 +6,15 @@ use crate::env;
 pub struct BrokerConfig {
     pub login_config: Option<agentkeys_protocol::auth::LoginConfig>,
     pub login_access: crate::login_access::LoginAccess,
-    pub data_role_arn: String,
-    /// #295 P1 §7a — the per-data-class MEMORY IAM role the broker AssumeRoles
-    /// (with a read-only, exact-object inline session policy) to issue delegated
-    /// canonical-memory READ credentials. Empty when `MEMORY_ROLE_ARN` is unset;
-    /// `/v1/cap/canonical-sts` then returns a clear "not configured" error
-    /// instead of failing boot (back-compat for brokers predating this).
-    pub memory_role_arn: String,
-    /// #441 — the SPEECH IAM role `/v1/cap/speech-sts` AssumeRoles (inline
-    /// Transcribe/Polly-only session policy). Empty when `SPEECH_ROLE_ARN` is
-    /// unset; the endpoint then returns a clear "not configured" error.
-    pub speech_role_arn: String,
-    pub channel_role_arn: String,
-    /// #541 — the host-minted shared bearer authenticating the CHANNEL WORKER
-    /// to `/v1/cap/channel-sts`. Empty = the endpoint refuses (not configured).
-    pub channel_sts_token: String,
-    /// The local binary accepts only `local`; embedding applications inject
-    /// their own optional external credential adapter through AppState.
-    pub sts_provider: String,
+    pub channel_wake_token: String,
     pub audit_db_path: PathBuf,
-    pub aws_region: String,
-    pub session_duration_seconds: i32,
     /// Hard cap on graceful-shutdown drain time.
     pub shutdown_grace_seconds: u64,
     /// Public URL the broker advertises as the OIDC issuer.
     pub oidc_issuer: String,
     /// Path to the persisted OIDC ES256 keypair (purpose=oidc).
     pub oidc_keypair_path: PathBuf,
-    /// TTL of OIDC JWTs minted for STS.
+    /// TTL of broker identity tokens.
     pub oidc_jwt_ttl_seconds: u64,
     /// `BROKER_DEV_MODE=true` relaxes the https-only OIDC issuer rule.
     ///
@@ -51,54 +32,23 @@ pub struct BrokerConfig {
     pub refuse_to_boot_strict: bool,
     /// Configured identity namespace; changes require an identity migration.
     pub client_id: String,
-    pub sts_audience: String,
+    pub oidc_audience: String,
 }
 
 impl BrokerConfig {
     pub fn from_env() -> anyhow::Result<Self> {
-        let data_role_arn = std::env::var(env::BROKER_DATA_ROLE_ARN)
-            .or_else(|_| std::env::var(env::BROKER_AGENT_ROLE_ARN))
-            .unwrap_or_default();
-
-        // #295 P1 §7a — optional. Empty disables /v1/cap/canonical-sts with a
-        // clear error (not a boot failure), so brokers predating this keep booting.
-        let memory_role_arn = std::env::var(env::MEMORY_ROLE_ARN).unwrap_or_default();
-        // #441 — optional, same posture as memory_role_arn.
-        let speech_role_arn = std::env::var(env::SPEECH_ROLE_ARN).unwrap_or_default();
-        // #541 — optional pair, same posture: unset disables /v1/cap/channel-sts
-        // with a clear error instead of failing boot.
-        let channel_role_arn = std::env::var(env::CHANNEL_ROLE_ARN).unwrap_or_default();
-        let channel_sts_token = std::env::var(env::AGENTKEYS_CHANNEL_STS_TOKEN).unwrap_or_default();
-        let sts_provider = match std::env::var(env::AGENTKEYS_STS_PROVIDER)
-            .unwrap_or_default()
-            .trim()
-            .to_ascii_lowercase()
-            .as_str()
-        {
-            "" | "local" => "local".to_string(),
-            other => anyhow::bail!(
-                "AGENTKEYS_STS_PROVIDER={other:?} is unsupported by the local binary; external credential adapters require an embedding application"
-            ),
+        let channel_wake_token = match std::env::var(env::BROKER_CHANNEL_WAKE_TOKEN_FILE) {
+            Ok(path) => {
+                agentkeys_core::protected_file::read_token(std::path::Path::new(&path))?.to_string()
+            }
+            Err(std::env::VarError::NotPresent) => String::new(),
+            Err(error) => return Err(error.into()),
         };
 
         let audit_db_path = std::env::var(env::BROKER_AUDIT_DB_PATH)
             .ok()
             .map(PathBuf::from)
             .unwrap_or_else(default_audit_db_path);
-
-        // BROKER_AWS_REGION wins; falls back to legacy REGION before defaulting.
-        let aws_region = first_env(&[env::BROKER_AWS_REGION, env::REGION])
-            .unwrap_or_else(|| "us-east-1".to_string());
-
-        let session_duration_seconds =
-            parse_int_env_with_default(env::BROKER_SESSION_DURATION_SECONDS, 3600)?;
-        if !(900..=43_200).contains(&session_duration_seconds) {
-            anyhow::bail!(
-                "{} must be between 900 and 43200, got {}",
-                env::BROKER_SESSION_DURATION_SECONDS,
-                session_duration_seconds
-            );
-        }
 
         let shutdown_grace_seconds =
             parse_int_env_with_default(env::BROKER_SHUTDOWN_GRACE_SECONDS, 30u64)?;
@@ -126,8 +76,9 @@ impl BrokerConfig {
             std::env::var(env::BROKER_AUDIT_ANCHORS).unwrap_or_else(|_| "sqlite".to_string());
         let refuse_to_boot_strict = bool_env(env::BROKER_REFUSE_TO_BOOT_STRICT);
         let client_id = parse_client_id(std::env::var(env::AGENTKEYS_CLIENT_ID).ok())?;
-        let sts_audience = std::env::var(env::BROKER_STS_AUDIENCE)
-            .unwrap_or_else(|_| "sts.amazonaws.com".to_string());
+        let oidc_audience =
+            std::env::var(env::BROKER_OIDC_AUDIENCE).unwrap_or_else(|_| oidc_issuer.clone());
+        anyhow::ensure!(!oidc_audience.trim().is_empty(), "OIDC audience is empty");
 
         let login_access = match std::env::var(env::BROKER_MASTER_LOGIN_ALLOWLIST) {
             Ok(spec) => {
@@ -165,15 +116,8 @@ impl BrokerConfig {
         Ok(Self {
             login_config,
             login_access,
-            data_role_arn,
-            memory_role_arn,
-            speech_role_arn,
-            channel_role_arn,
-            channel_sts_token,
-            sts_provider,
+            channel_wake_token,
             audit_db_path,
-            aws_region,
-            session_duration_seconds,
             shutdown_grace_seconds,
             oidc_issuer,
             oidc_keypair_path,
@@ -183,13 +127,13 @@ impl BrokerConfig {
             audit_anchors,
             refuse_to_boot_strict,
             client_id,
-            sts_audience,
+            oidc_audience,
         })
     }
 }
 
 /// Validate the per-stack omni-derivation namespace (#464). Unset ⇒ the
-/// historical `agentkeys` (AWS unchanged by omission). Set ⇒ must be a
+/// default `agentkeys`. Set ⇒ must be a
 /// non-empty single token: the value feeds a hash, so whitespace or an
 /// accidentally-quoted paste would silently fork every identity — refuse
 /// to boot instead.
@@ -227,18 +171,6 @@ fn bool_env(name: &str) -> bool {
 
 fn required_env(name: &str) -> anyhow::Result<String> {
     std::env::var(name).map_err(|_| anyhow::anyhow!("missing required env var: {}", name))
-}
-
-/// Return the value of the first env var in `names` that is set and non-empty.
-fn first_env(names: &[&str]) -> Option<String> {
-    for name in names {
-        if let Ok(v) = std::env::var(name) {
-            if !v.is_empty() {
-                return Some(v);
-            }
-        }
-    }
-    None
 }
 
 /// Parse an env var as `T`, defaulting if unset. Refuses to boot on parse failure.

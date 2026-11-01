@@ -13,6 +13,10 @@ The public core uses the concrete interfaces below. Local implementations are pa
 
 Optional speech uses the existing `SpeechBackend` interface; the public executable has no real speech implementation and returns an explicit unavailable result. Development email uses the broker's `EmailSender` interface and local outbox. These are separate from the qualified chat/tool/stream/embedding recipe.
 
+The public broker has no cloud credential-exchange routes or role/region configuration. Storage clients use signed capabilities directly. OIDC identity tokens contain neutral actor/wallet claims; `BROKER_OIDC_AUDIENCE` selects their recipient and defaults to the configured issuer. A downstream deployment owns any provider-specific claim translation and exchange service. These are deliberate interface removals requiring coordinated downstream adoption.
+
+An optional channel wake integration configures `BROKER_CHANNEL_WAKE_TOKEN_FILE` with the same protected local file supplied to the channel worker's `--wake-token-file`. Both consumers reject unsafe files; an empty or missing configured file fails startup. The broker still verifies current on-chain registration before creating an agent. The supervisor does not yet configure this wake integration automatically.
+
 ## Versioning and compatibility
 
 For this development release, pin the source commit, Cargo/npm lockfiles, image identity and model recipe together. Package versions alone do not identify a qualified combination. A downstream adapter must compile against that exact interface revision and pass its contract checks before adoption. Do not reuse production identities in local acceptance.

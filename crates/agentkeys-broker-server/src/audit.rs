@@ -210,7 +210,7 @@ mod tests {
             MintRecord {
                 requester_token: "secret-token",
                 requester_wallet: "0xabc",
-                requested_role: "arn:aws:iam::000:role/foo",
+                requested_role: "synthetic-role",
                 session_duration_seconds: 3600,
                 sts_session_name: "agentkeys-0xabc-123",
                 outcome: MintOutcome::Ok,
@@ -233,7 +233,7 @@ mod tests {
             MintRecord {
                 requester_token: "x",
                 requester_wallet: "unknown",
-                requested_role: "arn:aws:iam::000:role/foo",
+                requested_role: "synthetic-role",
                 session_duration_seconds: 3600,
                 sts_session_name: "(unauthenticated)",
                 outcome: MintOutcome::AuthFailed,

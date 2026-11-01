@@ -23,7 +23,6 @@ pub mod sponsor;
 pub mod sponsored_accept;
 pub mod state;
 pub mod storage;
-pub mod sts;
 
 use axum::{
     extract::DefaultBodyLimit,
@@ -101,7 +100,7 @@ pub fn create_router(state: SharedState) -> Router {
         // v2 stage-1 cap-mint endpoints (arch.md §12.4 + §15.1). Workers
         // (credentials-service per arch.md §15.1) consume these caps and
         // independently re-verify the on-chain scope + K3 epoch before
-        // doing any AES-256-GCM encrypt/decrypt + S3 PUT/GET.
+        // accessing local encrypted storage.
         .route("/v1/cap/cred-store", post(handlers::cap::cap_cred_store))
         .route("/v1/cap/cred-fetch", post(handlers::cap::cap_cred_fetch))
         // Per-data-class memory caps (issue #90 followup). Same shape +
@@ -120,14 +119,6 @@ pub fn create_router(state: SharedState) -> Router {
             "/v1/cap/memory-canonical-get",
             post(handlers::cap::cap_memory_canonical_get),
         )
-        // #295 P1 §7a — broker-brokered scoped STS for a delegated canonical
-        // read: the delegate presents its CanonicalFetch cap + its OWN session
-        // and gets back read-only, exact-object creds; it never holds the
-        // operator session bearer (Codex critical fix).
-        .route(
-            "/v1/cap/canonical-sts",
-            post(handlers::canonical_sts::mint_canonical_sts),
-        )
         // #339 P2 — delegated absorption-inbox APPEND (the master-hub "push"
         // channel): mints an Append/Memory cap, gated by the on-chain proposal:<ns>
         // grant (a DISTINCT service-id from the knowledge:<ns> read grant).
@@ -135,15 +126,6 @@ pub fn create_router(state: SharedState) -> Router {
             "/v1/cap/memory-append",
             post(handlers::cap::cap_memory_append),
         )
-        // #339 P2 §8 — broker-brokered scoped STS for a delegated inbox append
-        // (the write-side twin of canonical-sts): the worker presents the
-        // delegate's Append cap + the delegate's OWN session and gets back
-        // PUT-only creds scoped to the single delegate's inbox sub-prefix.
-        .route(
-            "/v1/cap/inbox-sts",
-            post(handlers::inbox_sts::mint_inbox_sts),
-        )
-        .route("/v1/cap/own-sts", post(handlers::own_sts::mint_own_sts))
         // Per-data-class CONFIG caps (#178 P1 / config-data-class-memory-list).
         // data_class=Config — the policy / memory-types taxonomy; master-only.
         .route(
@@ -157,23 +139,7 @@ pub fn create_router(state: SharedState) -> Router {
         // Classifier-service compute-gate cap (#178 §15.6, #207 items 2-3).
         // op=Classify; data_class comes from the request body (spans data classes).
         .route("/v1/cap/classify", post(handlers::cap::cap_classify))
-        // #441 speech plane: mint (op/class/service statically fixed) + the
-        // broker-side redeem — the SAME cap→STS relay shape as canonical-sts,
-        // pointed at the speech role instead of a bucket prefix.
         .route("/v1/cap/speech", post(handlers::cap::cap_speech))
-        .route(
-            "/v1/cap/speech-sts",
-            post(handlers::speech_sts::mint_speech_sts),
-        )
-        // #541 — WORKER-redeemed, cap-derived channel storage creds: the channel
-        // worker (authenticated by the host-minted shared bearer) exchanges the
-        // Channel cap it just verified for short-lived owner-scoped creds.
-        // Deliberately NOT client-redeemable — participants must never hold the
-        // owner's storage credential (see handlers/channel_sts.rs docs).
-        .route(
-            "/v1/cap/channel-sts",
-            post(handlers::channel_sts::mint_channel_sts),
-        )
         // Per-data-class CHANNEL caps (#406 channels phase 1). data_class=Channel;
         // the route fixes the DIRECTION — channel-pub mints ChannelPublish,
         // channel-sub mints ChannelSubscribe (distinct on-chain grants). The

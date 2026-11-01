@@ -80,11 +80,8 @@ pub enum CapMintOp {
     /// `op_str` is `"channel_subscribe"`. Distinct on-chain grant (`channel-sub:<id>`)
     /// from the publish grant — granting one never grants the other.
     ChannelSubscribe,
-    /// #441 speech — USE the stack's speech plane (ASR/TTS) through the broker
-    /// STS relay. Mints `CapOp::SpeechUse`/`DataClass::Speech` at
-    /// `/v1/cap/speech` (service statically `"speech"` — the on-chain grant
-    /// id); redeemed ONLY at the broker's `/v1/cap/speech-sts` for short-TTL
-    /// Transcribe/Polly-only AWS creds. No bucket, no worker.
+    /// Speech capability for an explicitly configured implementation.
+    /// The public runtime currently reports speech as unavailable.
     SpeechUse,
 }
 
@@ -701,22 +698,6 @@ pub struct ChannelEvent {
     /// the channel's default app. Copied verbatim from the publish body.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub addressee: Option<String>,
-}
-
-/// Broker `POST /v1/cap/channel-sts` response (#541) — short-lived, owner-scoped
-/// storage credentials the CHANNEL WORKER redeems from the cap it just verified.
-/// One definition shared by the broker (producer) and the channel worker
-/// (consumer) so the internal mint contract cannot drift (#203 discipline).
-/// Deliberately NOT the memory/config client-relay shape: a channel is a shared
-/// owner-owned feed, so the participant has nothing of its own to relay and must
-/// never hold the owner's storage credential — only the worker redeems these.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ChannelStsCreds {
-    pub access_key_id: String,
-    pub secret_access_key: String,
-    pub session_token: String,
-    /// Unix seconds the credentials expire; the worker caches until ~60 s before.
-    pub expiration: i64,
 }
 
 /// Channel-worker `POST /v1/channel/publish` request body. The publish cap
@@ -2296,69 +2277,6 @@ pub struct MemoryGetResult {
     pub namespace: String,
 }
 
-/// #295 P1 §7a — request body for the broker `POST /v1/cap/canonical-sts`.
-/// The delegate presents its broker-minted `CanonicalFetch` cap (and its OWN
-/// session JWT as the Bearer) and receives read-only, exact-object STS creds.
-/// The operator session bearer never enters the delegate runtime (the Codex
-/// critical fix: the broker, not the client, holds operator authority).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CanonicalStsBody {
-    pub cap: CapToken,
-}
-
-/// Response from `/v1/cap/canonical-sts`: scoped (read-only, single-object) STS
-/// creds the delegate relays as `X-Aws-*` to `/v1/memory/canonical-get`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CanonicalStsResult {
-    pub access_key_id: String,
-    pub secret_access_key: String,
-    pub session_token: String,
-    pub expiration: i64,
-}
-
-// ── #441 speech plane — cap→STS relay (epic #439 stack ②) ────────────────────
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SpeechStsBody {
-    pub cap: CapToken,
-}
-
-/// Response from `/v1/cap/speech-sts`. `region` tells the client where to
-/// point the Transcribe/Polly SDKs (the broker's own AWS region).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SpeechStsResult {
-    pub access_key_id: String,
-    pub secret_access_key: String,
-    pub session_token: String,
-    pub expiration: i64,
-    pub region: String,
-}
-
-/// Legacy external credential-exchange request, retained for wire compatibility.
-/// The public development signer does not serve `/dev/sign-sts`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SignStsBody {
-    /// Bare/0x 64-hex actor omni — must match the session JWT's claim.
-    pub omni_account: String,
-    /// Requested data class: `vault` | `memory` | `config` | `channel`.
-    pub data_class: String,
-    /// Subset of `get` | `put` | `delete` | `list` (case-insensitive).
-    pub verbs: Vec<String>,
-    /// Requested credential TTL; an external implementation must bound it.
-    pub ttl_seconds: u64,
-    /// Broker-issued identity token for the external exchange.
-    pub oidc_token: String,
-}
-
-/// Legacy external credential response with Unix-epoch expiration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SignStsResult {
-    pub access_key_id: String,
-    pub secret_access_key: String,
-    pub session_token: String,
-    pub expiration_unix: i64,
-}
-
 // ── #339 P2 — absorption inbox (master-hub "push" / curated merge) ────────────
 //
 // The mirror of P1's canonical READ, but for WRITE: a delegate proposes a
@@ -2366,8 +2284,8 @@ pub struct SignStsResult {
 // later. The on-chain authorization is a **distinct** `proposal:<ns>` grant (never
 // the `knowledge:<ns>` read grant — `readOnly` is a dead flag, master-hub-topology.md
 // §5/§6b). Like P1's A' model, the cross-actor WRITE runs SERVER-SIDE in the
-// worker under a broker-minted, prefix-scoped operator STS — the delegate holds
-// NO AWS creds. Provenance (`source_delegate_omni`) is stamped by the WORKER from
+// worker after independent authorization. Provenance (`source_delegate_omni`)
+// is stamped by the WORKER from
 // the cap-signed `actor_omni`, NEVER from a delegate-supplied field (§8).
 
 /// The context TYPE of a context-system object (#390, master-hub-topology.md
@@ -2471,46 +2389,6 @@ pub struct MemoryInboxAppendResp {
     /// Durable-audit receipt (#229) — see [`MemoryPutResp::audit_envelope_hash`].
     #[serde(default)]
     pub audit_envelope_hash: Option<String>,
-}
-
-/// #339 P2 §8 (A') — request body for the broker `POST /v1/cap/inbox-sts`. The
-/// write-side twin of [`CanonicalStsBody`]: the WORKER (not the delegate) relays
-/// the delegate's session bearer + the broker-minted `Append` cap and receives
-/// PUT-only STS scoped to the single delegate's inbox sub-prefix. The delegate
-/// never holds AWS creds.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct InboxStsBody {
-    pub cap: CapToken,
-}
-
-/// Response from `/v1/cap/inbox-sts`: write-scoped STS the worker uses to PUT the
-/// one inbox object. Same shape as [`CanonicalStsResult`] but semantically a
-/// PutObject grant on `bots/<operator>/inbox/<delegate>/<ns>/*` (single delegate,
-/// single namespace) — never read, never another delegate's sub-prefix.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct InboxStsResult {
-    pub access_key_id: String,
-    pub secret_access_key: String,
-    pub session_token: String,
-    pub expiration: i64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OwnStsBody {
-    pub cap: CapToken,
-}
-
-/// Response from `/v1/cap/own-sts`: the ACTOR-tagged creds the worker uses for
-/// the delegate's own-namespace object (`bots/<actor>/memory/<service>.enc` +
-/// `<service>.objects/*`). Same shape as [`InboxStsResult`]; semantically a
-/// PutObject+GetObject (Store cap) or GetObject-only (Fetch cap) grant on the
-/// caller's OWN prefix — never the operator's, never another actor's.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OwnStsResult {
-    pub access_key_id: String,
-    pub secret_access_key: String,
-    pub session_token: String,
-    pub expiration: i64,
 }
 
 /// The decrypted inbox proposal — what the worker stores (inside the envelope)

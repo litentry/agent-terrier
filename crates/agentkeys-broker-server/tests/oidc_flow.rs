@@ -1,7 +1,7 @@
 //! End-to-end tests for the broker's OIDC issuer surface (Stage 7 phase 2):
 //!   discovery doc, JWKS, and bearer-token-gated JWT mint.
 //!
-//! Mirrors the recipe operators run before `aws iam create-open-id-connect-provider`:
+//! Public identity-token contract:
 //!   1. fetch discovery → confirm issuer + jwks_uri
 //!   2. fetch JWKS → confirm ES256 P-256 public key + kid
 //!   3. mint a JWT for a real session → verify ES256 signature with the JWKS
@@ -17,41 +17,22 @@ use agentkeys_broker_server::identity::{derive_with_client_id, DEFAULT_CLIENT_ID
 use agentkeys_broker_server::jwt::issue::mint_session_jwt;
 use agentkeys_broker_server::oidc::OidcKeypair;
 use agentkeys_broker_server::state::AppState;
-use agentkeys_broker_server::sts::{AssumedCredentials, StsClient, StubStsClient};
 use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
 use serde_json::Value;
 use tempfile::TempDir;
 
-const STUB_ROLE_ARN: &str = "arn:aws:iam::000000000000:role/agentkeys-data-role";
 const TEST_ISSUER: &str = "https://oidc.test.invalid";
-
-fn stub_creds() -> AssumedCredentials {
-    AssumedCredentials {
-        access_key_id: "ASIA-stub-AKID".into(),
-        secret_access_key: "stub-secret".into(),
-        session_token: "stub-session-token".into(),
-        expiration_unix: 9_999_999_999,
-    }
-}
 
 async fn spawn_broker() -> (String, Arc<AppState>) {
     let tmp = Box::leak(Box::new(TempDir::new().unwrap()));
     let keypair_path = tmp.path().join("oidc-keypair.json");
     let oidc = OidcKeypair::generate_and_persist(&keypair_path).unwrap();
 
-    let sts: Arc<dyn StsClient> = Arc::new(StubStsClient::ok(stub_creds()));
     let config = BrokerConfig {
         login_config: None,
         login_access: Default::default(),
-        data_role_arn: STUB_ROLE_ARN.into(),
-        memory_role_arn: String::new(),
-        speech_role_arn: String::new(),
-        channel_role_arn: String::new(),
-        channel_sts_token: String::new(),
-        sts_provider: "aws".into(),
+        channel_wake_token: String::new(),
         audit_db_path: PathBuf::from(":memory:"),
-        aws_region: "us-east-1".into(),
-        session_duration_seconds: 3600,
         shutdown_grace_seconds: 5,
         oidc_issuer: TEST_ISSUER.into(),
         oidc_keypair_path: keypair_path,
@@ -61,7 +42,7 @@ async fn spawn_broker() -> (String, Arc<AppState>) {
         audit_anchors: "sqlite".into(),
         refuse_to_boot_strict: false,
         client_id: agentkeys_broker_server::identity::DEFAULT_CLIENT_ID.to_string(),
-        sts_audience: "sts.amazonaws.com".into(),
+        oidc_audience: "https://relying-party.example".into(),
     };
 
     let http = reqwest::Client::builder()
@@ -100,7 +81,6 @@ async fn spawn_broker() -> (String, Arc<AppState>) {
         config,
         http,
         audit: AuditLog::open_in_memory().unwrap(),
-        sts,
         oidc: Arc::new(oidc),
         session_keypair: std::sync::Arc::new(session_keypair),
         registry,
@@ -139,7 +119,7 @@ async fn spawn_broker() -> (String, Arc<AppState>) {
 }
 
 #[tokio::test]
-async fn discovery_returns_aws_compatible_shape() {
+async fn discovery_returns_oidc_shape() {
     let (broker_url, _) = spawn_broker().await;
 
     let resp: Value = reqwest::Client::new()
@@ -165,10 +145,8 @@ async fn discovery_returns_aws_compatible_shape() {
         .expect("claims_supported must be an array");
     let names: Vec<&str> = claims.iter().filter_map(|v| v.as_str()).collect();
     assert!(names.contains(&"agentkeys_user_wallet"));
-    assert!(
-        names.contains(&"https://aws.amazon.com/tags"),
-        "discovery doc must advertise the AWS tags claim so AWS IAM expects it"
-    );
+    assert!(names.contains(&"agentkeys_actor_omni"));
+    assert!(names.iter().all(|name| !name.starts_with("https://")));
     assert!(names.contains(&"sub"));
     assert!(names.contains(&"exp"));
 }
@@ -240,7 +218,7 @@ async fn mint_oidc_jwt_signs_claims_for_session_wallet() {
         DecodingKey::from_ec_components(&state.oidc.public_x_b64, &state.oidc.public_y_b64)
             .unwrap();
     let mut validation = Validation::new(Algorithm::ES256);
-    validation.set_audience(&["sts.amazonaws.com"]);
+    validation.set_audience(&["https://relying-party.example"]);
     validation.set_issuer(&[TEST_ISSUER]);
 
     let token_data: jsonwebtoken::TokenData<Value> =
@@ -250,21 +228,28 @@ async fn mint_oidc_jwt_signs_claims_for_session_wallet() {
         token_data.claims["sub"],
         format!("agentkeys:agent:{}", wallet)
     );
-    assert_eq!(token_data.claims["aud"], "sts.amazonaws.com");
+    assert_eq!(token_data.claims["aud"], "https://relying-party.example");
     assert_eq!(token_data.claims["iss"], TEST_ISSUER);
 
-    // Regression guard for the silent-Stage-7-isolation-failure bug: AWS STS
-    // populates session tags ONLY from this magic-named claim, never from
-    // arbitrary top-level claims. Without it, `${aws:PrincipalTag/...}` in
-    // bucket policies expands to empty and tenant isolation is inert.
-    let aws_tags = &token_data.claims["https://aws.amazon.com/tags"];
+    let mut keys = token_data
+        .claims
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    keys.sort_unstable();
     assert_eq!(
-        aws_tags["principal_tags"]["agentkeys_user_wallet"][0], wallet,
-        "JWT must carry agentkeys_user_wallet as a principal_tag for STS to set the session tag"
-    );
-    assert_eq!(
-        aws_tags["transitive_tag_keys"][0], "agentkeys_user_wallet",
-        "agentkeys_user_wallet must be transitive so it survives role chaining"
+        keys,
+        [
+            "agentkeys_actor_omni",
+            "agentkeys_user_wallet",
+            "aud",
+            "exp",
+            "iat",
+            "iss",
+            "sub"
+        ]
     );
 
     let row = state.audit.last_row().unwrap().expect("audit row missing");
@@ -306,7 +291,7 @@ async fn mint_oidc_jwt_rejects_invalid_bearer_and_audits_auth_failed() {
 #[tokio::test]
 async fn keypair_persists_across_broker_restarts() {
     // Two brokers pointed at the same on-disk keypair must serve the same
-    // JWKS — otherwise an AWS OIDC provider registered against the first
+    // JWKS — otherwise an identity-token consumer configured against the first
     // broker breaks every restart, which would be unusable in production.
     let tmp = TempDir::new().unwrap();
     let keypair_path = tmp.path().join("oidc-keypair.json");

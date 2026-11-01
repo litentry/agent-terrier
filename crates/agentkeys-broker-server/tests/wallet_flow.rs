@@ -26,21 +26,11 @@ use agentkeys_broker_server::{
     },
     state::{AppState, Tier2State},
     storage::{AuthNonceStore, IdentityLinkStore, SpawnContextStore, WalletStore},
-    sts::{AssumedCredentials, StsClient, StubStsClient},
 };
 use serde_json::Value;
 use tempfile::TempDir;
 
 const TEST_ISSUER: &str = "https://broker.wallet.test";
-
-fn stub_creds() -> AssumedCredentials {
-    AssumedCredentials {
-        access_key_id: "ASIA-WALLET".into(),
-        secret_access_key: "wallet-secret".into(),
-        session_token: "wallet-session".into(),
-        expiration_unix: 9_999_999_999,
-    }
-}
 
 struct Harness {
     pub broker_url: String,
@@ -68,20 +58,11 @@ async fn spawn_broker() -> Harness {
         audit: vec![sqlite_anchor],
     });
 
-    let sts: Arc<dyn StsClient> = Arc::new(StubStsClient::ok(stub_creds()));
-
     let config = BrokerConfig {
         login_config: None,
         login_access: Default::default(),
-        data_role_arn: "arn:aws:iam::000:role/test".into(),
-        memory_role_arn: String::new(),
-        speech_role_arn: String::new(),
-        channel_role_arn: String::new(),
-        channel_sts_token: String::new(),
-        sts_provider: "aws".into(),
+        channel_wake_token: String::new(),
         audit_db_path: tmp.path().join("audit.sqlite"),
-        aws_region: "us-east-1".into(),
-        session_duration_seconds: 3600,
         shutdown_grace_seconds: 5,
         oidc_issuer: TEST_ISSUER.into(),
         oidc_keypair_path: tmp.path().join("oidc.json"),
@@ -91,7 +72,7 @@ async fn spawn_broker() -> Harness {
         audit_anchors: "sqlite".into(),
         refuse_to_boot_strict: false,
         client_id: agentkeys_broker_server::identity::DEFAULT_CLIENT_ID.to_string(),
-        sts_audience: "sts.amazonaws.com".into(),
+        oidc_audience: "https://relying-party.example".into(),
     };
 
     let http = reqwest::Client::builder()
@@ -104,7 +85,6 @@ async fn spawn_broker() -> Harness {
         config,
         http,
         audit: AuditLog::open_in_memory().unwrap(),
-        sts,
         oidc: Arc::new(oidc),
         session_keypair: Arc::new(session_kp),
         registry,
