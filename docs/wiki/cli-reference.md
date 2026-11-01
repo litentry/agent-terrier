@@ -9,7 +9,7 @@ Agent Terrier local development tools
 | Argument | Required | Choices | Description |
 | --- | --- | --- | --- |
 | -h, --help | no |  | show this help message and exit |
-| subcommand | yes | manage, stack, test, models, contracts, chain, services, cred, agent, owner, device | Select a command below. |
+| subcommand | yes | manage, stack, test, models, contracts, chain, services, channel, cred, agent, owner, device | Select a command below. |
 
 ## terrier manage
 
@@ -92,6 +92,18 @@ Agent Terrier local development tools
 | --model-binary | no |  | Installed Ollama executable; requires --model-dir |
 | --website | no |  | Own the prebuilt local web console |
 | --web-port | no |  | First website port; requires --website and otherwise selects a free port |
+
+## terrier channel
+
+| Argument | Required | Choices | Description |
+| --- | --- | --- | --- |
+| -h, --help | no |  | show this help message and exit |
+| action | yes | publish, poll |  |
+| channel | yes |  |  |
+| --name | yes |  | Existing local owner name |
+| --text-stdin | no |  | Read exact UTF-8 text for publish |
+| --after | no |  | Poll after this opaque cursor |
+| --wait-seconds | no | 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25 | Bounded long poll; 0 returns immediately |
 
 ## terrier cred
 
