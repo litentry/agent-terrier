@@ -77,12 +77,12 @@ pub struct SignMessageRequest {
     pub omni_account: String,
     pub message_hex: String,
 }
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DerivedAddress {
     pub address: String,
     pub key_version: u8,
 }
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SignedMessage {
     pub address: String,
     pub signature: String,
@@ -99,4 +99,54 @@ pub struct OidcJwtResponse {
     pub jwt: String,
     pub wallet: String,
     pub expiration: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SignTypedDataRequest<T> {
+    pub omni_account: String,
+    pub typed_data: T,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SignedTypedData {
+    pub signature: String,
+    pub address: String,
+    pub primary_type_hash: String,
+    pub domain_separator: String,
+    pub digest: String,
+    pub key_version: u8,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeriveDeviceRequest {
+    pub actor_omni: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DerivedDevice {
+    pub address: String,
+    pub device_key_hash: String,
+    pub pop_sig: String,
+    pub key_version: u8,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SignDeviceCapPopRequest {
+    pub actor_omni: String,
+    pub operator_omni: String,
+    pub service: String,
+    pub op: String,
+    pub data_class: String,
+    pub client_nonce: String,
+    pub client_ts: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SignedDeviceCapPop {
+    pub signature: String,
+    pub address: String,
+    pub device_key_hash: String,
+    pub key_version: u8,
 }

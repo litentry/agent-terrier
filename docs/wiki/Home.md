@@ -13,6 +13,7 @@ Use fresh development identities only. The development software signer is not pr
 ## Develop and verify
 
 - [Architecture and canonical owners](../arch.md)
+- [Adapter contracts and compatibility](./adapter-contracts.md)
 - [Generated CLI reference](./cli-reference.md)
 - [Contributor guide](../../CONTRIBUTING.md)
 - [Local storage and authorization checks](./local-storage.md)

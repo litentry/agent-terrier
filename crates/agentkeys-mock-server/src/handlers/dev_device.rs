@@ -23,7 +23,6 @@
 //! identity, so a "skip auth in legacy mode" arm is unacceptable here.
 
 use axum::{extract::State, http::HeaderMap, http::StatusCode, response::IntoResponse, Json};
-use serde::Deserialize;
 use serde_json::{json, Value};
 
 use agentkeys_core::device_crypto::{agent_pop_payload, cap_pop_payload, device_key_hash};
@@ -34,26 +33,7 @@ use crate::handlers::dev_keys::{
 };
 use crate::state::SharedState;
 
-#[derive(Deserialize)]
-pub struct DeriveDeviceRequest {
-    /// The delegate's HDKD child omni (64 hex, `0x` optional).
-    pub actor_omni: String,
-    /// The delegate's label — REQUIRED for the master arm (it is the HDKD
-    /// parentage proof); ignored when the bearer IS the actor.
-    #[serde(default)]
-    pub label: Option<String>,
-}
-
-#[derive(Deserialize)]
-pub struct SignDeviceCapPopRequest {
-    pub actor_omni: String,
-    pub operator_omni: String,
-    pub service: String,
-    pub op: String,
-    pub data_class: String,
-    pub client_nonce: String,
-    pub client_ts: u64,
-}
+pub use agentkeys_protocol::auth::{DeriveDeviceRequest, SignDeviceCapPopRequest};
 
 fn norm(omni: &str) -> String {
     omni.trim().trim_start_matches("0x").to_lowercase()
@@ -142,12 +122,12 @@ pub async fn derive_device(
     };
     (
         StatusCode::OK,
-        Json(json!({
-            "address":         address,
-            "device_key_hash": dkh,
-            "pop_sig":         pop,
-            "key_version":     KEY_VERSION,
-        })),
+        Json(agentkeys_protocol::auth::DerivedDevice {
+            address,
+            device_key_hash: dkh,
+            pop_sig: pop,
+            key_version: KEY_VERSION,
+        }),
     )
         .into_response()
 }
@@ -183,12 +163,12 @@ pub async fn sign_device_cap_pop(
     let dkh = device_key_hash(&address).unwrap_or_default();
     (
         StatusCode::OK,
-        Json(json!({
-            "signature":       signature,
-            "address":         address,
-            "device_key_hash": dkh,
-            "key_version":     KEY_VERSION,
-        })),
+        Json(agentkeys_protocol::auth::SignedDeviceCapPop {
+            signature,
+            address,
+            device_key_hash: dkh,
+            key_version: KEY_VERSION,
+        }),
     )
         .into_response()
 }
