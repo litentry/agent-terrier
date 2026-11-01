@@ -184,12 +184,42 @@ class LocalAgentQualification(LocalOwnerFixture):
             before = snapshot()
             self.assertEqual(command("receipt", "--user-op-hash", archived["user_op_hash"]), archived)
             self.assertTrue(snapshot() == before, "archive receipt recovery resubmitted an operation")
+            with os.fdopen(local_state.open_private(state / "services/relay/admin.key")) as source:
+                admin_token = source.read().strip()
+            secrets.append(admin_token)
+            status, response = request(relay + "/v1/admin/keys", {
+                "key_id": device, "user_omni": session["session"]["omni_account"],
+                "delegate_omni": created["actor_omni"], "device_id": device, "label": "cleanup-retry",
+            }, admin_token)
+            self.assertEqual(status, 200)
+            leftover_key = json.loads(response)["secret"]
+            secrets.append(leftover_key)
+            self.assertEqual(request(relay + "/v1/usage", bearer=leftover_key)[0], 200)
             self.services(state, "stop")
-            self.services(state, "start")
+            restarted = self.services(state, "start")
+            relay = restarted["services"]["model_relay"]["url"]
             before = snapshot()
-            restored = command("receipt", "--user-op-hash", archived["user_op_hash"], incomplete=True)
+            archive_path = state / "owners/alice/operations" / (archived["user_op_hash"] + ".json")
+            archive_record = local_state.read_json(archive_path)
+            forged_archive = dict(archive_record,
+                operator_omni=forged_binding["operator_omni"], request_device_key_hash=bob_session["device_key_hash"])
+            local_state.write_json(foreign_directory / archive_path.name, forged_archive)
+            command("receipt", "--user-op-hash", archived["user_op_hash"], name="bob", denial="HTTP 403")
+            self.assertTrue(snapshot() == before, "foreign recovery changed a live relay credential")
+            self.assertEqual(request(relay + "/v1/usage", bearer=leftover_key)[0], 200)
+            restored = command("receipt", "--user-op-hash", archived["user_op_hash"])
             self.assertEqual(restored["user_op_hash"], archived["user_op_hash"])
-            self.assertTrue(snapshot() == before, "restart recovery changed chain or relay state")
+            self.assertEqual(chain.rpc(node["rpc_http"], "eth_blockNumber"), before[0])
+            self.assertEqual(owned("container"), [])
+            self.assertEqual(request(relay + "/v1/usage", bearer=leftover_key)[0], 401)
+            before = snapshot()
+            self.assertEqual(command("receipt", "--user-op-hash", archived["user_op_hash"]), restored)
+            self.assertTrue(snapshot() == before, "repeated cleanup changed already-revoked state")
+            older_record = dict(archive_record)
+            older_record.pop("resources_kept")
+            local_state.write_json(archive_path, older_record)
+            command("receipt", "--user-op-hash", archived["user_op_hash"], incomplete=True)
+            local_state.write_json(archive_path, archive_record)
             retained = docker("run", "--rm", "--pull=never", "--network=none", "--read-only",
                 "--cap-drop=ALL", "--security-opt=no-new-privileges", "--user=1000:1000",
                 "--label", "org.agent-terrier.runtime=" + namespace,

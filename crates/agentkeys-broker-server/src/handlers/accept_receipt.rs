@@ -356,8 +356,10 @@ pub(crate) async fn verified_finalization(
     let lifecycle = current_lifecycle_calldata(state, config, operator, &packed.call_data).await?;
     let teardown =
         crate::handlers::sandbox::teardown_for_confirmed_batch(state, operator, &lifecycle).await;
-    let mut ceremony =
-        crate::handlers::spawn::finalize_for_confirmed_batch(state, operator, &lifecycle).await;
+    let mut ceremony = crate::handlers::spawn::finalize_for_confirmed_batch(
+        state, operator, &lifecycle, &teardown,
+    )
+    .await;
     if !teardown.is_empty() {
         ceremony.get_or_insert_with(|| json!({}))["runtime_teardown"] = json!(teardown);
     }
@@ -612,6 +614,9 @@ mod tests {
 
     #[test]
     fn transient_ceremony_errors_are_not_completed_cache_entries() {
+        assert!(contains_finalization_error(
+            &json!({"runtime_teardown":[{"relay_revoked":false,"error":"relay_revocation_failed"}]})
+        ));
         assert!(contains_finalization_error(
             &json!({"runtime_teardown":[{"runtime_stopped":false,"error":"runtime_stop_failed"}]})
         ));

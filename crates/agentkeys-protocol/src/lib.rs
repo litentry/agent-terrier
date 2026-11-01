@@ -2824,6 +2824,8 @@ pub struct RuntimeTeardownOutcome {
     pub device_key_hash: String,
     pub context_removed: bool,
     pub runtime_stopped: bool,
+    #[serde(default)]
+    pub relay_revoked: bool,
     pub error: Option<String>,
 }
 

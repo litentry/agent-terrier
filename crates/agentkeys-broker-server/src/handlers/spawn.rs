@@ -1008,14 +1008,16 @@ pub async fn archive_build(
 /// `registerDelegate` runs the spawn finalization (gate provision → sandbox
 /// spawn with identity + LLM envs → `DelegateSpawn` anchor), and for each
 /// confirmed `revokeAgentDevice` with a pending ARCHIVE row runs the archive
-/// finalization (gate deprovision → `DelegateArchive` anchor; the sandbox
-/// kill is the existing teardown hook's job). Best-effort like its siblings:
+/// finalization (`DelegateArchive` anchor plus the shared teardown's relay result).
+/// Relay revocation and runtime cleanup are owned by the verified teardown hook.
+/// Best-effort like its siblings:
 /// the chain tx is final — failures are LOUD in the returned summary + WARN
 /// logs, never swallowed, never able to fail the submit response.
 pub async fn finalize_for_confirmed_batch(
     state: &SharedState,
     session_omni: [u8; 32],
     call_data: &[u8],
+    teardown: &[agentkeys_protocol::RuntimeTeardownOutcome],
 ) -> Option<serde_json::Value> {
     let calls = decode_execute_batch(call_data).ok()?;
     let mut spawned = Vec::new();
@@ -1054,7 +1056,10 @@ pub async fn finalize_for_confirmed_batch(
                     continue;
                 };
                 if let Some(row) = state.pending_ceremonies.take_archive(dkh) {
-                    archived.push(finalize_archive(state, session_omni, row).await);
+                    let cleanup = teardown
+                        .iter()
+                        .find(|outcome| norm_omni(&outcome.device_key_hash) == norm_omni(dkh));
+                    archived.push(finalize_archive(session_omni, row, cleanup).await);
                 }
             }
             _ => {}
@@ -1293,43 +1298,17 @@ async fn finalize_spawn(
 }
 
 async fn finalize_archive(
-    state: &SharedState,
     session_omni: [u8; 32],
     row: PendingArchive,
+    cleanup: Option<&agentkeys_protocol::RuntimeTeardownOutcome>,
 ) -> serde_json::Value {
-    let mut gate_status = "not-configured".to_string();
-    let mut gate_error: Option<String> = None;
-    match crate::gate_admin::load_gate_admin_config() {
-        None => {}
-        Some(Err(e)) => {
-            gate_status = "misconfigured".into();
-            gate_error = Some(e);
-        }
-        Some(Ok(cfg)) => {
-            match crate::gate_admin::deprovision_delegate(&state.http, &cfg, &row.device_key_hash)
-                .await
-            {
-                Ok(disabled) => {
-                    gate_status = if disabled {
-                        "deprovisioned"
-                    } else {
-                        "not-provisioned"
-                    }
-                    .into();
-                }
-                Err(e) => {
-                    tracing::error!(
-                        device_key_hash = %row.device_key_hash,
-                        error = %e,
-                        "#427 archive: gate deprovisioning FAILED — the relay key stays \
-                         LIVE until disabled (re-run the archive or disable at the gate)"
-                    );
-                    gate_status = "failed".into();
-                    gate_error = Some(e);
-                }
-            }
-        }
-    }
+    let relay_revoked = cleanup.is_some_and(|outcome| outcome.relay_revoked);
+    let gate_status = if relay_revoked {
+        "deprovisioned"
+    } else {
+        "failed"
+    };
+    let gate_error = (!relay_revoked).then_some("relay_revocation_unconfirmed");
 
     let env = envelope_for(
         session_omni,

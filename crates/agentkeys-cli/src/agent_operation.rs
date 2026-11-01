@@ -36,6 +36,8 @@ pub struct AgentOperationRecord {
     pub action: AgentOperationKind,
     pub device_key_hash: String,
     pub actor_omni: Option<String>,
+    #[serde(default)]
+    pub resources_kept: bool,
     pub build: BuildAcceptUserOpResponse,
 }
 
@@ -68,6 +70,7 @@ impl AgentOperationJournal<'_> {
                 .as_str()
                 .map(canonical_hash)
                 .transpose()?,
+            resources_kept: response["resources_kept"].as_bool().unwrap_or(false),
             build,
         };
         let path = self.directory.join(format!("{operation_hash}.json"));

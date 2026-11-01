@@ -133,10 +133,14 @@ pub async fn deprovision_delegate(
     if !status.is_success() {
         return Err(format!("gate deprovision refused with {status}"));
     }
-    resp.json::<DisableKeyResponse>()
+    let response = resp
+        .json::<DisableKeyResponse>()
         .await
-        .map(|r| r.disabled)
-        .map_err(|e| format!("gate deprovision decode: {e}"))
+        .map_err(|e| format!("gate deprovision decode: {e}"))?;
+    if !response.key_id.eq_ignore_ascii_case(device_key_hash) {
+        return Err("model relay returned a different key identity".into());
+    }
+    Ok(response.disabled)
 }
 
 #[cfg(test)]
@@ -144,6 +148,77 @@ mod tests {
     use super::*;
     use std::collections::BTreeMap;
     use std::os::unix::fs::{symlink, PermissionsExt};
+
+    #[tokio::test]
+    async fn relay_revocation_requires_matching_success_and_recovers_after_failure() {
+        use axum::{
+            http::{HeaderMap, StatusCode},
+            routing::post,
+            Json, Router,
+        };
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+        let stage = Arc::new(AtomicUsize::new(0));
+        let handler_stage = stage.clone();
+        let router = Router::new().route(
+            "/v1/admin/keys/fixture/disable",
+            post(move |headers: HeaderMap| {
+                let stage = handler_stage.clone();
+                async move {
+                    assert_eq!(headers["authorization"], "Bearer synthetic-admin");
+                    match stage.load(Ordering::SeqCst) {
+                        0 => (
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            Json(serde_json::json!({"error":"synthetic-private-body"})),
+                        ),
+                        1 => (
+                            StatusCode::OK,
+                            Json(serde_json::json!({"key_id":"another-key","disabled":true})),
+                        ),
+                        2 => (
+                            StatusCode::OK,
+                            Json(serde_json::json!({"key_id":"fixture","disabled":true})),
+                        ),
+                        _ => (
+                            StatusCode::OK,
+                            Json(serde_json::json!({"key_id":"fixture","disabled":false})),
+                        ),
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let configuration = GateAdminConfig {
+            admin_url: endpoint.clone(),
+            admin_token: "synthetic-admin".into(),
+            turn_url: endpoint,
+            model_id: models::default_chat_model().into(),
+            delegate_budget_tokens: None,
+        };
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        for step in [0, 1] {
+            stage.store(step, Ordering::SeqCst);
+            let error = deprovision_delegate(&client, &configuration, "fixture")
+                .await
+                .unwrap_err();
+            assert!(
+                !error.contains("synthetic-private-body") && !error.contains("synthetic-admin")
+            );
+        }
+        stage.store(2, Ordering::SeqCst);
+        assert!(deprovision_delegate(&client, &configuration, "fixture")
+            .await
+            .unwrap());
+        stage.store(3, Ordering::SeqCst);
+        assert!(!deprovision_delegate(&client, &configuration, "fixture")
+            .await
+            .unwrap());
+        server.abort();
+    }
 
     #[test]
     fn protected_admin_source_is_explicit_and_partial_configuration_fails_closed() {
