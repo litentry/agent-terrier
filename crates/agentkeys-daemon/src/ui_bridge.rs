@@ -248,8 +248,6 @@ pub struct UiBridgeState {
     /// on chain with CAP_MINT. Enrollment metadata is separate from the
     /// explicitly injected request-signing device key.
     pub registered_master: RwLock<Option<RegisteredMaster>>,
-    /// Legacy pairing helper configuration; never used for registration, reset or revocation.
-    pub register_master_script: Option<String>,
     /// Resolved chain profile (deployed contract registry + explorer + RPC) the
     /// chain-info + audit-decode endpoints serve to the web UI (#153). Resolved
     /// from `$AGENTKEYS_CHAIN` (default local profile) at `build_state`.
@@ -626,7 +624,6 @@ pub fn build_router(state: SharedUiBridgeState, allowed_origin: &str) -> Router 
         .route("/v1/agent/pairing/claim", post(claim_pairing))
         .route("/v1/agent/pairing/decline", post(decline_pairing))
         .route("/v1/agent/pairing/ack", post(ack_pairing))
-        .route("/v1/agent/pairing/register", post(register_pairing))
         // #225 E7 — the Touch-ID-gated accept (browser K11-signs the userOpHash):
         .route("/v1/accept/build", post(accept_build_proxy))
         .route("/v1/accept/submit", post(accept_submit_proxy))
@@ -892,7 +889,6 @@ pub fn build_state(
     sandbox_bridge_token: Option<String>,
     audit_worker_url: Option<String>,
     master_device_key_hash: Option<String>,
-    register_master_script: Option<String>,
     master_session_store: Option<MasterSessionStore>,
     device_key: Option<Arc<DeviceKey>>,
 ) -> anyhow::Result<SharedUiBridgeState> {
@@ -983,7 +979,6 @@ pub fn build_state(
         master_device_key_hash,
         device_key,
         registered_master: RwLock::new(None),
-        register_master_script,
         chain_profile,
         master_session_store,
         master_session: RwLock::new(None),
@@ -5062,14 +5057,7 @@ async fn decline_pairing(
     forward_to_broker(&broker, "/v1/agent/pairing/decline", &j1, &body).await
 }
 
-/// POST /v1/agent/pairing/ack — mark a claimed pairing as BOUND so the broker drops
-/// it from the pending list. The E7 accept (`/v1/accept/{build,submit}`) registers the
-/// agent on-chain but its `SubmitAcceptRequest` carries no `request_id`, so the broker
-/// can't drop the rendezvous row itself — the master acks it here (the same
-/// `mark_bound` the legacy `register_pairing` path runs). Without this, an accepted
-/// request keeps reappearing in `GET /v1/agent/pairing/pending`. J1-gated, **no Touch
-/// ID** (acking isn't an on-chain mutation — the accept already did that). Forwards
-/// `{request_id}` to the broker's `/v1/agent/pending-bindings/ack`.
+/// Acknowledge an accepted binding through the authenticated broker endpoint.
 async fn ack_pairing(
     State(state): State<SharedUiBridgeState>,
     Json(body): Json<serde_json::Value>,
@@ -5081,14 +5069,6 @@ async fn ack_pairing(
         Some(s) if !s.j1.is_empty() => s.j1.clone(),
         _ => return pairing_err(StatusCode::FORBIDDEN, "no master session"),
     };
-    // #233 follow-up (real 2026-06-10 incident): the E7 accept path never
-    // inserted the freshly-bound agent into `state.actors` (only the legacy
-    // register_pairing did), and the post-restart chain sync is LATCHED — so an
-    // accepted agent stayed invisible on the actor page until a daemon restart.
-    // Capture the pending row (label, child omni, device hash) BEFORE the ack
-    // drops it, then surface the actor + un-latch the chain sync. Best-effort:
-    // a failed lookup never blocks the ack (the un-latch alone lets the next
-    // actor read reconcile the new device from chain, placeholder-labelled).
     let request_id = body
         .get("request_id")
         .and_then(|v| v.as_str())
@@ -5128,8 +5108,7 @@ async fn ack_pairing(
                 // #408: the accept proxy stashed the FINAL granted service names +
                 // device flag under this request_id — consume them so the actor
                 // row is named (channel chips, audit decode) and device-labelled.
-                // Fallback: the claim's requested_scope tokens (legacy register
-                // path, or a build that never ran through this daemon).
+                // A client may have submitted acceptance without this daemon.
                 let stashed = state
                     .accept_grants_by_request
                     .write()
@@ -5303,11 +5282,6 @@ async fn claim_pairing(
 
 pub(crate) fn pairing_err(status: StatusCode, msg: &str) -> axum::response::Response {
     (status, Json(serde_json::json!({ "error": msg }))).into_response()
-}
-
-#[derive(Debug, Deserialize)]
-struct RegisterPairingRequest {
-    request_id: String,
 }
 
 /// #225 / #164 E7 — the Touch-ID-gated accept (slice 4: daemon proxy). The browser
@@ -8233,248 +8207,6 @@ async fn preset_bundle_proxy(
         return pairing_err(StatusCode::BAD_REQUEST, "invalid preset id");
     }
     forward_broker_get(&broker, &format!("/v1/presets/{id}")).await
-}
-
-/// POST /v1/agent/pairing/register — the master approves a claimed agent: submit
-/// `registerAgentDevice` on chain for its sandbox-generated device key, then ack
-/// the broker so it clears from pending (#214, §10.2 P.2). The device fields come
-/// from the broker's AUTHORITATIVE pending binding (never the browser). Shells out
-/// to `heima-agent-create.sh --from-pubkey` (the sibling of the master register
-/// script), mirroring `register_master_device`. The Touch-ID scope grant is the
-/// separate `/v1/actors/:id/scope/grant` step (P.3).
-async fn register_pairing(
-    State(state): State<SharedUiBridgeState>,
-    Json(req): Json<RegisterPairingRequest>,
-) -> axum::response::Response {
-    let Some(broker) = state.broker_url.as_deref() else {
-        return pairing_err(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "no broker configured (--broker-url)",
-        );
-    };
-    let j1 = match state.onboarding_session.read().await.as_ref() {
-        Some(s) if !s.j1.is_empty() => s.j1.clone(),
-        _ => {
-            return pairing_err(
-                StatusCode::FORBIDDEN,
-                "no master session — verify email + register the master first",
-            )
-        }
-    };
-    // The agent-create script is the sibling of the master register script (both
-    // live in scripts/); reuse that config rather than a second flag.
-    let Some(master_script) = state.register_master_script.clone() else {
-        return pairing_err(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "on-chain register not configured (--register-master-script) — cannot register the agent device",
-        );
-    };
-    // `heima-agent-create.sh` canonically lives in `<repo>/scripts/`, while the
-    // master register script (`--register-master-script`) may be in
-    // `<repo>/e2e/scripts/` (dev.sh) — so it is NOT always a sibling. Try the
-    // sibling first (co-located case), then `<repo>/scripts/` derived from the
-    // master script path. (#214 register-pairing path-mismatch fix — a missing
-    // script otherwise surfaced as a confusing 502 on `accept pairing`.)
-    let master_path = std::path::Path::new(&master_script);
-    let agent_script_candidates = [
-        master_path
-            .parent()
-            .map(|d| d.join("heima-agent-create.sh")),
-        master_path
-            .parent()
-            .and_then(|d| d.parent())
-            .and_then(|d| d.parent())
-            .map(|repo| repo.join("scripts").join("heima-agent-create.sh")),
-    ];
-    let Some(agent_script) = agent_script_candidates
-        .into_iter()
-        .flatten()
-        .find(|p| p.exists())
-    else {
-        return pairing_err(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "heima-agent-create.sh not found (looked next to --register-master-script and in <repo>/scripts/)",
-        );
-    };
-    // Pull the authoritative binding from the broker (device fields, never the UI).
-    let bindings = match agentkeys_cli::agent_admin::agent_pending_value(broker, &j1).await {
-        Ok(v) => v,
-        Err(e) => {
-            return pairing_err(
-                StatusCode::BAD_GATEWAY,
-                &format!("broker pending-bindings: {e:#}"),
-            )
-        }
-    };
-    let row = bindings
-        .get("pending")
-        .and_then(|p| p.as_array())
-        .and_then(|rows| {
-            rows.iter()
-                .find(|r| {
-                    r.get("request_id").and_then(|v| v.as_str()) == Some(req.request_id.as_str())
-                })
-                .cloned()
-        });
-    let Some(row) = row else {
-        return pairing_err(
-            StatusCode::NOT_FOUND,
-            "no pending binding for that request_id (claim it first, or it was already registered)",
-        );
-    };
-    let field = |k: &str| {
-        row.get(k)
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("")
-            .to_string()
-    };
-    let label = field("label");
-    // The binding's `device_pubkey` holds the agent's EVM address (§10.2).
-    let agent_address = field("device_pubkey");
-    let actor_omni = field("child_omni");
-    let device_key_hash = field("device_key_hash");
-    let pop_sig = field("pop_sig");
-    if label.is_empty()
-        || agent_address.is_empty()
-        || actor_omni.is_empty()
-        || device_key_hash.is_empty()
-        || pop_sig.is_empty()
-    {
-        return pairing_err(
-            StatusCode::BAD_GATEWAY,
-            "pending binding is missing device fields (label/address/omni/key-hash/pop-sig)",
-        );
-    }
-    let tx = match register_agent_device(
-        &agent_script.to_string_lossy(),
-        &label,
-        &agent_address,
-        &actor_omni,
-        &device_key_hash,
-        &pop_sig,
-    )
-    .await
-    {
-        Ok(tx) => tx,
-        Err(e) => {
-            return pairing_err(
-                StatusCode::BAD_GATEWAY,
-                &format!("registerAgentDevice: {e}"),
-            )
-        }
-    };
-    // Clear it from the broker's pending list (best-effort — the chain write is
-    // the binding act; a failed ack just leaves a stale pending row).
-    if let Err(e) = agentkeys_cli::agent_admin::agent_ack(broker, &req.request_id, &j1).await {
-        tracing::warn!("ui-bridge: registered agent but broker ack failed: {e:#}");
-    }
-    tracing::info!(
-        target: "agentkeys.daemon.ui_bridge",
-        label = %label,
-        actor_omni = %actor_omni,
-        tx = tx.as_deref().unwrap_or("(already-registered)"),
-        "#214: agent device registered on chain (web pairing)"
-    );
-    // Surface the freshly-registered agent in the web UI (state.actors) so it
-    // appears in the devices view + becomes targetable by the existing scope-grant
-    // flow (P.3, /v1/actors/:id/scope/grant). Keyed by `agent-<label>`, mirroring
-    // the master actor's in-memory model (chain-backed reload is a separate concern).
-    let omni_hex = if actor_omni.starts_with("0x") {
-        actor_omni.clone()
-    } else {
-        format!("0x{actor_omni}")
-    };
-    let agent_actor = ApiActor {
-        runtime: None,
-        id: format!("agent-{label}"),
-        omni: omni_hex.clone(),
-        omni_hex,
-        label: label.clone(),
-        role: "agent".into(),
-        parent: Some("master".into()),
-        derivation: format!("//{label}"),
-        device: "sandbox device (§10.2)".into(),
-        // This path registers a SANDBOX delegate; stated, not inferred.
-        kind: Some("delegate".into()),
-        device_pubkey: agent_address.clone(),
-        last_active: "just paired".into(),
-        status: "ok".into(),
-        vendor: String::new(),
-        k11: false,
-        device_key_hash: Some(if device_key_hash.starts_with("0x") {
-            device_key_hash.clone()
-        } else {
-            format!("0x{device_key_hash}")
-        }),
-        scope: None,
-        scope_unknown_service_ids: None,
-        scope_channel_service_ids: None,
-        scope_capability_service_ids: None,
-        payment_cap: None,
-        time_window: None,
-        services: None,
-        account_address: None,
-        account_type: None,
-        preset_id: None,
-        memory_ns: None,
-    };
-    state
-        .actors
-        .write()
-        .await
-        .insert(agent_actor.id.clone(), agent_actor);
-    (
-        StatusCode::OK,
-        Json(serde_json::json!({ "ok": true, "label": label, "actor_omni": actor_omni, "tx_hash": tx })),
-    )
-        .into_response()
-}
-
-/// Shell out to `heima-agent-create.sh --from-pubkey` to submit `registerAgentDevice`
-/// for a SANDBOX-generated device key (the master never holds the agent key).
-/// Mirrors `register_master_device`. Returns the tx hash (None on idempotent skip).
-async fn register_agent_device(
-    script: &str,
-    label: &str,
-    agent_address: &str,
-    actor_omni: &str,
-    device_key_hash: &str,
-    pop_sig: &str,
-) -> Result<Option<String>, String> {
-    let output = tokio::process::Command::new("bash")
-        .arg(script)
-        .arg("--label")
-        .arg(label)
-        .arg("--agent-address")
-        .arg(agent_address)
-        .arg("--actor-omni")
-        .arg(actor_omni)
-        .arg("--device-key-hash")
-        .arg(device_key_hash)
-        .arg("--pop-sig")
-        .arg(pop_sig)
-        .output()
-        .await
-        .map_err(|e| format!("spawn {script}: {e}"))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let mut lines: Vec<&str> = stderr.lines().rev().take(6).collect();
-        lines.reverse();
-        return Err(format!(
-            "heima-agent-create.sh exited {}: {}",
-            output.status,
-            lines.join("\n")
-        ));
-    }
-    // The script logs to stderr + prints a final JSON line to stdout.
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let tx = stdout
-        .lines()
-        .rev()
-        .find(|l| l.trim_start().starts_with('{'))
-        .and_then(|l| serde_json::from_str::<serde_json::Value>(l).ok())
-        .and_then(|v| v.get("tx_hash").and_then(|t| t.as_str()).map(String::from));
-    Ok(tx)
 }
 
 async fn list_master_memory(State(state): State<SharedUiBridgeState>) -> axum::response::Response {
@@ -12361,7 +12093,6 @@ mod tests {
             None,
             None,
             None,
-            None,
         )
         .unwrap();
         *state.onboarding_session.write().await = Some(OnboardingSession {
@@ -12403,7 +12134,6 @@ mod tests {
             Some("https://broker.example".into()),
             None,
             84532,
-            None,
             None,
             None,
             None,
@@ -13048,7 +12778,7 @@ mod tests {
         assert_eq!(receipt.kept, vec!["cam-frontdoor"]);
     }
 
-    /// #214: the pairing routes (poll / claim / register) require a configured
+    /// #214: the pairing routes (poll / claim / acknowledge) require a configured
     /// broker — `make_state` has none, so every one fails closed with 503 rather
     /// than reaching the network. (Live broker behavior is the harness e2e.)
     #[tokio::test]
@@ -13072,11 +12802,9 @@ mod tests {
             StatusCode::SERVICE_UNAVAILABLE
         );
         assert_eq!(
-            register_pairing(
+            ack_pairing(
                 State(state),
-                Json(RegisterPairingRequest {
-                    request_id: "req-1".into(),
-                }),
+                Json(serde_json::json!({"request_id":"req-1"}))
             )
             .await
             .status(),
@@ -13160,38 +12888,11 @@ mod tests {
             None,
             None,
             None,
-            None,
         )
         .unwrap()
     }
 
     // ─── issue #220: master session persistence + rehydrate ─────────────────
-
-    /// Like [`make_state`] but with `register_master_script` set, so handlers that
-    /// shell out to chain helpers (e.g. `revoke_device` → `heima-device-revoke.sh`,
-    /// resolved as a sibling) can run against a fake script in tests.
-    fn make_state_with_script(register_master_script: String) -> SharedUiBridgeState {
-        build_state(
-            "localhost",
-            "http://localhost:3113",
-            "AgentKeys Test",
-            None,
-            None,
-            84532,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            Some(register_master_script),
-            None,
-            None,
-        )
-        .unwrap()
-    }
 
     /// A real-ish ui-bridge state (broker configured) with an optional on-disk
     /// master-session store — used by the #220 resolve/rehydrate tests.
@@ -13203,7 +12904,6 @@ mod tests {
             Some("https://broker.example".into()),
             None,
             84532,
-            None,
             None,
             None,
             None,
@@ -13558,7 +13258,6 @@ mod tests {
             Some(format!("http://{addr}")),
             None,
             84532,
-            None,
             None,
             None,
             None,
@@ -14024,7 +13723,6 @@ mod tests {
             None,
             None,
             Some("0xdkh".into()),
-            None,
             None,
             None,
         )
@@ -14577,25 +14275,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn revoke_confirmation_ignores_legacy_script_selection_and_preserves_active_state() {
-        let directory = tempfile::tempdir().unwrap();
-        let marker = directory.path().join("unexpected-helper-call");
-        std::fs::write(
-            directory.path().join("heima-device-revoke.sh"),
-            format!("#!/bin/sh\ntouch '{}'\nprintf '%s\\n' '{{\"ok\":true,\"skipped\":\"already-revoked\"}}'\n", marker.display()),
-        ).unwrap();
+    async fn revoke_confirmation_ignores_legacy_flag_and_preserves_active_state() {
         let endpoint = spawn_chain_stub().await;
         let mut state = make_state_real(None);
         set_chain_rpc(&mut state, &format!("http://{endpoint}"));
-        std::sync::Arc::get_mut(&mut state)
-            .unwrap()
-            .register_master_script = Some(
-            directory
-                .path()
-                .join("master.sh")
-                .to_string_lossy()
-                .into_owned(),
-        );
         seed_actor_async(&state).await;
         state
             .actors
@@ -14633,7 +14316,6 @@ mod tests {
         .expect_err("An active device must not be cleared through a helper");
         assert_eq!(denied.0, StatusCode::CONFLICT);
         assert_eq!(denied.1 .0.reason, "revoke-not-onchain");
-        assert!(!marker.exists());
         assert_eq!(
             serde_json::to_value(&*state.actors.read().await).unwrap(),
             before_actor
@@ -14669,7 +14351,6 @@ mod tests {
             .iter()
             .any(|event| event.kind == "device.revoked"));
         assert!(!state.caps.read().await.contains_key("agent-folotoy"));
-        assert!(!marker.exists());
     }
 
     #[tokio::test]
@@ -15227,7 +14908,6 @@ mod tests {
             None,
             None,
             None,
-            None,
         )
         .unwrap();
         *state.onboarding_session.write().await = Some(OnboardingSession {
@@ -15376,7 +15056,6 @@ mod tests {
             Some(format!("http://{addr}")),
             None,
             84532,
-            None,
             None,
             None,
             None,
@@ -15899,7 +15578,6 @@ mod tests {
             None,
             None,
             None,
-            None,
         )
         .unwrap();
         let resp = list_master_memory(State(state)).await;
@@ -16126,7 +15804,6 @@ mod tests {
             None,
             None,
             None,
-            None,
         )
         .unwrap();
         let evt = ApiAuditEvent {
@@ -16244,7 +15921,7 @@ mod tests {
 
     #[tokio::test]
     async fn finish_chain_register_requires_broker_and_session() {
-        let state = make_state_with_script("unavailable-operator-helper".into());
+        let state = make_state();
         let build = finish_chain_register(&state, "credential", None).await;
         assert!(build.register_userop_hash.is_none());
         assert!(build.chain_error.unwrap().contains("broker"));

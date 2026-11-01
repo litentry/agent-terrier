@@ -659,10 +659,6 @@ export interface AgentKeysClient {
   // label + declares its requested scope via the broker. The agent then appears
   // in listPairingRequests() awaiting on-chain register.
   claimPairing(input: { code: string; label: string; scope?: string }): Promise<Result<void>>;
-  // Approve a claimed agent (#214 §10.2 P.2) — the daemon submits registerAgentDevice
-  // on chain for the binding's request_id, then acks the broker. (The Touch-ID scope
-  // grant is the separate grantScope step, P.3.)
-  registerPairing(requestId: string): Promise<Result<void>>;
   // Decline a claimed pairing request (J1-gated, NO Touch ID) — the daemon tells the
   // broker to drop the pending rendezvous row so it stops reappearing on refresh.
   declinePairing(requestId: string): Promise<Result<void>>;

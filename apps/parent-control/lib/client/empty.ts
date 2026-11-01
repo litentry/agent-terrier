@@ -276,10 +276,6 @@ export class EmptyBackend implements AgentKeysClient {
     return this.disconnected();
   }
 
-  async registerPairing(_requestId: string): Promise<Result<void>> {
-    return this.disconnected();
-  }
-
   async declinePairing(_requestId: string): Promise<Result<void>> {
     return this.disconnected();
   }

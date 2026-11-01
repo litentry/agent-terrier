@@ -348,10 +348,6 @@ struct Args {
     #[arg(long, env = "AGENTKEYS_MASTER_DEVICE_KEY_HASH")]
     master_device_key_hash: Option<String>,
 
-    /// Legacy pairing helper entry point. Owner registration uses --broker-url.
-    #[arg(long, env = "AGENTKEYS_REGISTER_MASTER_SCRIPT")]
-    register_master_script: Option<String>,
-
     /// How long to wait for the operator to complete email-link click
     /// or OAuth2 callback before failing init.
     #[arg(long, default_value_t = 300)]
@@ -1391,7 +1387,6 @@ async fn run_ui_bridge_mode(args: Args) -> anyhow::Result<()> {
         args.sandbox_bridge_token.clone(),
         Some(args.audit_worker_url.clone()).filter(|u| !u.trim().is_empty()),
         args.master_device_key_hash.clone(),
-        args.register_master_script.clone(),
         master_session::MasterSessionStore::from_home_env(),
         device_key,
     )

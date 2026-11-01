@@ -904,13 +904,6 @@ export class MappedBackend implements AgentKeysClient {
     return { ok: true, data: undefined };
   }
 
-  // #214: approve a claimed agent → daemon registers it on chain + acks the broker.
-  async registerPairing(requestId: string): Promise<Result<void>> {
-    const r = await this.postJson<unknown>('/v1/agent/pairing/register', { request_id: requestId });
-    if (!r.ok) return r;
-    return { ok: true, data: undefined };
-  }
-
   // #225: decline a claimed pairing request — broker drops the pending row (J1, no Touch ID).
   async declinePairing(requestId: string): Promise<Result<void>> {
     const r = await this.postJson<unknown>('/v1/agent/pairing/decline', { request_id: requestId });

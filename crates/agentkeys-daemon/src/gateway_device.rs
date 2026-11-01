@@ -337,7 +337,6 @@ mod tests {
             None,
             None,
             None,
-            None,
         )
         .unwrap();
         let resp = gateway_device_status(State(state.clone())).await;

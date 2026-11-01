@@ -1,15 +1,6 @@
-//! Master-side §10.2 agent admin (issue #144, method A): claim agent-initiated
-//! pairing requests + pull pending bindings. These are the master's half of the
-//! agent-initiated ceremony — the agent half (request + retrieve) lives in the
-//! daemon's `--request-pairing` / `--retrieve-pairing` one-shots.
-//!
-//! Both commands are gated by the master's `J1` session bearer. The on-chain
-//! binding and scope grant (the "bind" and "grant" steps the operator approves
-//! with one Touch ID) stay in the chain helpers (`heima-agent-create.sh
-//! --from-pubkey` and `heima-scope-set.sh --webauthn`) because chain submission
-//! lives in shell + `cast`; those two helpers are the deterministic two-step
-//! split the test drives. `agent pending` is the production-flow rendezvous: the
-//! master discovers "agent-X wants to pair, wants `[scope]`" by pulling the broker.
+//! Owner-side pairing rendezvous: claim, inspect and acknowledge broker requests.
+//! Requests use the existing owner session. Binding and grants use the signed
+//! acceptance flow; this module does not discover keys or invoke signing helpers.
 
 use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
