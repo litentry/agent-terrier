@@ -15,6 +15,7 @@ python3 terrier test focused --component protocol
 python3 terrier test focused --component runtime
 python3 terrier test focused --component managed
 python3 terrier test focused --component broker
+python3 terrier test focused --component cli
 python3 terrier test focused --component signer
 python3 terrier test focused --component ui
 python3 terrier test core --component storage
@@ -33,3 +34,5 @@ The hosted core job restores a cache keyed by the toolchain and dependency manif
 Untrusted contributions run on GitHub-hosted infrastructure without private deployment credentials. A future personal-machine schedule must consume reviewed revisions only. This page describes public qualification; deployment checks belong to the deployment repository.
 
 Local, in the public checkout: `./terrier test focused --component relay` runs model-relay unit, process-configuration and HTTP-flow tests with deterministic upstream fixtures. `./terrier test focused --component bundler` selects transaction-service unit/HTTP/receipt checks. Real-model and real-chain qualification remain separate explicit commands.
+
+The CLI component includes native local-agent HTTP tests for redirect, proxy and remote-endpoint refusal plus receipt tests for partial completion. It starts no Docker container. The explicit [agent lifecycle qualifier](./local-agents.md#explicit-qualification) requires a reviewed preloaded image and local Docker socket.

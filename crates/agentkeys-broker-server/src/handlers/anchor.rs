@@ -250,8 +250,9 @@ pub async fn anchors_build(
             "device_key_hashes: nothing to seal",
         ));
     }
-    let (cfg, broker_sk) =
-        load_accept_config().map_err(|e| aerr(StatusCode::SERVICE_UNAVAILABLE, e))?;
+    let (cfg, broker_sk) = crate::handlers::accept::load_accept_build_config(&state.http)
+        .await
+        .map_err(|e| aerr(StatusCode::SERVICE_UNAVAILABLE, e))?;
     let Some(audit) = audit_contract(&cfg) else {
         return Err(aerr(
             StatusCode::SERVICE_UNAVAILABLE,

@@ -1352,6 +1352,7 @@ enum AgentAction {
 #[derive(Subcommand)]
 enum LocalAction {
     Credential(agentkeys_cli::local_data::CredentialOptions),
+    Agent(agentkeys_cli::local_agent::AgentOptions),
 }
 
 async fn cmd_chain(ctx: &CommandContext, action: &ChainAction) -> anyhow::Result<String> {
@@ -1779,6 +1780,11 @@ async fn main() {
         Commands::Local {
             action: LocalAction::Credential(options),
         } => agentkeys_cli::local_data::credential(&ctx, options)
+            .await
+            .and_then(|result| serde_json::to_string(&result).map_err(Into::into)),
+        Commands::Local {
+            action: LocalAction::Agent(options),
+        } => agentkeys_cli::local_agent::execute(&ctx, options)
             .await
             .and_then(|result| serde_json::to_string(&result).map_err(Into::into)),
         Commands::K11 { action } => cmd_k11(&ctx, action).await,
@@ -2279,6 +2285,11 @@ async fn main() {
             }
         }
         Err(err) => {
+            if let Some(incomplete) =
+                err.downcast_ref::<agentkeys_cli::local_agent::IncompleteOperation>()
+            {
+                println!("{}", incomplete.0);
+            }
             // {:#} prints the FULL anyhow context chain (e.g.
             // "memory.put: MCP error (http 200): ... 502 ... s3_put"), not just
             // the top context ("memory.put") — without it the real cause of a

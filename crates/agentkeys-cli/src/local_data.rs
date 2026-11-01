@@ -46,7 +46,7 @@ fn identity(value: &str) -> Result<[u8; 32]> {
         .map_err(|_| anyhow!("invalid local owner identity"))
 }
 
-fn load_session(
+pub(crate) fn load_session(
     options: &CredentialOptions,
     key: &DeviceKey,
     now: u64,

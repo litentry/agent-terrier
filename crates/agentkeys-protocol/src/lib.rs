@@ -2818,6 +2818,15 @@ pub struct SubmitAcceptUserOpResponse {
     pub ceremony: Option<serde_json::Value>,
 }
 
+/// Per-device cleanup evidence in a confirmed ceremony's `runtime_teardown` list.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeTeardownOutcome {
+    pub device_key_hash: String,
+    pub context_removed: bool,
+    pub runtime_stopped: bool,
+    pub error: Option<String>,
+}
+
 // ── #248 — on-chain K11-gated scope re-grant for an ALREADY-bound agent ──────
 //
 // The permissions panel's setScope becomes ONE `P256Account.executeBatch([setScope])`

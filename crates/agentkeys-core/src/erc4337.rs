@@ -918,6 +918,21 @@ pub fn pack_u128_pair(hi: u128, lo: u128) -> [u8; 32] {
     w
 }
 
+const GAS_QUOTE_MULTIPLIER: u128 = 2;
+
+pub fn quoted_gas_fees(quote: &str) -> Result<[u8; 32], String> {
+    let quantity = quote.strip_prefix("0x").ok_or("invalid gas quote")?;
+    if quantity.is_empty() || !quantity.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("invalid gas quote".into());
+    }
+    let price = u128::from_str_radix(quantity, 16).map_err(|_| "invalid gas quote")?;
+    let buffered_price = price
+        .checked_mul(GAS_QUOTE_MULTIPLIER)
+        .filter(|price| *price > 0)
+        .ok_or("gas quote is zero or overflows")?;
+    Ok(pack_u128_pair(buffered_price, buffered_price))
+}
+
 /// Split a packed `hi(16) ‖ lo(16)` word back into its two u128 halves —
 /// the inverse of [`pack_u128_pair`] (the bundler/broker RPC boundary uses
 /// the standard *unpacked* v0.7 JSON fields).
@@ -1791,6 +1806,26 @@ mod tests {
     fn pack_unpack_u128_pair_roundtrips() {
         let w = pack_u128_pair(1_500_000, 2_000_000);
         assert_eq!(unpack_u128_pair(&w), (1_500_000, 2_000_000));
+    }
+
+    #[test]
+    fn quoted_gas_fees_are_checked_and_buffered() {
+        assert_eq!(
+            unpack_u128_pair(&quoted_gas_fees("0x2a").unwrap()),
+            (84, 84)
+        );
+        for quote in [
+            "",
+            "42",
+            "0x",
+            "0x+1",
+            "0xz",
+            "0x0",
+            "0x80000000000000000000000000000000",
+            "0x100000000000000000000000000000000",
+        ] {
+            assert!(quoted_gas_fees(quote).is_err());
+        }
     }
 
     #[test]

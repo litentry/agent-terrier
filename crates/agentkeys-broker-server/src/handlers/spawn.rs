@@ -52,8 +52,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::handlers::accept::{
     aerr, bearer, call_entrypoint_nonce, call_operator_master_wallet, eth_address_has_code,
-    eth_call, load_accept_config, norm_omni, selector, AcceptConfig, BuildAcceptRequest,
-    SPONSOR_WINDOW_SECS,
+    eth_call, norm_omni, selector, AcceptConfig, BuildAcceptRequest, SPONSOR_WINDOW_SECS,
 };
 use crate::handlers::revoke::parse_device_probe;
 use crate::sponsored_accept::{
@@ -617,8 +616,9 @@ async fn auth_and_master(
     if norm_omni(&claims.agentkeys.omni_account) != norm_omni(operator_omni) {
         return Err(aerr(StatusCode::FORBIDDEN, "operator_mismatch"));
     }
-    let (cfg, broker_sk) =
-        load_accept_config().map_err(|e| aerr(StatusCode::SERVICE_UNAVAILABLE, e))?;
+    let (cfg, broker_sk) = crate::handlers::accept::load_accept_build_config(&state.http)
+        .await
+        .map_err(|e| aerr(StatusCode::SERVICE_UNAVAILABLE, e))?;
     let master_account =
         call_operator_master_wallet(&state.http, &cfg.rpc_url, &cfg.registry, operator_omni)
             .await
