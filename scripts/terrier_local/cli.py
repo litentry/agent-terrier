@@ -7,8 +7,8 @@ import sys
 from . import agent, chain, contracts, data, deployment, local_state, models, owner, services, stack, manager, test_lanes
 
 
-def main(argv=None):
-    parser = argparse.ArgumentParser(description="Agent Terrier local development tools")
+def build_parser():
+    parser = argparse.ArgumentParser(prog="terrier", description="Agent Terrier local development tools")
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("manage", help="Open the lightweight terminal manager for the local backend stack")
     stack_parser = commands.add_parser("stack", help="Compose the existing local chain and service controllers")
@@ -90,7 +90,11 @@ def main(argv=None):
     supervisor.add_argument("--anvil", required=True)
     service_supervisor = commands.add_parser("_serve-services", help=argparse.SUPPRESS)
     service_supervisor.add_argument("--bin-dir", type=Path, required=True)
-    arguments = parser.parse_args(argv)
+    return parser
+
+
+def main(argv=None):
+    arguments = build_parser().parse_args(argv)
     repository = Path(__file__).resolve().parents[2]
     try:
         if arguments.command == "manage":
