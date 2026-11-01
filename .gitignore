@@ -30,3 +30,5 @@ packages/agentkeys-dsh/lib/
 /crates/agentkeys-chain/out/
 /crates/agentkeys-chain/cache/
 /crates/agentkeys-chain/broadcast/
+
+/apps/device-display/src/routeTree.gen.ts
