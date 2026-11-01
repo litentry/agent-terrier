@@ -17,7 +17,9 @@
     "rust-toolchain.toml",
     "terrier",
     "packages/package.json",
-    "packages/package-lock.json"
+    "packages/package-lock.json",
+    "package.json",
+    "package-lock.json"
   ],
   "directories": [
     ".github",
