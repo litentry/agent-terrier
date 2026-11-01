@@ -46,7 +46,7 @@ The [local services guide](docs/wiki/local-services.md) covers `terrier services
 
 The [local agent image guide](docs/wiki/local-agent-image.md) covers the shared plugin composition, reproducible image build, fast process checks and real-model qualification through an explicit local-service connection with container networking disabled. Complete lifecycle and service composition remain under development.
 
-The [local agent guide](docs/wiki/local-agents.md) covers protected `terrier agent spawn/archive` commands, structured completion receipts and real-chain/Docker qualification. Archive retains application data; pending or incomplete operations exit nonzero.
+The [local agent guide](docs/wiki/local-agents.md) covers protected `terrier agent spawn/archive/receipt` commands, structured completion receipts and real-chain/Docker qualification. Archive retains application data; pending or incomplete operations exit nonzero.
 
 ## License
 

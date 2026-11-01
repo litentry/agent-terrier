@@ -35,6 +35,7 @@ RUST_COMPONENTS = {
     "daemon": [("daemon", "agentkeys-daemon", "--bin", "agentkeys-daemon", "")],
     "storage": [("storage", "agentkeys-local-store", "--lib", None, "")],
     "cli": [("cli", "agentkeys-cli", "--lib", None, ""),
+            ("cli-agent-ceremony", "agentkeys-cli", "--test", "agent_admin_mock", ""),
             ("cli-agent-transport", "agentkeys-cli", "--test", "local_agent_transport", "")],
 }
 SOURCE_COMMANDS = (

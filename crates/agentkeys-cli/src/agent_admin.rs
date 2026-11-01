@@ -389,6 +389,7 @@ pub async fn agent_spawn(
     k11_key_file: &str,
     rp_id: &str,
     session_bearer: &str,
+    journal: Option<&crate::agent_operation::AgentOperationJournal<'_>>,
 ) -> Result<String> {
     development.require_local_service(broker_url)?;
     use agentkeys_backend_client::protocol::{BuildSpawnUserOpRequest, BuildSpawnUserOpResponse};
@@ -432,6 +433,9 @@ pub async fn agent_spawn(
         &built.entry_point,
         built.chain_id,
     )?;
+    if let Some(journal) = journal {
+        journal.save(crate::agent_operation::AgentOperationKind::Spawn, &built)?;
+    }
     let submitted = software_sign_and_submit(
         development,
         &base,
@@ -480,6 +484,7 @@ pub async fn agent_archive(
     k11_key_file: &str,
     rp_id: &str,
     session_bearer: &str,
+    journal: Option<&crate::agent_operation::AgentOperationJournal<'_>>,
 ) -> Result<String> {
     development.require_local_service(broker_url)?;
     use agentkeys_backend_client::protocol::{
@@ -522,6 +527,9 @@ pub async fn agent_archive(
         &built.entry_point,
         built.chain_id,
     )?;
+    if let Some(journal) = journal {
+        journal.save(crate::agent_operation::AgentOperationKind::Archive, &built)?;
+    }
     let submitted = software_sign_and_submit(
         development,
         &base,
@@ -587,4 +595,38 @@ pub async fn agent_ack(broker_url: &str, request_id: &str, session_bearer: &str)
         return Err(anyhow!("agent ack failed: HTTP {status}: {text}"));
     }
     Ok(())
+}
+
+pub async fn agent_receipt(
+    development: &crate::development_signing::DevelopmentSigning,
+    broker_url: &str,
+    session_bearer: &str,
+    record: &crate::agent_operation::AgentOperationRecord,
+) -> Result<Value> {
+    development.require_local_service(broker_url)?;
+    let response = client()?
+        .post(format!(
+            "{}/v1/accept/receipt",
+            broker_url.trim_end_matches('/')
+        ))
+        .bearer_auth(session_bearer)
+        .json(
+            &agentkeys_backend_client::protocol::console_apps::AcceptReceiptRequest {
+                user_op: record.build.user_op.clone(),
+                context_docs: Vec::new(),
+            },
+        )
+        .send()
+        .await?;
+    if !response.status().is_success() {
+        return Err(RequestStatus(response.status().as_u16()).into());
+    }
+    let receipt: Value = response.json().await?;
+    anyhow::ensure!(
+        receipt["user_op_hash"]
+            .as_str()
+            .is_some_and(|value| value.eq_ignore_ascii_case(&record.build.user_op_hash)),
+        "receipt operation identity mismatch"
+    );
+    Ok(receipt)
 }

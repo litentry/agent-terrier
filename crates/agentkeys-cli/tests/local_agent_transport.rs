@@ -123,6 +123,8 @@ async fn native_agent_client_refuses_redirects_remote_services_and_ambient_proxi
                     .unwrap(),
                 "--broker-url",
                 endpoint,
+                "--operations-dir",
+                directory.path().to_str().unwrap(),
                 "spawn",
                 "--label",
                 "transport-test",

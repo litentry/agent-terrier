@@ -60,7 +60,7 @@ class LocalAgentQualification(LocalOwnerFixture):
             environment["AGENT_TERRIER_STATE_DIR"] = str(state)
             registry = state / "services/relay/keys.json"
 
-            def command(action, *arguments, name="alice", denial=None):
+            def command(action, *arguments, name="alice", denial=None, incomplete=False):
                 result = subprocess.run([sys.executable, str(REPOSITORY / "terrier"), "agent", action,
                     "--name", name, *arguments], env=environment, capture_output=True, text=True, timeout=150)
                 self.assertTrue(all(secret not in result.stdout + result.stderr for secret in secrets),
@@ -70,6 +70,13 @@ class LocalAgentQualification(LocalOwnerFixture):
                     self.assertIn(denial, result.stderr)
                     self.assertFalse(result.stdout.strip(), "pre-submission denial returned a receipt")
                     return None
+                if incomplete:
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("operation is incomplete", result.stderr)
+                    receipt = json.loads(result.stdout)
+                    self.assertTrue(receipt["chain_confirmed"])
+                    self.assertFalse(receipt["complete"])
+                    return receipt
                 self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
                 receipt = json.loads(result.stdout)
                 self.assertTrue(receipt["complete"] and receipt["chain_confirmed"])
@@ -113,6 +120,42 @@ class LocalAgentQualification(LocalOwnerFixture):
 
             created = command("spawn", "--label", "local-agent")
             device = created["device_key_hash"]
+            self.assertEqual(len(created["actor_omni"]), 66)
+            operation_path = state / "owners/alice/operations" / (created["user_op_hash"] + ".json")
+            operation = local_state.read_json(operation_path)
+            self.assertEqual(operation_path.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(operation["build"]["user_op"]["signature"], "0x")
+            self.assertTrue(all(secret not in operation_path.read_text() for secret in secrets))
+            before = snapshot()
+            passkey_path = state / "owners/alice/passkey.pem"
+            passkey = passkey_path.read_bytes()
+            passkey_path.unlink()
+            recovered = command("receipt", "--user-op-hash", created["user_op_hash"])
+            self.assertEqual(recovered, created)
+            self.assertFalse(passkey_path.exists(), "receipt recovery regenerated a signing key")
+            local_state.write_private(passkey_path, passkey)
+            for field, value, denial in [
+                ("development_only", False, "development record"),
+                ("operator_omni", bob_session["session"]["omni_account"], "another owner"),
+                ("broker_url", "http://127.0.0.1:1", "another broker"),
+                ("request_device_key_hash", "0x" + "00" * 32, "another request key"),
+            ]:
+                local_state.write_json(operation_path, dict(operation, **{field: value}))
+                command("receipt", "--user-op-hash", created["user_op_hash"], denial=denial)
+                self.assertTrue(snapshot() == before, "denied recovery changed chain, relay or runtime")
+            local_state.write_json(operation_path, operation)
+            operation_path.chmod(0o644)
+            command("receipt", "--user-op-hash", created["user_op_hash"], denial="owner-only")
+            operation_path.chmod(0o600)
+            foreign_directory = local_state.private_directory(state / "owners/bob/operations")
+            local_state.write_json(foreign_directory / operation_path.name, operation)
+            command("receipt", "--user-op-hash", created["user_op_hash"], name="bob", denial="another owner")
+            forged_binding = dict(operation,
+                operator_omni="0x" + bob_session["session"]["omni_account"].removeprefix("0x"),
+                request_device_key_hash=bob_session["device_key_hash"])
+            local_state.write_json(foreign_directory / operation_path.name, forged_binding)
+            command("receipt", "--user-op-hash", created["user_op_hash"], name="bob", denial="HTTP 403")
+            self.assertTrue(snapshot() == before, "receipt recovery changed confirmed transaction or runtime")
             containers = owned("container")
             self.assertEqual(len(containers), 1)
             container = json.loads(docker("inspect", containers[0]))[0]
@@ -138,6 +181,15 @@ class LocalAgentQualification(LocalOwnerFixture):
             self.assertEqual(owned("container"), [])
             self.assertIn(volume, owned("volume"))
             self.assertEqual(request(relay + "/v1/usage", bearer=relay_key["key"])[0], 401)
+            before = snapshot()
+            self.assertEqual(command("receipt", "--user-op-hash", archived["user_op_hash"]), archived)
+            self.assertTrue(snapshot() == before, "archive receipt recovery resubmitted an operation")
+            self.services(state, "stop")
+            self.services(state, "start")
+            before = snapshot()
+            restored = command("receipt", "--user-op-hash", archived["user_op_hash"], incomplete=True)
+            self.assertEqual(restored["user_op_hash"], archived["user_op_hash"])
+            self.assertTrue(snapshot() == before, "restart recovery changed chain or relay state")
             retained = docker("run", "--rm", "--pull=never", "--network=none", "--read-only",
                 "--cap-drop=ALL", "--security-opt=no-new-privileges", "--user=1000:1000",
                 "--label", "org.agent-terrier.runtime=" + namespace,
