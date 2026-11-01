@@ -25,6 +25,13 @@ class PublicContentsTests(unittest.TestCase):
         self.assertEqual(report["findings"], [])
         self.assertEqual(report["scanned_files"], 1)
 
+    def test_only_the_exact_public_wiki_remote_is_allowed(self):
+        base = "https://github.com/litentry/" + "agent-terrier"
+        self.assertEqual(self.check_text(base + ".wiki.git")["findings"], [])
+        for suffix in ("-other", ".wiki", ".wiki.git-other", ".wiki.git.backup"):
+            findings = self.check_text(base + suffix)["findings"]
+            self.assertEqual(findings[0]["rule"], "unapproved-project-link")
+
     def test_captured_deployment_inventory_is_denied_without_echoing_values(self):
         inventory = {
             "ResponseMetadata": {"RequestId": "synthetic-request", "Service": "synthetic-service", "Region": "synthetic-region"},

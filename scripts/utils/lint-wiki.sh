@@ -1,23 +1,5 @@
 #!/usr/bin/env bash
-# Lint docs/wiki/*.md for GitHub-Wiki rendering rules.
-#
-# GitHub Wiki renders each page's title from its FILENAME and copies the
-# markdown body verbatim (see .github/workflows/publish-wiki.yml — it is a raw
-# folder mirror, no transform). Two source patterns therefore render badly and
-# are forbidden:
-#
-#   1. YAML frontmatter   GitHub does NOT strip it; the `---...---` block
-#                         renders as a literal heading + sidebar-preview text.
-#   2. A leading `# H1`   duplicates the filename-derived page title and pushes
-#                         every section one level deeper in the right-sidebar
-#                         table of contents.
-#
-# Both are pure-source rules: a page body must OPEN on real content — a lead
-# paragraph, a **Status**/**Scope** block, a `>` note, or an `## H2` section.
-#
-# Exit 0 = clean, 1 = at least one violation. Read-only, deterministic, no LLM,
-# safe to re-run. Runnable locally (`bash scripts/utils/lint-wiki.sh`) and in CI
-# (.github/workflows/wiki-lint.yml). See AGENTS.md "Wiki-location policy".
+# Check canonical wiki sources before rendering and publication.
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"

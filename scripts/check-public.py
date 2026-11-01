@@ -24,7 +24,7 @@ RULES = {
     ),
     "personal-path": re.compile(r"/(?:Users|home)/(?!runner(?:/|$)|example(?:/|$))[A-Za-z0-9._-]+/"),
     "unapproved-project-link": re.compile(
-        r"github\.com/litentry/(?!agent-terrier(?:[/#?\s\"')]|$))[A-Za-z0-9_.-]+"
+        r"github\.com/litentry/(?!agent-terrier(?:\.wiki\.git)?(?:[/#?\s\"')]|$))[A-Za-z0-9_.-]+"
     ),
 }
 EXCEPTION_RULES = {"private-key", "cloud-access-key", "credential-literal", "personal-path"}
