@@ -75,7 +75,8 @@ class LocalStorageFixture(LocalOwnerFixture):
                            "--service", service)
                 self.owner(state, "unbind", "--name", "alice", "--enrollment-file", enrollment_file)
                 qualify("device_revoked")
-                self.assertEqual(os.stat(storage / database).st_mode & 0o777, 0o600)
+                if database is not None:
+                    self.assertEqual(os.stat(storage / database).st_mode & 0o777, 0o600)
             finally:
                 self.invoke(state, "stop")
 

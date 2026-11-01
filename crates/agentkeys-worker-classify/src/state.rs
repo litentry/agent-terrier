@@ -1,53 +1,28 @@
-//! Classifier worker process state. A COMPUTE gate (#178 §15.6): it needs the
-//! broker cap pubkey + the chain RPC/contracts for the SAME cap-verify chain the
-//! storage workers run (isolation layers 1-2), but NO S3 bucket / KEK (the effect
-//! is inference over the in-process catalog, not an encrypted S3 write).
-
-use std::sync::Arc;
-
-use anyhow::Context;
+use std::{sync::Arc, time::Duration};
 
 use crate::catalog::Catalog;
+use agentkeys_core::{capability_verify::AuthorityConfig, chain_profile::ChainProfile};
 
-#[derive(Debug, Clone)]
 pub struct ClassifyWorkerConfig {
-    pub broker_pubkey_pem: String,
-    pub chain_rpc_http: String,
-    pub registry_contract: String,
-    pub scope_contract: String,
-    pub epoch_contract: String,
+    pub authority: AuthorityConfig,
     pub chain_profile: String,
+    pub browser_origins: String,
 }
 
 impl ClassifyWorkerConfig {
-    pub fn from_env() -> anyhow::Result<Self> {
-        let chain_profile = std::env::var("AGENTKEYS_CHAIN")
-            .unwrap_or_else(|_| agentkeys_core::chain_profile::DEFAULT_PROFILE.to_string());
-        let profile_uc = chain_profile.to_uppercase().replace('-', "_");
-
-        let broker_pubkey_pem =
-            std::env::var("BROKER_CAP_PUBKEY_PEM").context("BROKER_CAP_PUBKEY_PEM must be set")?;
-        let chain_rpc_http = std::env::var("AGENTKEYS_CHAIN_RPC_HTTP")
-            .or_else(|_| std::env::var(format!("CHAIN_RPC_HTTP_{profile_uc}")))
-            .or_else(|_| std::env::var("HEIMA_RPC_HTTP"))
-            .context("AGENTKEYS_CHAIN_RPC_HTTP must be set")?;
-        let registry_contract = profile_env(&profile_uc, "SIDECAR_REGISTRY_ADDRESS")?;
-        let scope_contract = profile_env(&profile_uc, "SCOPE_CONTRACT_ADDRESS")?;
-        let epoch_contract = profile_env(&profile_uc, "K3_EPOCH_COUNTER_ADDRESS")?;
-        Ok(ClassifyWorkerConfig {
-            broker_pubkey_pem,
-            chain_rpc_http,
-            registry_contract,
-            scope_contract,
-            epoch_contract,
-            chain_profile,
+    pub fn local(
+        profile: &ChainProfile,
+        development: bool,
+        broker_public_key: String,
+        browser_origins: String,
+    ) -> anyhow::Result<Self> {
+        profile.require_local_development(development, None)?;
+        Ok(Self {
+            authority: AuthorityConfig::from_profile(profile, broker_public_key)?,
+            chain_profile: profile.name.clone(),
+            browser_origins,
         })
     }
-}
-
-fn profile_env(profile_uc: &str, base: &str) -> anyhow::Result<String> {
-    let key = format!("{base}_{profile_uc}");
-    std::env::var(&key).with_context(|| format!("{key} must be set"))
 }
 
 pub struct ClassifyWorkerState {
@@ -59,11 +34,56 @@ pub struct ClassifyWorkerState {
 pub type SharedClassifyWorkerState = Arc<ClassifyWorkerState>;
 
 impl ClassifyWorkerState {
-    pub fn build(config: ClassifyWorkerConfig) -> Self {
-        ClassifyWorkerState {
+    pub fn build(config: ClassifyWorkerConfig) -> anyhow::Result<Self> {
+        Ok(Self {
             config,
-            http: reqwest::Client::new(),
+            http: reqwest::Client::builder()
+                .no_proxy()
+                .redirect(reqwest::redirect::Policy::none())
+                .timeout(Duration::from_secs(30))
+                .build()?,
             catalog: Catalog::bundled(),
-        }
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agentkeys_core::chain_profile::{ChainKind, ContractInfo};
+    use p256::pkcs8::{EncodePublicKey, LineEnding};
+
+    #[test]
+    fn local_classifier_requires_development_profile_contracts_and_valid_issuer() {
+        let signer = p256::SecretKey::random(&mut rand_core::OsRng);
+        let public = signer
+            .public_key()
+            .to_public_key_pem(LineEnding::LF)
+            .unwrap();
+        let mut profile = ChainProfile::load_builtin("anvil").unwrap();
+        let configured = |profile: &ChainProfile, enabled| {
+            ClassifyWorkerConfig::local(profile, enabled, public.clone(), String::new())
+        };
+        assert!(configured(&profile, true).is_err());
+        profile.contracts = ["SidecarRegistry", "AgentKeysScope", "K3EpochCounter"]
+            .iter()
+            .enumerate()
+            .map(|(index, name)| ContractInfo {
+                name: name.to_string(),
+                address: format!("0x{:040x}", index + 1),
+                purpose: String::new(),
+                deployed_at: String::new(),
+            })
+            .collect();
+        assert!(configured(&profile, true).is_ok());
+        assert!(configured(&profile, false).is_err());
+        assert!(
+            ClassifyWorkerConfig::local(&profile, true, "invalid".into(), String::new()).is_err()
+        );
+        profile.chain_kind = ChainKind::EthereumL1;
+        assert!(configured(&profile, true).is_err());
+        profile.chain_kind = ChainKind::LocalDev;
+        profile.rpc.http = "http://192.0.2.1".into();
+        assert!(configured(&profile, true).is_err());
     }
 }

@@ -3,7 +3,7 @@ license.workspace = true
 name = "agentkeys-worker-classify"
 version = "0.1.0"
 edition = "2021"
-description = "Classifier-service worker (#178 §15.6 / #207 items 2-3) — a COMPUTE gate (COMPILE + TAG); no S3 bucket"
+description = "Authorized local catalog classification"
 
 [[bin]]
 name = "agentkeys-worker-classify"
@@ -16,10 +16,6 @@ path = "src/lib.rs"
 [dependencies]
 agentkeys-core = { workspace = true }
 agentkeys-protocol = { workspace = true }
-# Reuse the shared cap-verify chain + error helpers from the credentials
-# worker. The classifier is a COMPUTE gate (#178 §15.6): same cap + chain-verify
-# (isolation layers 1-2) as the storage workers, but the effect is inference
-# (catalog lookup), NOT an S3 touch — so NO aws-config / aws-sdk-s3 / KEK here.
 agentkeys-worker-creds = { path = "../agentkeys-worker-creds" }
 agentkeys-catalog = { path = "../agentkeys-catalog" }
 axum = { version = "0.7", features = ["json"] }
@@ -34,4 +30,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 clap = { version = "4", features = ["derive", "env"] }
 
 [dev-dependencies]
+p256 = { version = "0.13", features = ["pkcs8", "pem", "ecdsa"] }
+rand_core = { version = "0.6", features = ["std"] }
 tokio = { workspace = true }

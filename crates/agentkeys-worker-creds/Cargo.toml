@@ -40,6 +40,7 @@ aes-gcm = "0.10"
 clap = { version = "4", features = ["derive", "env"] }
 
 [dev-dependencies]
+agentkeys-worker-classify = { path = "../agentkeys-worker-classify" }
 agentkeys-backend-client = { workspace = true }
 agentkeys-web-core = { workspace = true }
 agentkeys-worker-channel = { path = "../agentkeys-worker-channel" }
