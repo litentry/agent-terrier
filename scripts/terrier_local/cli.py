@@ -41,17 +41,24 @@ def main():
     credential_parser.add_argument("service")
     credential_parser.add_argument("--name", required=True, help="Local owner name")
     credential_parser.add_argument("--secret-stdin", action="store_true", help="Read exact UTF-8 input for store")
-    agent_parser = commands.add_parser("agent", help="Create or archive local agents with protected development keys")
+    agent_parser = commands.add_parser("agent", help="Manage local agents and call their authenticated bridge")
     agent_commands = agent_parser.add_subparsers(dest="action", required=True)
-    for action in ("spawn", "archive", "receipt"):
+    for action in ("spawn", "archive", "receipt", "bridge"):
         operation = agent_commands.add_parser(action)
         operation.add_argument("--name", required=True, help="Existing local owner name")
-        if action != "receipt":
+        if action in ("spawn", "archive"):
             operation.add_argument("--memory-ns", default="")
         if action == "spawn":
             operation.add_argument("--label", required=True)
             operation.add_argument("--preset-id", default="")
             operation.add_argument("--memory-inherited", action="store_true")
+        elif action == "bridge":
+            operation.add_argument("--device-key-hash", required=True)
+            operation.add_argument("--sandbox-id")
+            operation.add_argument("--path", required=True, help="Existing broker-allowlisted route")
+            operation.add_argument("--method", choices=["GET", "POST"], default="POST")
+            operation.add_argument("--json-stdin", action="store_true")
+            operation.add_argument("--timeout-seconds", type=int)
         elif action == "archive":
             operation.add_argument("--device-key-hash", required=True)
         else:

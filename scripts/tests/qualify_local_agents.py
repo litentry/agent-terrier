@@ -122,6 +122,31 @@ class LocalAgentQualification(LocalOwnerFixture):
             created = command("spawn", "--label", "local-agent")
             device = created["device_key_hash"]
             self.assertEqual(len(created["actor_omni"]), 66)
+            def bridge(path, method="GET", body=None, name="alice", denial=None):
+                arguments = [sys.executable, str(REPOSITORY / "terrier"), "agent", "bridge", "--name", name,
+                    "--device-key-hash", device, "--path", path, "--method", method]
+                if body is not None:
+                    arguments.append("--json-stdin")
+                result = subprocess.run(arguments, input=json.dumps(body) if body is not None else None,
+                    env=environment, capture_output=True, text=True, timeout=30)
+                self.assertTrue(all(secret not in result.stdout + result.stderr for secret in secrets))
+                if denial:
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn(denial, result.stderr)
+                    self.assertFalse(result.stdout)
+                    return None
+                self.assertEqual(result.returncode, 0, result.stderr)
+                return json.loads(result.stdout)["response"]
+
+            before = snapshot()
+            bridge("/v1/jobs", name="bob", denial="HTTP 409")
+            bridge("/v1/sandbox/mgmt/session/export", denial="HTTP 400")
+            self.assertEqual(snapshot(), before, "denied bridge call changed chain, relay or runtime")
+            self.assertEqual(bridge("/v1/jobs"), {"jobs": []})
+            jobs = [{"id": "synthetic-cli-job"}]
+            self.assertEqual(bridge("/v1/jobs", "POST", {"jobs": jobs})["jobs"], jobs)
+            self.assertEqual(bridge("/v1/jobs")["jobs"], jobs)
+            bridge("/v1/jobs", "POST", {"jobs": []})
             operation_path = state / "owners/alice/operations" / (created["user_op_hash"] + ".json")
             operation = local_state.read_json(operation_path)
             self.assertEqual(operation_path.stat().st_mode & 0o777, 0o600)

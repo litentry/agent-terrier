@@ -1,3 +1,4 @@
+use std::io::Read;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use agentkeys_backend_client::protocol::RuntimeTeardownOutcome;
@@ -49,6 +50,21 @@ pub enum AgentAction {
     Receipt {
         #[arg(long)]
         operation_file: String,
+    },
+    /// Call an existing broker-allowlisted agent route without a browser.
+    Bridge {
+        #[arg(long)]
+        device_key_hash: String,
+        #[arg(long)]
+        sandbox_id: Option<String>,
+        #[arg(long)]
+        path: String,
+        #[arg(long, default_value = "POST", value_parser = ["GET", "POST"])]
+        method: String,
+        #[arg(long, help = "Read the route's JSON object body from stdin")]
+        json_stdin: bool,
+        #[arg(long, default_value_t = agent_admin::BRIDGE_TIMEOUT_SECONDS, value_parser = clap::value_parser!(u64).range(1..=600))]
+        timeout_seconds: u64,
     },
 }
 
@@ -241,6 +257,72 @@ pub async fn execute(context: &CommandContext, options: &AgentOptions) -> Result
                 )
                 .await,
             )
+        }
+        AgentAction::Bridge {
+            device_key_hash,
+            sandbox_id,
+            path,
+            method,
+            json_stdin,
+            timeout_seconds,
+        } => {
+            ensure!(
+                hash(&json!(device_key_hash)).is_some(),
+                "invalid device key hash"
+            );
+            ensure!(
+                !*json_stdin || method == "POST",
+                "--json-stdin requires POST"
+            );
+            let body = if *json_stdin {
+                let mut encoded = zeroize::Zeroizing::new(Vec::new());
+                std::io::stdin()
+                    .take(agent_admin::MAX_BRIDGE_JSON_BYTES as u64 + 1)
+                    .read_to_end(&mut encoded)?;
+                ensure!(
+                    encoded.len() <= agent_admin::MAX_BRIDGE_JSON_BYTES,
+                    "bridge request exceeds size limit"
+                );
+                let body: Value = serde_json::from_slice(&encoded)
+                    .map_err(|_| anyhow!("bridge request body must be a JSON object"))?;
+                ensure!(
+                    body.is_object(),
+                    "bridge request body must be a JSON object"
+                );
+                ensure!(
+                    body.get("stream") != Some(&Value::Bool(true)),
+                    "the broker bridge supports JSON responses; use stream=false"
+                );
+                Some(body)
+            } else {
+                None
+            };
+            let request = agentkeys_backend_client::protocol::BridgeProxyBody {
+                operator_omni: options.operator_omni.clone(),
+                device_key_hash: device_key_hash.clone(),
+                sandbox_id: sandbox_id.clone(),
+                method: Some(method.clone()),
+                path: path.clone(),
+                body,
+            };
+            let response = agent_admin::agent_bridge(
+                &development,
+                &options.broker_url,
+                bearer,
+                &request,
+                *timeout_seconds,
+            )
+            .await
+            .map_err(|error| {
+                if let Some(status) = error.downcast_ref::<agent_admin::RequestStatus>() {
+                    anyhow!("local agent bridge request failed (HTTP {})", status.0)
+                } else {
+                    anyhow!("local agent bridge request failed; check local services")
+                }
+            })?;
+            return Ok(
+                json!({"development_only":true,"action":"bridge","device_key_hash":device_key_hash,"response":response}),
+            );
         }
         AgentAction::Receipt { operation_file } => {
             let record = AgentOperationRecord::load(operation_file, &journal, &development)?;
