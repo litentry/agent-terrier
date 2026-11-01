@@ -1,0 +1,52 @@
+[package]
+license.workspace = true
+name = "agentkeys-worker-channel-weixin"
+version = "0.1.0"
+edition = "2021"
+description = "WeChat gateway worker (#407 / docs/spec/agent-channel-decoupling.md §7) — the household bot custody + contact registry + L3 PEP + /alias routing"
+
+[[bin]]
+name = "agentkeys-worker-channel-weixin"
+path = "src/main.rs"
+
+# #722 — operator-run: the router's labeled eval against a System One server.
+[[bin]]
+name = "router-eval"
+path = "src/bin/router_eval.rs"
+
+[lib]
+name = "agentkeys_worker_channel_weixin"
+path = "src/lib.rs"
+
+[dependencies]
+# The gateway is a PER-TRANSPORT worker (spec §14.4). It reuses the durable audit
+# emitter from the creds worker and the contact/L3 wire types from the protocol
+# crate; it custodies the ONE WeChat bot credential the #384 gate-custody way.
+agentkeys-core = { workspace = true }
+agentkeys-protocol = { workspace = true }
+agentkeys-worker-creds = { path = "../agentkeys-worker-creds" }
+# #667 — the gateway is a DEVICE ACTOR: channel caps minted as its own K10 (the
+# one shared cap-mint client; PoP-signed).
+agentkeys-backend-client = { workspace = true }
+axum = { version = "0.7", features = ["json"] }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+reqwest = { version = "0.12", features = ["json"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+hex = "0.4"
+sha2 = "0.10" # bot fingerprint keying the iLink state file (cursor + reply tokens are per bot)
+base64 = "0.22"
+sha1 = "0.10"
+sha3 = "0.10"
+# #667 — iLink media originals are AES-128-ECB encrypted on the CDN.
+aes = "0.8"
+clap = { version = "4", features = ["derive", "env"] }
+# Terminal QR render for the iLink `--login` ceremony (no image features).
+qrcode = { version = "0.14", default-features = false }
+
+[dev-dependencies]
+tokio = { workspace = true }

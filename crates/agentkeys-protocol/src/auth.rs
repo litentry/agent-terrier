@@ -1,0 +1,152 @@
+use serde::{Deserialize, Serialize};
+use ts_rs::TS;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EmailRequest {
+    pub email: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_ip: Option<String>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct EmailChallenge {
+    pub request_id: String,
+    #[ts(type = "number")]
+    pub expires_in_seconds: u64,
+    pub poll_url: String,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum EmailStatus {
+    Pending,
+    Verified {
+        session_jwt: String,
+        omni_account: String,
+        expires_at: u64,
+    },
+    Failed {
+        reason: String,
+    },
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WalletStart {
+    pub address: String,
+    pub chain_id: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_ip: Option<String>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WalletChallenge {
+    pub request_id: String,
+    pub siwe_message: String,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WalletVerify {
+    pub request_id: String,
+    pub signature: String,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct MasterSession {
+    pub session_jwt: String,
+    pub omni_account: String,
+    pub wallet_address: String,
+    #[ts(type = "number")]
+    pub expires_at: u64,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct MasterSessionInfo {
+    pub omni_account: String,
+    pub wallet_address: String,
+    #[ts(type = "number")]
+    pub expires_at: u64,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LoginConfig {
+    pub chain_id: String,
+    pub signer_url: String,
+    pub email_allowlist_enabled: bool,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeriveAddressRequest {
+    pub omni_account: String,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SignMessageRequest {
+    pub omni_account: String,
+    pub message_hex: String,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DerivedAddress {
+    pub address: String,
+    pub key_version: u8,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SignedMessage {
+    pub address: String,
+    pub signature: String,
+    pub key_version: u8,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WalletLink {
+    pub identity_type: String,
+    pub identity_value: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OidcJwtResponse {
+    pub jwt: String,
+    pub wallet: String,
+    pub expiration: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SignTypedDataRequest<T> {
+    pub omni_account: String,
+    pub typed_data: T,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SignedTypedData {
+    pub signature: String,
+    pub address: String,
+    pub primary_type_hash: String,
+    pub domain_separator: String,
+    pub digest: String,
+    pub key_version: u8,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeriveDeviceRequest {
+    pub actor_omni: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DerivedDevice {
+    pub address: String,
+    pub device_key_hash: String,
+    pub pop_sig: String,
+    pub key_version: u8,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SignDeviceCapPopRequest {
+    pub actor_omni: String,
+    pub operator_omni: String,
+    pub service: String,
+    pub op: String,
+    pub data_class: String,
+    pub client_nonce: String,
+    pub client_ts: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SignedDeviceCapPop {
+    pub signature: String,
+    pub address: String,
+    pub device_key_hash: String,
+    pub key_version: u8,
+}

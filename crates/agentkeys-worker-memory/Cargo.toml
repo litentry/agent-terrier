@@ -1,0 +1,27 @@
+[package]
+license.workspace = true
+name = "agentkeys-worker-memory"
+version = "0.1.0"
+edition = "2021"
+description = "Scoped encrypted memory and proposal inbox worker"
+
+[[bin]]
+name = "agentkeys-worker-memory"
+path = "src/main.rs"
+
+[lib]
+name = "agentkeys_worker_memory"
+path = "src/lib.rs"
+
+[dependencies]
+agentkeys-worker-creds = { path = "../agentkeys-worker-creds" }
+agentkeys-core = { workspace = true }
+agentkeys-protocol = { path = "../agentkeys-protocol" }
+axum = { version = "0.7", features = ["json"] }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+base64 = "0.22"
+clap = { version = "4", features = ["derive", "env"] }
+

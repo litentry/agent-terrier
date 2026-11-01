@@ -1,0 +1,34 @@
+The public core uses the concrete interfaces below. Local implementations are part of this repository; a downstream integration implements the same contract without adding deployment discovery, credentials or provider selection to the shared core. There is no general plugin loader or promise of compatibility between arbitrary development revisions.
+
+## Canonical interfaces
+
+| Boundary | One contract owner | Local implementation and required behavior |
+| --- | --- | --- |
+| Agent lifecycle and image identity | [`SandboxRuntime`](../../crates/agentkeys-runtime/src/sandbox_backend.rs) | The Docker controller enforces device/actor ownership, serializes creation, supplies explicit service endpoints and preserves state on ordinary teardown. A preloaded image is required. See [image requirements](./local-agent-image.md). |
+| Object access and authorization | [`ObjectStore`](../../crates/agentkeys-core/src/object_store.rs) and [`ObjectRequest`/`ObjectResponse`](../../crates/agentkeys-protocol/src/object_store.rs) | The local object service uses a separate database for each data class. Every request independently checks signature, actor proof, current chain authority and the operation/key boundary. Compare-and-swap and create-only writes retain their atomic behavior. See [storage](./local-storage.md). |
+| Wallet and device signing | [`auth` wire types](../../crates/agentkeys-protocol/src/auth.rs) and [`SignerClient`/`DeviceSignerClient`](../../crates/agentkeys-core/src/signer_client.rs) | The explicitly development-only signer retains keys locally. Native clients, browser clients and handlers share response types; missing, noninteger or out-of-range key versions fail rather than defaulting or truncating. Request authorization and cryptographic proof checks remain independent of schema parsing. |
+| Local inference and caller provisioning | [`model_config`](../../crates/agentkeys-protocol/src/model_config.rs), [`model_relay`](../../crates/agentkeys-protocol/src/model_relay.rs), [`model_runtime`](../../crates/agentkeys-protocol/src/model_runtime.rs) | One pinned [model recipe](../../presets/local-models.json) supplies model IDs, dimensions and defaults. The authenticated relay provisions/revokes callers and passes their configured local requests. There is no automatic hosted fallback. See [model qualification](./local-models.md). |
+| Runtime bootstrap and persistent layout | [`RuntimeBootstrap`](../../crates/agentkeys-runtime/src/managed_agent.rs), [`runtime_layout`](../../crates/agentkeys-protocol/src/runtime_layout.rs) | Explicit bounded bootstrap input carries the active local chain profile and permitted runtime fields. Unsupported bootstrap versions and unknown fields fail. The state layout is generated for image consumers from the protocol owner. |
+| Local composition | [`services.py`](../../scripts/terrier_local/services.py), composed by [`stack.py`](../../scripts/terrier_local/stack.py) | One supervisor owns configured services, exact endpoints, original keys and saved configuration. The CLI and terminal manager call it; adapters do not introduce another supervisor or credential store. |
+
+Optional speech uses the existing `SpeechBackend` interface; the public executable has no real speech implementation and returns an explicit unavailable result. Development email uses the broker's `EmailSender` interface and local outbox. These are separate from the qualified chat/tool/stream/embedding recipe.
+
+The public broker has no cloud credential-exchange routes or role/region configuration. Storage clients use signed capabilities directly. OIDC identity tokens contain neutral actor/wallet claims; `BROKER_OIDC_AUDIENCE` selects their recipient and defaults to the configured issuer. A downstream deployment owns any provider-specific claim translation and exchange service. These are deliberate interface removals requiring coordinated downstream adoption.
+
+An optional channel wake integration configures `BROKER_CHANNEL_WAKE_TOKEN_FILE` with the same protected local file supplied to the channel worker's `--wake-token-file`. Both consumers reject unsafe files; an empty or missing configured file fails startup. The broker still verifies current on-chain registration before creating an agent. The supervisor does not yet configure this wake integration automatically.
+
+## Versioning and compatibility
+
+For this development release, pin the source commit, Cargo/npm lockfiles, image identity and model recipe together. Package versions alone do not identify a qualified combination. A downstream adapter must compile against that exact interface revision and pass its contract checks before adoption. Do not reuse production identities in local acceptance.
+
+- Change wire definitions in `agentkeys-protocol` first. Update generated consumers and committed fixtures through their owners in the same change. Signed capability field/byte changes require an explicit coordinated migration; serialization compatibility is part of signature verification.
+- Runtime bootstrap versioning is owned by `BOOTSTRAP_VERSION`; the local transport checks its protocol identifier at startup. An incompatible image requires a coordinated host/image update and real Docker qualification. A health response alone does not prove application compatibility.
+- Signer `key_version` identifies the derivation domain, not the HTTP schema version. A response must carry a valid byte value. It must never be synthesized from a missing field or truncated from a larger integer. Existing address/signature and actor-binding checks still apply.
+- Local state migration is owned by each controller's manifest/database version. Preserve existing keys; a missing original key is an error. Unsupported state is refused rather than silently recreated. Contract deployment versioning remains owned by the chain package's `VERSION` and active profile.
+- Adding an optional field is compatible only when the old and new consumers' tested decoding policies permit it. Required fields, new enum variants, changed defaults and authorization behavior need explicit compatibility evidence. Do not infer compatibility merely because a JSON request parses.
+
+## Verify a change
+
+Local, from the prepared public checkout, use the [CLI test lanes](./test-lanes.md): `./terrier test affected --changed-file crates/agentkeys-core/src/signer_client.rs` for changed-source coverage (supply every changed path), `terrier test focused --component signer` for signer routes/startup, and explicit services/storage/Docker/model qualification for the adapter boundary touched. Real model and browser acceptance remain distinct from deterministic test doubles.
+
+This page defines ownership and compatibility policy. It does not certify the remaining browser, application-memory, clean-install or complete release gates in [epic #1](https://github.com/litentry/agent-terrier/issues/1).

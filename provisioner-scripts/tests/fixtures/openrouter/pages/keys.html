@@ -1,0 +1,16 @@
+<!DOCTYPE html>
+<html>
+<head><title>API Keys</title></head>
+<body>
+  <h1>API Keys</h1>
+  <button id="create-key-btn">Create Key</button>
+  <div id="key-container" style="display:none;">
+    <span data-testid="new-api-key">sk-or-v1-testvalid123456789</span>
+  </div>
+  <script>
+    document.getElementById('create-key-btn').addEventListener('click', function() {
+      document.getElementById('key-container').style.display = 'block';
+    });
+  </script>
+</body>
+</html>

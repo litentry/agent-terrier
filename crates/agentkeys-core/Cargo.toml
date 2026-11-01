@@ -1,0 +1,51 @@
+[package]
+license.workspace = true
+name = "agentkeys-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+agentkeys-web-core = { workspace = true }
+agentkeys-protocol = { workspace = true }
+agentkeys-types = { workspace = true }
+# The no_std K10 crypto core (secp256k1/EIP-191/keccak), shared byte-for-byte
+# with the ESP32 firmware. device_crypto re-exports it (issue #367 anti-drift).
+agentkeys-device-core = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+ciborium = "0.2"
+hmac = "0.12"
+sha2 = "0.10"
+p256 = { version = "0.13", features = ["pkcs8", "pem", "ecdsa"] }
+hex = "0.4"
+reqwest = { version = "0.12", features = ["json"] }
+base64 = "0.22"
+tokio = { workspace = true }
+keyring = "2"
+anyhow = { workspace = true }
+libc = "0.2"
+zeroize = "1"
+
+rand = "0.8"
+# Issue #82 — ERC-7730 clear-signing + EIP-712 typed-data hashing live in
+# `clear_signing/`. k256 is needed for the optional in-process signing path
+# (tests, CLI preview); sha3 for keccak256 in the EIP-712 encoder.
+k256 = { version = "0.13", features = ["ecdsa", "sha2"] }
+sha3 = "0.10"
+# Issue #144 — device_crypto keygen (SigningKey::random). Same rand_core version
+# as the CLI/broker so the workspace lock is unchanged.
+rand_core = { version = "0.6", features = ["std"] }
+
+[dev-dependencies]
+tempfile = "3"
+agentkeys-mock-server = { path = "../agentkeys-mock-server" }
+# #322 no-drift guard: a test asserts the classifier dataset's operation
+# allowlist (`agentkeys_catalog::validate::LANDED_OPERATIONS`) stays a subset of
+# the canonical op_kind labels owned here. No cycle: catalog doesn't depend on core.
+agentkeys-catalog = { path = "../agentkeys-catalog" }
+axum = { version = "0.7", features = ["json"] }
+rusqlite = { version = "0.31", features = ["bundled"] }
+rand_core = { version = "0.6", features = ["std"] }
+getrandom = "0.2"

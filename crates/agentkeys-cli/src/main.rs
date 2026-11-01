@@ -1,0 +1,2309 @@
+use agentkeys_cli::{
+    cmd_approve, cmd_feedback, cmd_inbox_list, cmd_inbox_provision, cmd_init_with_force,
+    cmd_provision, cmd_read, cmd_revoke, cmd_run, cmd_scope, cmd_signer_derive,
+    cmd_signer_preview_7730, cmd_signer_sign, cmd_signer_sign_typed_data, cmd_store, cmd_teardown,
+    cmd_whoami, CommandContext, CredentialBackendKind, InitMode,
+};
+
+use clap::{Parser, Subcommand};
+
+#[derive(Parser)]
+#[command(
+    name = "agentkeys",
+    version,
+    about = "Credential management for AI agents",
+    long_about = "agentkeys — secure credential storage and injection for AI agents.\n\nThe --agent flag on store/read/run accepts a 0x... wallet, a linked alias, or a linked email. Omit it to default to the current session wallet.\n\nExamples:\n  agentkeys init --email alice@example.com --broker-url https://broker.example --signer-url https://signer.example\n  agentkeys init --oauth2-google         --broker-url https://broker.example --signer-url https://signer.example\n  agentkeys store openrouter sk-or-...                    (session wallet)\n  agentkeys store --agent 0xAGENT openrouter sk-or-...    (specific wallet)\n  agentkeys read --agent my-bot openrouter                (linked alias)\n  agentkeys run -- python my_agent.py                     (session wallet)\n  agentkeys usage 0xAGENT\n  agentkeys revoke 0xAGENT\n  agentkeys teardown 0xAGENT"
+)]
+struct Cli {
+    #[arg(long, default_value = "http://localhost:8090", help = "Backend URL")]
+    backend: String,
+
+    #[arg(long, help = "Show verbose HTTP request/response details")]
+    verbose: bool,
+
+    #[arg(long, help = "Output machine-readable JSON where supported")]
+    json: bool,
+
+    #[arg(
+        long,
+        env = "AGENTKEYS_BROKER_URL",
+        help = "Broker base URL for authenticated account operations"
+    )]
+    broker_url: Option<String>,
+
+    #[arg(
+        long,
+        env = "AGENTKEYS_SESSION_ID",
+        default_value = "master",
+        help = "Session namespace under ~/.agentkeys/<id>/session.json. Defaults to \"master\". Use distinct ids to hold multiple concurrent sessions (e.g. --session-id=alice and --session-id=bob) without overwriting each other."
+    )]
+    session_id: String,
+
+    #[arg(
+        long,
+        env = "AGENTKEYS_CREDENTIAL_BACKEND",
+        default_value = "http",
+        help = "Legacy mock credential backend: http or sidecar (unavailable). Use terrier cred for local capability storage."
+    )]
+    credential_backend: String,
+
+    #[arg(
+        long,
+        env = "AGENTKEYS_CHAIN",
+        help = "v2 stage 1 — which EVM chain backbone to talk to. Built-in profile: anvil (local default). Operator-custom chains: set $AGENTKEYS_CHAIN_PROFILE_FILE to a JSON file path. Run `agentkeys chain list` to enumerate built-ins; `agentkeys chain show <name>` to inspect one."
+    )]
+    chain: Option<String>,
+
+    #[arg(
+        long,
+        env = "AGENTKEYS_SIGNER_URL",
+        help = "Signer base URL for explicit signing commands"
+    )]
+    signer_url: Option<String>,
+
+    #[arg(
+        long,
+        env = "AGENTKEYS_OMNI_ACCOUNT",
+        help = "Account identity for explicit signing commands"
+    )]
+    omni_account: Option<String>,
+
+    #[command(subcommand)]
+    command: Commands,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    #[command(about = "Use protected development owner state with local services")]
+    Local {
+        #[command(subcommand)]
+        action: LocalAction,
+    },
+    #[command(about = "Qualify a local model server using actual inference")]
+    Models {
+        #[command(subcommand)]
+        action: ModelAction,
+    },
+    #[command(
+        about = "Initialize a new session via email-link or OAuth2/Google",
+        long_about = "Authenticate the operator's identity, derive the managed EVM wallet via the dev_key_service signer, link it to the broker, and save the resulting EVM session JWT in the OS keychain. The legacy --mock-token path was hard-cut in issue #74 step 1; the only production paths are --email and --oauth2-google.\n\nExamples:\n  agentkeys init --email alice@example.com --broker-url https://broker.example --signer-url https://signer.example\n  agentkeys init --oauth2-google         --broker-url https://broker.example --signer-url https://signer.example"
+    )]
+    Init {
+        /// Email address for the email-link flow. Mutually exclusive with --oauth2-google.
+        #[arg(long, conflicts_with = "oauth2_google")]
+        email: Option<String>,
+
+        /// Initiate the OAuth2/Google flow. Mutually exclusive with --email.
+        #[arg(long = "oauth2-google", conflicts_with = "email")]
+        oauth2_google: bool,
+
+        /// Broker URL (the server hosting `/v1/auth/{email,oauth2,wallet}/{request,start,verify,status}`).
+        #[arg(long, env = "AGENTKEYS_BROKER_URL")]
+        broker_url: Option<String>,
+
+        /// Signer URL (the server hosting `/dev/derive-address` + `/dev/sign-message`
+        /// per docs/spec/signer-protocol.md). Defaults to --backend if unset.
+        #[arg(long, env = "AGENTKEYS_SIGNER_URL")]
+        signer_url: Option<String>,
+
+        /// SIWE chain_id. Defaults to 84532 (Base Sepolia) which the
+        /// broker's wallet_sig plug-in already accepts in tests.
+        #[arg(long, default_value_t = 84532)]
+        chain_id: u64,
+
+        /// How long to wait for the operator to complete the email-link
+        /// click or OAuth2 callback before failing the init.
+        #[arg(long, default_value_t = 300)]
+        poll_timeout_seconds: u64,
+
+        /// Re-run initialization even when a usable local session already exists.
+        #[arg(long)]
+        force: bool,
+    },
+
+    #[command(
+        about = "Store a credential for an agent+service",
+        long_about = "Encrypt and store an API key for a given agent and service.\n\nOmit --agent to default to the session wallet. --agent accepts a 0x... wallet address, a linked alias, or a linked email.\n\nNote on the --agent FLAG (vs a positional): clap does not support an optional leading positional followed by required positionals — it either panics at parse time or consumes the first required arg as the agent. An --agent flag is the only disambiguation that works without a subcommand split.\n\nExamples:\n  agentkeys store openrouter sk-or-v1-abc123                (session wallet)\n  agentkeys store --agent my-bot openrouter sk-or-v1-abc123 (resolve alias)\n  agentkeys store --agent 0xAGENT anthropic sk-ant-abc123   (literal wallet)"
+    )]
+    Store {
+        #[arg(
+            long,
+            help = "Agent wallet address, alias, or email (defaults to session wallet)"
+        )]
+        agent: Option<String>,
+        #[arg(help = "Service name (e.g. openrouter, anthropic)")]
+        service: String,
+        #[arg(help = "API key or credential value")]
+        key: String,
+    },
+
+    #[command(
+        about = "Read a credential for an agent+service",
+        long_about = "Retrieve and print the stored credential. Omit --agent to default to the session wallet.\n\nExamples:\n  agentkeys read openrouter                     (session wallet)\n  agentkeys read --agent my-bot openrouter      (resolve alias)\n  agentkeys read --json --agent 0xAGENT openrouter (literal wallet)"
+    )]
+    Read {
+        #[arg(
+            long,
+            help = "Agent wallet address, alias, or email (defaults to session wallet)"
+        )]
+        agent: Option<String>,
+        #[arg(help = "Service name")]
+        service: String,
+    },
+
+    #[command(
+        about = "Run a command with credentials injected as env vars",
+        long_about = "Load credentials for the agent and inject them as SERVICE_API_KEY env vars. Omit --agent to default to the session wallet. Use --env KEY=service to map non-standard env-var names (e.g. GITHUB_TOKEN).\n\nExamples:\n  agentkeys run -- python my_agent.py                      (session wallet)\n  agentkeys run --agent my-bot -- node server.js           (resolve alias)\n  agentkeys run --agent 0xAGENT -- node server.js          (literal wallet)\n  agentkeys run --env GITHUB_TOKEN=github -- bash deploy.sh"
+    )]
+    Run {
+        #[arg(
+            long,
+            help = "Agent wallet address, alias, or email (defaults to session wallet)"
+        )]
+        agent: Option<String>,
+        #[arg(long = "env", value_name = "KEY=SERVICE", action = clap::ArgAction::Append, help = "Map env var name to service (e.g. GITHUB_TOKEN=github)")]
+        env: Vec<String>,
+        #[arg(last = true, help = "Command to execute")]
+        cmd: Vec<String>,
+    },
+
+    #[command(
+        about = "Revoke a session",
+        long_about = "Revoke a session. Without arguments, revokes the current session and wipes the local keychain entry (you must run `agentkeys init` again). With a wallet address, revokes all active sessions for that child agent (ownership check enforced).\n\nExamples:\n  agentkeys revoke\n  agentkeys revoke 0xCHILD_WALLET"
+    )]
+    Revoke {
+        #[arg(
+            help = "Child agent wallet address to revoke (omit to revoke your own current session)",
+            required = false
+        )]
+        agent: Option<String>,
+    },
+
+    #[command(
+        about = "Tear down all credentials for an agent",
+        long_about = "Delete all stored credentials and revoke all sessions for an agent.\n\nExamples:\n  agentkeys teardown 0xAGENT"
+    )]
+    Teardown {
+        #[arg(help = "Agent wallet address")]
+        agent: String,
+    },
+
+    #[command(
+        about = "Approve a pairing request",
+        long_about = "Approve a pending pair request by its pair code.\n\nExamples:\n  agentkeys approve PAIR-CODE-123\n  agentkeys approve PAIR-CODE-123 --yes"
+    )]
+    Approve {
+        #[arg(help = "Pair code to approve")]
+        pair_code: String,
+        #[arg(long, help = "Auto-confirm without interactive prompt")]
+        yes: bool,
+    },
+
+    #[command(
+        about = "Edit or list the scope of a child agent",
+        long_about = "Add, remove, replace, or list the services in a child agent's scope.\n\nExamples:\n  agentkeys scope 0xAGENT --add openrouter\n  agentkeys scope 0xAGENT --remove anthropic\n  agentkeys scope 0xAGENT --set openrouter,anthropic\n  agentkeys scope 0xAGENT --list"
+    )]
+    Scope {
+        #[arg(help = "Agent wallet address, alias, or email")]
+        agent: String,
+        #[arg(long, help = "Add a service to the scope (repeatable)")]
+        add: Vec<String>,
+        #[arg(long, help = "Remove a service from the scope (repeatable)")]
+        remove: Vec<String>,
+        #[arg(
+            long,
+            help = "Replace the entire scope with a comma-separated list of services"
+        )]
+        set: Option<String>,
+        #[arg(long, help = "List the current scope without making changes")]
+        list: bool,
+    },
+
+    #[command(
+        about = "Provision (sign up and store) an API key for a service",
+        long_about = "Run the provisioner script to sign up for a service and store the credential.\n\nExamples:\n  agentkeys provision openrouter\n  agentkeys provision openrouter --force"
+    )]
+    Provision {
+        #[arg(help = "Service name to provision (e.g. openrouter)")]
+        service: String,
+        #[arg(long, help = "Re-provision even if a credential already exists")]
+        force: bool,
+    },
+
+    #[command(
+        about = "Open the feedback forum in your browser",
+        long_about = "Open https://github.com/agentkeys/agentkeys/discussions in the default browser.\n\nExamples:\n  agentkeys feedback"
+    )]
+    Feedback,
+
+    #[command(
+        about = "Manage agent inbox addresses",
+        long_about = "Provision or list inbox addresses for an agent.\n\nOmit --agent to default to the session wallet.\n\nExamples:\n  agentkeys inbox provision\n  agentkeys inbox provision --agent 0xAGENT\n  agentkeys inbox list\n  agentkeys inbox list --agent 0xAGENT"
+    )]
+    Inbox {
+        #[command(subcommand)]
+        action: InboxAction,
+    },
+
+    #[command(
+        about = "Show the active session, scope, and (optionally) signer-derived wallet",
+        long_about = "Read-only summary of the current session.\n\nWith --signer-url and --omni-account, also calls the signer to print the derived EVM address. Useful for verifying the signer wire is reachable and the omni→address mapping is what you expect.\n\nExamples:\n  agentkeys whoami\n  agentkeys whoami --signer-url http://localhost:8090 --omni-account <64hex>"
+    )]
+    Whoami {
+        #[arg(
+            long,
+            env = "AGENTKEYS_SIGNER_URL",
+            help = "URL of the signer service (dev_key_service or TEE worker)"
+        )]
+        signer_url: Option<String>,
+        #[arg(
+            long,
+            help = "OmniAccount (64-hex-char SHA256 digest) to resolve via the signer"
+        )]
+        omni_account: Option<String>,
+    },
+
+    #[command(
+        about = "Talk to the signer edge (dev_key_service or TEE worker)",
+        long_about = "Subcommands that exercise the wire contract from docs/spec/signer-protocol.md. The CLI treats the signer as opaque RPC; the same commands work against the HKDF dev backend and the future TEE backend.\n\nExamples:\n  agentkeys signer derive --signer-url http://localhost:8090 --omni-account <64hex>\n  agentkeys signer sign   --signer-url http://localhost:8090 --omni-account <64hex> --message 'siwe-msg'"
+    )]
+    Signer {
+        #[command(subcommand)]
+        action: SignerAction,
+    },
+
+    #[command(
+        about = "Inspect available EVM chain profiles (v2 stage 1)",
+        long_about = "Chain configuration uses a local default or an explicit custom profile. Each named profile bundles chain ID, RPC endpoints, explorer URL, finality model, and gas config. Use --chain <name> on the top-level CLI to select one for any chain-aware operation (device register, scope grant, contract deploy). The 'list' subcommand prints all built-ins; 'show' dumps one profile's full JSON.\n\nOperator-custom chains: ship your own JSON and point at it via $AGENTKEYS_CHAIN_PROFILE_FILE.\n\nExamples:\n  agentkeys chain list\n  agentkeys chain show anvil\n  agentkeys --chain anvil chain show"
+    )]
+    Chain {
+        #[command(subcommand)]
+        action: ChainAction,
+    },
+
+    #[command(
+        about = "K11 WebAuthn enrollment and development passkey tools",
+        long_about = "Hardware WebAuthn or explicitly enabled local development credentials. Software passkeys require AGENT_TERRIER_LOCAL_DEV=1, a local development chain profile and a loopback RPC endpoint. Deterministic parser-test stubs additionally require AGENTKEYS_K11_STUB=1; they do not prove authorization. Use software-keygen/software-sign for real local P-256 signatures, or --webauthn for hardware authentication."
+    )]
+    K11 {
+        #[command(subcommand)]
+        action: K11Action,
+    },
+
+    #[command(
+        about = "Memory namespace helpers (canonical read + absorption inbox)",
+        long_about = "Memory operations against the gated backend (cap-mint → memory worker). `canonical-get` reads a namespace under the delegate's own session; the `inbox-*` verbs drive the absorption flow (delegate proposes, master curates). Canonical WRITES are master-side (the parent-control plant flow); in-sandbox distribution is the daemon's #566 memory mirror — there is no direct `put`."
+    )]
+    Memory {
+        #[command(subcommand)]
+        action: MemoryAction,
+    },
+    /// Agent-side device bootstrap (interim §10.2 — full ceremony: issue #144).
+    Agent {
+        #[command(subcommand)]
+        action: AgentAction,
+    },
+    /// #664 — family applications (epic #660): install / list / show /
+    /// uninstall / command, the headless twins of the console's Applications
+    /// page, driven through the master daemon's ui-bridge.
+    App {
+        #[command(subcommand)]
+        action: AppAction,
+    },
+    /// #664 — resource items (master-curated, read-only for apps).
+    Resource {
+        #[command(subcommand)]
+        action: ResourceAction,
+    },
+    /// Credential fetch (#216) — the agent pulls its authorized `cred:<service>`
+    /// from the vault to *use* it (e.g. its LLM key) at wire time.
+    Cred {
+        #[command(subcommand)]
+        action: CredAction,
+    },
+    /// Device→sandbox delegation (#369): the device holds K10 and co-signs a
+    /// scoped, short-lived delegation to a sandbox's ephemeral key, so a cloud
+    /// sandbox reaches the user's workers WITHOUT ever holding K10.
+    Delegation {
+        #[command(subcommand)]
+        action: DelegationAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum DelegationAction {
+    /// DEVICE: re-derive this device's agent `J1` from the durable on-chain
+    /// binding (pop_sig-gated `/v1/agent/resolve`) and print the JSON the sandbox
+    /// consumes — `{session_jwt, operator_omni, actor_omni, device_key_hash}`.
+    #[command(about = "Device: resolve this device's agent J1 from its on-chain binding")]
+    Resolve {
+        #[arg(
+            long,
+            env = "AGENTKEYS_BROKER_URL",
+            help = "Broker base URL (OIDC issuer)"
+        )]
+        broker_url: String,
+        #[arg(
+            long,
+            default_value = "~/.agentkeys/agent-device.key",
+            help = "Device K10 file (0600) — NEVER leaves the device"
+        )]
+        key_file: String,
+        #[arg(
+            long,
+            help = "This machine is a channel-endpoint DEVICE (#409 D9): skip the boot-time sandbox ensure"
+        )]
+        is_device: bool,
+    },
+    /// DEVICE: discover pending delegation requests for this device and co-sign
+    /// each with K10, bounding the sandbox to `--scope`. The per-spawn bound can be
+    /// TIGHTER than the on-chain grant (e.g. omit `knowledge:travel` on a re-spawn).
+    #[command(about = "Device: co-sign pending sandbox delegation requests with K10")]
+    Cosign {
+        #[arg(
+            long,
+            env = "AGENTKEYS_BROKER_URL",
+            help = "Broker base URL (OIDC issuer)"
+        )]
+        broker_url: String,
+        #[arg(
+            long,
+            default_value = "~/.agentkeys/agent-device.key",
+            help = "Device K10 file (0600)"
+        )]
+        key_file: String,
+        #[arg(
+            long,
+            default_value = "memory",
+            help = "Delegation scope to sign (space-delimited data_class / service tokens, e.g. 'knowledge:travel knowledge:personal')"
+        )]
+        scope: String,
+        #[arg(
+            long,
+            default_value_t = 3600,
+            help = "Delegation TTL (seconds) the device signs"
+        )]
+        ttl_seconds: u64,
+        #[arg(
+            long,
+            help = "Drain the current pending queue once and exit (else poll forever)"
+        )]
+        once: bool,
+        #[arg(
+            long,
+            default_value_t = 3,
+            help = "Poll interval (seconds) when looping"
+        )]
+        poll_interval_secs: u64,
+    },
+    /// SANDBOX: generate an ephemeral key, request a delegation, and poll until the
+    /// device co-signs — writing a delegation file the cap-mint clients attach as
+    /// the `delegation_path`. `--session-bearer` is the sandbox's J1 (from `resolve`).
+    #[command(
+        about = "Sandbox: bootstrap a device-signed delegation (ephemeral key + request/poll)"
+    )]
+    Bootstrap {
+        #[arg(
+            long,
+            env = "AGENTKEYS_BROKER_URL",
+            help = "Broker base URL (OIDC issuer)"
+        )]
+        broker_url: String,
+        #[arg(
+            long,
+            env = "AGENTKEYS_SESSION_BEARER",
+            help = "The sandbox's agent J1 bearer"
+        )]
+        session_bearer: String,
+        #[arg(
+            long,
+            default_value = "memory",
+            help = "Requested delegation scope (the device may narrow it)"
+        )]
+        scope: String,
+        #[arg(
+            long,
+            default_value_t = 3600,
+            help = "Requested delegation TTL (seconds)"
+        )]
+        ttl_seconds: u64,
+        #[arg(
+            long,
+            default_value = "~/.agentkeys/sandbox-ephemeral.key",
+            help = "Sandbox ephemeral key file (0600) — the cap-PoP signer"
+        )]
+        ephemeral_key_file: String,
+        #[arg(
+            long,
+            env = "AGENTKEYS_DELEGATION_FILE",
+            default_value = "~/.agentkeys/delegation.json",
+            help = "Output delegation file the cap-mint reads"
+        )]
+        out_file: String,
+        #[arg(
+            long,
+            default_value_t = 40,
+            help = "Max poll attempts before giving up"
+        )]
+        poll_attempts: u32,
+        #[arg(long, default_value_t = 3, help = "Poll interval (seconds)")]
+        poll_interval_secs: u64,
+        #[arg(long, help = "Force a fresh ephemeral key")]
+        regen: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum CredAction {
+    /// Fetch + decrypt a stored credential's secret (#216). Gated by the actor's
+    /// `cred:<service>` scope; prints the plaintext to stdout. The agent's
+    /// identity/session come from the wire context (flags or env).
+    Fetch {
+        /// The credential service id (e.g. `openrouter`). OPTIONAL — when omitted,
+        /// it is resolved from the off-chain cred manifest (#216): `--select N`
+        /// (1-based) picks from the authorized list, else the master-designated
+        /// default (the no-UI path). An explicit service is used as-is (still
+        /// on-chain-verified at fetch).
+        service: Option<String>,
+        /// Pick the Nth authorized service (1-based) from the cred manifest
+        /// instead of the master-designated default. Ignored when a service is
+        /// given explicitly.
+        #[arg(long)]
+        select: Option<usize>,
+        /// Cred-manifest path (authorized service names + default). Default:
+        /// $AGENTKEYS_CRED_MANIFEST or ~/.agentkeys/cred-manifest.json.
+        #[arg(long, env = "AGENTKEYS_CRED_MANIFEST")]
+        manifest: Option<String>,
+        #[arg(long, env = "AGENTKEYS_OPERATOR_OMNI")]
+        operator_omni: String,
+        #[arg(long, env = "AGENTKEYS_ACTOR_OMNI")]
+        actor_omni: String,
+        #[arg(long, env = "AGENTKEYS_DEVICE_KEY_FILE")]
+        device_key_file: String,
+        #[arg(long, env = "AGENTKEYS_SESSION_BEARER")]
+        session_bearer: String,
+        #[arg(long, env = "AGENTKEYS_BROKER_URL")]
+        broker_url: String,
+        #[arg(long, env = "AGENTKEYS_WORKER_CRED_URL")]
+        cred_url: String,
+    },
+    /// List the agent's authorized credential services from the off-chain
+    /// manifest (#216). The chain stores only keccak(service) hashes — it can
+    /// verify a known name but not enumerate names — so the manifest is the
+    /// discovery layer. Marks the master-designated default.
+    List {
+        #[arg(long, env = "AGENTKEYS_CRED_MANIFEST")]
+        manifest: Option<String>,
+    },
+    /// Record the off-chain cred manifest (#216): the authorized service names +
+    /// the master-designated default (public NAMES only — never secrets). The
+    /// master/operator runs this at grant time so the agent's no-arg `cred fetch`
+    /// picks the designated default LLM key.
+    Manifest {
+        /// Comma-separated authorized service names in order (e.g.
+        /// `openrouter,anthropic`).
+        #[arg(long)]
+        services: String,
+        /// The default service (the no-UI LLM key). Defaults to the first in
+        /// `--services`.
+        #[arg(long)]
+        default: Option<String>,
+        #[arg(long, env = "AGENTKEYS_CRED_MANIFEST")]
+        manifest: Option<String>,
+    },
+    /// Vault a credential (#216, the store half of `fetch`). Master-self by
+    /// default (operator == actor); seeds the agent's authorized key (e.g. the
+    /// LLM key the agent later cred-fetches). Prints the worker S3 key.
+    Store {
+        /// The credential service id (e.g. `openrouter`).
+        service: String,
+        /// The secret to vault. Prefer `--secret-env NAME` to keep it off argv.
+        #[arg(long, conflicts_with = "secret_env")]
+        secret: Option<String>,
+        /// Read the secret from this env var instead of `--secret` (keeps the
+        /// plaintext out of the process list / shell history).
+        #[arg(long)]
+        secret_env: Option<String>,
+        #[arg(long, env = "AGENTKEYS_OPERATOR_OMNI")]
+        operator_omni: String,
+        #[arg(long, env = "AGENTKEYS_ACTOR_OMNI")]
+        actor_omni: String,
+        #[arg(long, env = "AGENTKEYS_DEVICE_KEY_FILE")]
+        device_key_file: String,
+        #[arg(long, env = "AGENTKEYS_SESSION_BEARER")]
+        session_bearer: String,
+        #[arg(long, env = "AGENTKEYS_BROKER_URL")]
+        broker_url: String,
+        #[arg(long, env = "AGENTKEYS_WORKER_CRED_URL")]
+        cred_url: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum K11Action {
+    #[command(
+        about = "Enroll a K11 credential for an operator (stub by default; --webauthn for real Touch ID ceremony)"
+    )]
+    Enroll {
+        #[arg(long, help = "Operator omni-account hex (0x + 64 hex chars)")]
+        operator_omni: String,
+        /// Run the real WebAuthn ceremony in the operator's default browser.
+        /// macOS: triggers the Touch ID prompt against the platform passkey.
+        /// Without this flag the command writes a deterministic stub
+        /// (for CI / non-attested environments).
+        #[arg(long)]
+        webauthn: bool,
+        /// WebAuthn RP ID. Default "localhost" (primary master). Companion
+        /// daemon mode uses "companion.localhost" so the platform keychain
+        /// creates a distinct passkey on the same Mac.
+        #[arg(long, default_value = "localhost")]
+        rp_id: String,
+    },
+    #[command(
+        about = "Produce a K11 assertion over a message (stub by default; --webauthn for real Touch ID)"
+    )]
+    Assert {
+        #[arg(long, help = "Operator omni-account hex (0x + 64 hex chars)")]
+        operator_omni: String,
+        #[arg(
+            long,
+            help = "Hex-encoded message to sign over (with or without 0x prefix)"
+        )]
+        message_hex: String,
+        /// Run the real WebAuthn ceremony. The application message is
+        /// SHA-256-hashed and used as the WebAuthn challenge so the
+        /// assertion is cryptographically bound to this exact message.
+        #[arg(long)]
+        webauthn: bool,
+        /// WebAuthn RP ID. Must match the rp_id used at enrollment time.
+        #[arg(long, default_value = "localhost")]
+        rp_id: String,
+        /// Emit the chain-ready assertion struct as JSON (r, s, pubX, pubY,
+        /// authData, clientDataJSON, challengeLocation, signCount) instead
+        /// of the raw concatenated bytes. The contract's K11Verifier needs
+        /// these fields as separate args.
+        #[arg(long)]
+        emit_chain_payload: bool,
+        /// **Operator-readable description** of what's about to be authorized,
+        /// rendered prominently on the WebAuthn confirmation page so the
+        /// operator sees the intent in plain English before pressing Touch ID
+        /// (otherwise they only see the raw 32-byte challenge hex). Only
+        /// applies with `--webauthn`; ignored in stub mode.
+        ///
+        /// Examples:
+        ///   --intent-text "Grant agent demo-agent access to openrouter"
+        ///   --intent-text "Revoke companion master device 0xabcd…1234"
+        #[arg(
+            long,
+            help = "Operator-readable intent shown on the WebAuthn confirmation page (with --webauthn)"
+        )]
+        intent_text: Option<String>,
+        /// Per-field detail rows rendered under the headline `--intent-text`,
+        /// repeatable. Each value is `Label=Value`. Common rows: service,
+        /// agent, K3 epoch, max_calls, expires_at.
+        ///
+        /// Examples:
+        ///   --intent-field "Service=openrouter"
+        ///   --intent-field "Max calls / hour=100"
+        ///   --intent-field "K3 epoch=1"
+        #[arg(
+            long = "intent-field",
+            help = "Repeatable per-field detail row as `Label=Value` (with --webauthn)"
+        )]
+        intent_fields: Vec<String>,
+        /// Typed K11 operation intent (preferred over `--intent-text` +
+        /// `--intent-field`). One JSON blob describing the operation; the
+        /// CLI renders it to a uniform K11IntentContext via the shared
+        /// [`k11_intent`] module, so role bitfields become readable
+        /// permission names ("CAP_MINT | RECOVERY"), 0-means-unlimited
+        /// amounts render as "unlimited", hashes are truncated for the
+        /// prompt, and chain IDs get human-readable labels — all
+        /// without per-script string surgery.
+        ///
+        /// When BOTH `--intent-op-json` and `--intent-text` are passed,
+        /// the typed JSON wins (single source of truth).
+        ///
+        /// Examples:
+        ///   --intent-op-json '{"kind":"set_recovery_threshold","operator_omni":"0x…","new_threshold":2,"chain_id":212013,"operator_nonce":4,"asserting":{"kind":"primary","device_key_hash":"0x…"}}'
+        #[arg(
+            long = "intent-op-json",
+            help = "Typed K11 operation intent as JSON (preferred over --intent-text + --intent-field)"
+        )]
+        intent_op_json: Option<String>,
+    },
+    #[command(
+        name = "software-keygen",
+        about = "Software WebAuthn authenticator (#164 headless/CI register): load-or-generate a software P-256 passkey at --key-file and print PUBX/PUBY/RPIDHASH (eval-able). Rust replacement for erc4337-webauthn-sign.py keygen — no python. NOT a hardware/Touch ID passkey and NOT the deprecated EOA path."
+    )]
+    SoftwareKeygen {
+        #[arg(
+            long,
+            help = "Path to the software passkey file (PKCS#8 PEM; never overwritten)"
+        )]
+        key_file: String,
+        #[arg(long, default_value = "localhost", help = "WebAuthn RP ID")]
+        rp_id: String,
+        #[arg(
+            long = "derive-from",
+            help = "Derive the new key DETERMINISTICALLY from this seed file's bytes (e.g. the deployer EVM key file) instead of OsRng — same seed → same passkey → same P256Account address, so an ephemeral CI runner can re-create the registered master passkey on every run (#250). Only used when --key-file does not exist yet (an existing key file always wins). The derived passkey is exactly as strong as custody of the seed file."
+        )]
+        derive_from: Option<String>,
+    },
+    #[command(
+        name = "software-sign",
+        about = "Software WebAuthn authenticator (#164 headless/CI): sign a 32-byte userOpHash with the --key-file passkey, printing AUTHDATA/CDJ/CHALLENGE_LOC/R/S (eval-able) — a byte-identical WebAuthn assertion the on-chain K11Verifier accepts. Rust replacement for erc4337-webauthn-sign.py sign."
+    )]
+    SoftwareSign {
+        #[arg(
+            long,
+            help = "Path to the software passkey file (from software-keygen)"
+        )]
+        key_file: String,
+        #[arg(
+            long,
+            help = "32-byte userOpHash hex (with or without 0x) to sign over"
+        )]
+        userop_hash: String,
+        #[arg(
+            long,
+            default_value = "localhost",
+            help = "WebAuthn RP ID (must match keygen)"
+        )]
+        rp_id: String,
+    },
+    #[command(
+        name = "webauthn-keygen",
+        about = "Hardware WebAuthn authenticator (#164 LOCAL register): load-or-enroll the operator's hardware K11 (Secure Enclave / Touch ID) and print PUBX/PUBY/RPIDHASH (eval-able). Triggers a Touch ID *create* ceremony if not yet enrolled. The SECURE local counterpart to software-keygen — the private key never leaves the platform authenticator (no on-disk key)."
+    )]
+    WebauthnKeygen {
+        #[arg(
+            long,
+            help = "Operator omni (0x + 64 hex) — locates the enrolled credential"
+        )]
+        operator_omni: String,
+        #[arg(long, default_value = "localhost", help = "WebAuthn RP ID")]
+        rp_id: String,
+    },
+    #[command(
+        name = "webauthn-userop-sign",
+        about = "Hardware WebAuthn authenticator (#164 LOCAL register): sign a 32-byte userOpHash with the operator's hardware K11 — a real Touch ID *get* ceremony — printing AUTHDATA/CDJ/CHALLENGE_LOC/R/S (eval-able). challenge == userOpHash (raw), so it drops into the same handleOps path as software-sign. The SECURE local counterpart to software-sign."
+    )]
+    WebauthnUseropSign {
+        #[arg(
+            long,
+            help = "Operator omni (0x + 64 hex) — locates the enrolled credential"
+        )]
+        operator_omni: String,
+        #[arg(
+            long,
+            help = "32-byte userOpHash hex (with or without 0x) to sign over"
+        )]
+        userop_hash: String,
+        #[arg(
+            long,
+            default_value = "localhost",
+            help = "WebAuthn RP ID (must match keygen)"
+        )]
+        rp_id: String,
+        #[arg(
+            long,
+            help = "Operator-readable intent shown on the confirmation page above the raw hash"
+        )]
+        intent_text: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum ChainAction {
+    #[command(
+        about = "Create an actor-owned development key and emit only its public enrollment proof"
+    )]
+    DeviceIdentity {
+        #[arg(long)]
+        key_file: String,
+        #[arg(long)]
+        operator_omni: String,
+        #[arg(long)]
+        label: String,
+        #[arg(long, value_enum)]
+        kind: agentkeys_cli::local_owner::ActorKind,
+    },
+    #[command(
+        about = "Prepare a real owner-signed operation on the explicit local development chain"
+    )]
+    PrepareOwner(agentkeys_cli::local_owner::OwnerOptions),
+    #[command(
+        about = "Authenticate a local owner passkey and save its session in a protected development file"
+    )]
+    OwnerLogin(agentkeys_cli::local_owner::OwnerLoginOptions),
+    #[command(
+        about = "Verify a prepared owner operation from stdin against its actual chain receipt"
+    )]
+    VerifyOwner {
+        #[arg(long)]
+        transaction: String,
+    },
+    #[command(about = "List built-in chain profile names")]
+    List,
+    #[command(about = "Print one profile's full JSON (omit name to use the resolved profile)")]
+    Show {
+        #[arg(help = "Built-in profile name (anvil)")]
+        name: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum ModelAction {
+    Config,
+    Probe {
+        #[arg(long, default_value = agentkeys_core::models::default_base_url())]
+        base_url: String,
+        #[arg(long, default_value = agentkeys_core::models::default_chat_model())]
+        chat_model: String,
+        #[arg(long, default_value = agentkeys_core::models::default_embedding_model())]
+        embedding_model: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum SignerAction {
+    #[command(
+        about = "Derive the EVM address for an OmniAccount via the signer",
+        long_about = "Calls /dev/derive-address on the configured signer.\n\nExamples:\n  agentkeys signer derive --signer-url http://localhost:8090 --omni-account <64hex>"
+    )]
+    Derive {
+        #[arg(long, env = "AGENTKEYS_SIGNER_URL", help = "URL of the signer service")]
+        signer_url: String,
+        #[arg(long, help = "OmniAccount (64-hex-char SHA256 digest)")]
+        omni_account: String,
+    },
+
+    #[command(
+        about = "Sign a UTF-8 message under the keypair derived from an OmniAccount",
+        long_about = "Calls /dev/sign-message on the configured signer. The message is sent as UTF-8 bytes — the signer wraps them in EIP-191.\n\nExamples:\n  agentkeys signer sign --signer-url http://localhost:8090 --omni-account <64hex> --message 'hello'"
+    )]
+    Sign {
+        #[arg(long, env = "AGENTKEYS_SIGNER_URL", help = "URL of the signer service")]
+        signer_url: String,
+        #[arg(long, help = "OmniAccount (64-hex-char SHA256 digest)")]
+        omni_account: String,
+        #[arg(long, help = "Message to sign (sent as UTF-8 bytes)")]
+        message: String,
+    },
+
+    #[command(
+        name = "sign-typed-data",
+        about = "EIP-712 typed-data sign (issue #82)",
+        long_about = "Calls /dev/sign-typed-data on the configured signer. The file at --typed-data-file is an EIP-712 v4 JSON object (matches MetaMask `eth_signTypedData_v4`).\n\nThe signer parses the typed-data internally and computes the digest — callers MUST NOT pass a pre-hashed value.\n\nWith --preview-7730, the CLI also renders the operator-facing intent text against the bundled ERC-7730 catalog (override the dir via $AGENTKEYS_7730_DIR) and prints it before signing.\n\nExamples:\n  agentkeys signer sign-typed-data --signer-url http://localhost:8090 --omni-account <64hex> --typed-data-file ./permit.json\n  agentkeys signer sign-typed-data ... --preview-7730"
+    )]
+    SignTypedData {
+        #[arg(long, env = "AGENTKEYS_SIGNER_URL", help = "URL of the signer service")]
+        signer_url: String,
+        #[arg(long, help = "OmniAccount (64-hex-char SHA256 digest)")]
+        omni_account: String,
+        #[arg(
+            long,
+            help = "Path to a JSON file containing the EIP-712 v4 typed-data"
+        )]
+        typed_data_file: String,
+        /// Render the operator-facing intent text + per-field preview against
+        /// the bundled ERC-7730 catalog (override via $AGENTKEYS_7730_DIR).
+        #[arg(long)]
+        preview_7730: bool,
+    },
+
+    #[command(
+        name = "preview-7730",
+        about = "Render the ERC-7730 preview for a typed-data file WITHOUT signing (issue #82)",
+        long_about = "Useful for dry-runs against new ERC-7730 files before plumbing them into automated agent signing. Loads the bundled catalog (and $AGENTKEYS_7730_DIR if set) by default; --7730-file pins a single file.\n\nExamples:\n  agentkeys signer preview-7730 --typed-data-file ./permit.json\n  agentkeys signer preview-7730 --typed-data-file ./permit.json --7730-file ./erc20-permit-usdc.json"
+    )]
+    Preview7730 {
+        #[arg(
+            long,
+            help = "Path to a JSON file containing the EIP-712 v4 typed-data"
+        )]
+        typed_data_file: String,
+        // Explicit `long = "7730-file"` because clap derives the flag
+        // name from the Rust field ident, which would yield
+        // `--seven-thirty-file`. The docs + long_about advertise
+        // `--7730-file`; this override matches. Codex P2 finding on PR #95.
+        #[arg(
+            long = "7730-file",
+            help = "Optional: pin to a single ERC-7730 file instead of the bundled catalog"
+        )]
+        seven_thirty_file: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum InboxAction {
+    #[command(
+        about = "Provision a new inbox address for an agent",
+        long_about = "Provision a new inbox email address for an agent and print the address.\n\nOmit --agent to default to the session wallet.\n\nExamples:\n  agentkeys inbox provision\n  agentkeys inbox provision --agent 0xAGENT"
+    )]
+    Provision {
+        #[arg(
+            long,
+            help = "Agent wallet address, alias, or email (defaults to session wallet)"
+        )]
+        agent: Option<String>,
+    },
+
+    #[command(
+        about = "List inbox addresses provisioned for an agent",
+        long_about = "List all inbox email addresses provisioned for an agent, one per line.\n\nOmit --agent to default to the session wallet.\n\nExamples:\n  agentkeys inbox list\n  agentkeys inbox list --agent 0xAGENT"
+    )]
+    List {
+        #[arg(
+            long,
+            help = "Agent wallet address, alias, or email (defaults to session wallet)"
+        )]
+        agent: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum MemoryAction {
+    /// Read owner canonical memory using the actor session and device proof.
+    CanonicalGet {
+        /// The memory namespace to read (e.g. `travel`). Carried as the cap
+        /// `service` and the worker S3 key suffix.
+        #[arg(long)]
+        namespace: String,
+        #[arg(long, env = "AGENTKEYS_OPERATOR_OMNI")]
+        operator_omni: String,
+        #[arg(long, env = "AGENTKEYS_ACTOR_OMNI")]
+        actor_omni: String,
+        #[arg(
+            long,
+            env = "AGENTKEYS_DEVICE_KEY_FILE",
+            required_unless_present = "delegation_file",
+            conflicts_with = "delegation_file"
+        )]
+        device_key_file: Option<String>,
+        #[arg(long, env = "AGENTKEYS_SESSION_BEARER")]
+        session_bearer: String,
+        #[arg(long, env = "AGENTKEYS_BROKER_URL")]
+        broker_url: String,
+        #[arg(long, env = "AGENTKEYS_WORKER_MEMORY_URL")]
+        memory_url: String,
+        /// #369 DELEGATED mode: a `delegation bootstrap` output file. When set, the
+        /// cap-PoP is signed by the sandbox's ephemeral key carried in it + the
+        /// device-signed `delegation_path` is attached (the sandbox holds no K10).
+        /// Without delegation, use the existing registered device key file.
+        #[arg(long, env = "AGENTKEYS_DELEGATION_FILE")]
+        delegation_file: Option<String>,
+    },
+    /// Submit a proposal under the actor's separate proposal grant.
+    InboxPush {
+        /// The bare memory namespace the proposal targets (e.g. `travel`). Built
+        /// into the cap `service` as `proposal:<ns>`; the master curates it into
+        /// canonical `knowledge:<ns>`.
+        #[arg(long)]
+        namespace: String,
+        /// The proposed memory key within the namespace (e.g. `night-light-rule`).
+        #[arg(long)]
+        key: String,
+        /// The proposed memory body — the learning text the master will review.
+        #[arg(long)]
+        body: String,
+        /// #390 — the proposal's context kind: `knowledge` (default), `skill`
+        /// (strict curate gate: the master must view the body before accepting),
+        /// or `persona` (never inbox-adoptable — always rejected at curate;
+        /// persona is master-authored in parent-control).
+        #[arg(long, default_value = "knowledge")]
+        kind: String,
+        #[arg(long, env = "AGENTKEYS_OPERATOR_OMNI")]
+        operator_omni: String,
+        #[arg(long, env = "AGENTKEYS_ACTOR_OMNI")]
+        actor_omni: String,
+        #[arg(long, env = "AGENTKEYS_DEVICE_KEY_FILE")]
+        device_key_file: String,
+        #[arg(long, env = "AGENTKEYS_SESSION_BEARER")]
+        session_bearer: String,
+        #[arg(long, env = "AGENTKEYS_BROKER_URL")]
+        broker_url: String,
+        #[arg(long, env = "AGENTKEYS_WORKER_MEMORY_URL")]
+        memory_url: String,
+    },
+    /// #339 P2 — LIST the master's absorption-inbox curate queue: every delegate
+    /// proposal awaiting review. The MASTER-side twin of `inbox-push`; it drives
+    /// the LOCAL DAEMON (which holds the master session + owns the curate merge),
+    /// so the daemon must be running with an active master session (authenticate
+    /// in the web app). Provenance shown is worker-stamped — unforgeable.
+    InboxList {
+        #[arg(long, env = "AGENTKEYS_DAEMON_URL", default_value_t = agentkeys_cli::inbox_curate::DEFAULT_DAEMON_URL.to_string())]
+        daemon_url: String,
+    },
+    /// #339 P2 — VIEW one inbox proposal's full body before curating (from `inbox-list`).
+    InboxView {
+        /// The proposal's `s3_key` (copy it from `inbox-list`).
+        #[arg(long)]
+        s3_key: String,
+        #[arg(long, env = "AGENTKEYS_DAEMON_URL", default_value_t = agentkeys_cli::inbox_curate::DEFAULT_DAEMON_URL.to_string())]
+        daemon_url: String,
+    },
+    /// #339 P2 — ACCEPT (curate) one proposal INTO canonical memory (per-namespace
+    /// MERGE), then GC the inbox object. The master's pull-request "merge".
+    InboxAccept {
+        /// The proposal's `s3_key` (copy it from `inbox-list`).
+        #[arg(long)]
+        s3_key: String,
+        /// #390 — the viewed-body watermark REQUIRED for `skill` proposals: the
+        /// `content_hash` printed by `inbox-view` (proof the body was reviewed
+        /// before adoption). Ignored for `knowledge`; `persona` is never
+        /// adoptable regardless.
+        #[arg(long)]
+        confirm_content_hash: Option<String>,
+        #[arg(long, env = "AGENTKEYS_DAEMON_URL", default_value_t = agentkeys_cli::inbox_curate::DEFAULT_DAEMON_URL.to_string())]
+        daemon_url: String,
+    },
+    /// #339 P2 — REJECT (discard) one proposal; canonical memory is left untouched.
+    InboxReject {
+        /// The proposal's `s3_key` (copy it from `inbox-list`).
+        #[arg(long)]
+        s3_key: String,
+        #[arg(long, env = "AGENTKEYS_DAEMON_URL", default_value_t = agentkeys_cli::inbox_curate::DEFAULT_DAEMON_URL.to_string())]
+        daemon_url: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum AppAction {
+    /// Install an application from the catalog (ONE software-passkey signature).
+    #[command(about = "Master (headless/CI): install an app template — compile + ONE signature")]
+    Install {
+        #[arg(long, help = "Template id from the catalog")]
+        template: String,
+        #[arg(
+            long,
+            help = "The delegate label (^[a-z0-9-]{1,32}$); defaults to the template id"
+        )]
+        label: Option<String>,
+        #[arg(long, default_value = "", help = "slot=channel-id[,slot=channel-id…]")]
+        bind: String,
+        #[arg(long, default_value = "", help = "name=item-id[,name=item-id…]")]
+        resource: String,
+        #[arg(
+            long,
+            default_value = "",
+            help = "slot=tier|tier[;slot=…] audience overrides"
+        )]
+        audience: String,
+        #[arg(
+            long,
+            default_value_t = 0,
+            help = "Household UTC offset in minutes for schedules"
+        )]
+        tz_offset_minutes: i32,
+        #[arg(
+            long,
+            help = "Do NOT fold the contact gate's / this machine's device-actor enrollment into the install signature (headless CI: a throwaway runner must not register itself)"
+        )]
+        skip_endpoint_enrollment: bool,
+        #[arg(
+            long,
+            env = "AGENTKEYS_K11_SOFTWARE_KEY_FILE",
+            help = "Software P-256 passkey PEM"
+        )]
+        k11_key_file: String,
+        #[arg(long, default_value = "localhost")]
+        rp_id: String,
+        #[arg(long, env = "AGENTKEYS_DAEMON_URL", default_value = agentkeys_cli::app_admin::DEFAULT_DAEMON_URL)]
+        daemon_url: String,
+    },
+    /// The installed applications.
+    List {
+        #[arg(long, env = "AGENTKEYS_DAEMON_URL", default_value = agentkeys_cli::app_admin::DEFAULT_DAEMON_URL)]
+        daemon_url: String,
+    },
+    /// One application's dashboard (activity, card, permissions).
+    Show {
+        #[arg(long)]
+        label: String,
+        #[arg(long, env = "AGENTKEYS_DAEMON_URL", default_value = agentkeys_cli::app_admin::DEFAULT_DAEMON_URL)]
+        daemon_url: String,
+    },
+    /// Uninstall (the archive ceremony: slot returns, grants revoked).
+    #[command(about = "Master (headless/CI): uninstall an app — ONE signature")]
+    Uninstall {
+        #[arg(long)]
+        label: String,
+        #[arg(long, help = "Keep the app's memory namespace inheritable")]
+        keep_memory: bool,
+        #[arg(long, env = "AGENTKEYS_K11_SOFTWARE_KEY_FILE")]
+        k11_key_file: String,
+        #[arg(long, default_value = "localhost")]
+        rp_id: String,
+        #[arg(long, env = "AGENTKEYS_DAEMON_URL", default_value = agentkeys_cli::app_admin::DEFAULT_DAEMON_URL)]
+        daemon_url: String,
+    },
+    /// Rebind an installed app's channel slots in place (ONE signature; #717).
+    #[command(
+        about = "Master (headless/CI): rebind an app's channel slots — a commit, not a reinstall"
+    )]
+    Rebind {
+        #[arg(long)]
+        label: String,
+        #[arg(
+            long,
+            help = "slot=channel-id[,slot=channel-id…] — the slots to change"
+        )]
+        bind: String,
+        #[arg(
+            long,
+            help = "Do NOT fold the contact gate's device-actor enrollment into the signature (headless CI)"
+        )]
+        skip_endpoint_enrollment: bool,
+        #[arg(long, env = "AGENTKEYS_K11_SOFTWARE_KEY_FILE")]
+        k11_key_file: String,
+        #[arg(long, default_value = "localhost")]
+        rp_id: String,
+        #[arg(long, env = "AGENTKEYS_DAEMON_URL", default_value = agentkeys_cli::app_admin::DEFAULT_DAEMON_URL)]
+        daemon_url: String,
+    },
+    /// Tap a card action headlessly (publishes a `command` event).
+    Command {
+        #[arg(long)]
+        label: String,
+        #[arg(long, help = "The card action id")]
+        action: String,
+        #[arg(long, help = "The command name")]
+        command: String,
+        #[arg(long, default_value = "", help = "JSON args")]
+        args: String,
+        #[arg(long, env = "AGENTKEYS_DAEMON_URL", default_value = agentkeys_cli::app_admin::DEFAULT_DAEMON_URL)]
+        daemon_url: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum ResourceAction {
+    /// Curate one resource item (planted as `resource`-kind canonical memory).
+    Add {
+        #[arg(long, help = "Item id (^[a-z0-9-]{1,48}$)")]
+        id: String,
+        #[arg(long)]
+        name: String,
+        #[arg(long, default_value = "")]
+        name_zh: String,
+        #[arg(long, help = "document|profile|dataset|gallery")]
+        kind: String,
+        #[arg(long, default_value = "", help = "comma-separated tags")]
+        tags: String,
+        #[arg(long, default_value = "safe", help = "safe|sensitive")]
+        sensitivity: String,
+        #[arg(long, help = "The canonical memory namespace the item lives in")]
+        ns: String,
+        #[arg(long, help = "Read the body from this file (else stdin)")]
+        file: Option<String>,
+        #[arg(long, env = "AGENTKEYS_DAEMON_URL", default_value = agentkeys_cli::app_admin::DEFAULT_DAEMON_URL)]
+        daemon_url: String,
+    },
+    /// The curated items.
+    List {
+        #[arg(long, env = "AGENTKEYS_DAEMON_URL", default_value = agentkeys_cli::app_admin::DEFAULT_DAEMON_URL)]
+        daemon_url: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum AgentAction {
+    /// Generate (or reuse) THIS machine's secp256k1 device key, mint a broker
+    /// session via wallet_sig SIWE, and print the JSON the master needs to bind
+    /// the device on-chain (device_key_hash + pop_sig). Runs in the sandbox so
+    /// the agent key is never born on the master. Interim §10.2 (issue #144).
+    #[command(
+        about = "Mint this agent's device session (in-sandbox keygen + wallet_sig) — emits JSON"
+    )]
+    DeviceSession {
+        #[arg(
+            long,
+            env = "AGENTKEYS_BROKER_URL",
+            help = "Broker base URL (OIDC issuer)"
+        )]
+        broker_url: String,
+        #[arg(
+            long,
+            default_value = "~/.agentkeys/agent-device.key",
+            help = "Device key file — sandbox-local, 0600, NEVER leaves the agent"
+        )]
+        key_file: String,
+        #[arg(
+            long,
+            default_value = "",
+            help = "One-time link code from the master (echoed into the output for binding)"
+        )]
+        link_code: String,
+        #[arg(
+            long,
+            default_value_t = 1,
+            help = "SIWE chain_id replay nonce (not a chain hop)"
+        )]
+        chain_id: u64,
+        #[arg(long, help = "Force a fresh device key → fresh pairing (new omni)")]
+        regen: bool,
+    },
+    /// Master claims an agent's §10.2 pairing request by the `pairing_code` the
+    /// agent displayed, binding it under the HDKD child omni for `--label` and
+    /// declaring the scope the agent should get. The agent retrieves J1 via
+    /// `agentkeys-daemon --retrieve-pairing`. (issue #144, method A)
+    #[command(about = "Master: claim an agent pairing request by its code (HDKD child omni)")]
+    Claim {
+        #[arg(long, help = "The pairing_code the agent displayed (scan / enter)")]
+        pairing_code: String,
+        #[arg(long, help = "HDKD child label, e.g. agent-a (^[a-z0-9-]{1,32}$)")]
+        label: String,
+        #[arg(
+            long,
+            default_value = "memory",
+            help = "Scope the agent should get (the app-manifest); granted at approve"
+        )]
+        services: String,
+        #[arg(
+            long,
+            env = "AGENTKEYS_BROKER_URL",
+            help = "Broker base URL (OIDC issuer)"
+        )]
+        broker_url: String,
+        #[arg(
+            long,
+            default_value = "",
+            help = "Master J1 bearer (defaults to the stored `master` session)"
+        )]
+        session_bearer: String,
+    },
+    /// Master pulls redeemed-but-unbound agents — "agent-X wants to pair + wants
+    /// [scope]" — the production push-notification substrate. Each row carries
+    /// the device artifact the master submits with registerAgentDevice. (issue #144)
+    #[command(about = "Master: list agents awaiting binding approval")]
+    Pending {
+        #[arg(
+            long,
+            env = "AGENTKEYS_BROKER_URL",
+            help = "Broker base URL (OIDC issuer)"
+        )]
+        broker_url: String,
+        #[arg(
+            long,
+            default_value = "",
+            help = "Master J1 bearer (defaults to the stored `master` session)"
+        )]
+        session_bearer: String,
+    },
+    /// HEADLESS accept of a claimed pairing (#225 E7, CI/test masters only): one
+    /// sponsored executeBatch(registerAgentDevice + setScope) UserOp, K11-signed
+    /// by the #164 SOFTWARE passkey — the CLI twin of the parent-control accept
+    /// card. Both decoupled pairings (#404): a sandbox DELEGATE accept grants
+    /// memory/context services; a channel-endpoint DEVICE accept (--is-device)
+    /// grants ONLY channel-pub/sub:<id> services and hard-enforces ≥1 channel
+    /// (§14.10). A real operator master uses the web accept card (Touch ID).
+    #[command(
+        about = "Master (headless/CI): accept a claimed pairing on-chain via software passkey"
+    )]
+    Accept {
+        #[arg(long, help = "The pending binding's request_id (from `agent pending`)")]
+        request_id: String,
+        #[arg(
+            long,
+            default_value = "",
+            help = "Granted services, comma/space-separated (e.g. 'knowledge:travel' or 'channel-pub:cam-1'); empty = zero-grant bind"
+        )]
+        services: String,
+        #[arg(
+            long,
+            help = "The bound actor is a channel-endpoint DEVICE (#408 D6): never spawns, must attach ≥1 channel grant"
+        )]
+        is_device: bool,
+        #[arg(
+            long,
+            env = "AGENTKEYS_K11_SOFTWARE_KEY_FILE",
+            help = "Software P-256 passkey PEM (from `agentkeys k11 software-keygen`) enrolled as this master's K11"
+        )]
+        k11_key_file: String,
+        #[arg(
+            long,
+            default_value = "localhost",
+            help = "WebAuthn RP id the software passkey was enrolled under"
+        )]
+        rp_id: String,
+        #[arg(
+            long,
+            default_value = "",
+            help = "Operator omni (64-hex); defaults to the J1's agentkeys.omni_account claim"
+        )]
+        operator_omni: String,
+        #[arg(
+            long,
+            env = "AGENTKEYS_BROKER_URL",
+            help = "Broker base URL (OIDC issuer)"
+        )]
+        broker_url: String,
+        #[arg(
+            long,
+            default_value = "",
+            help = "Master J1 bearer (defaults to the stored `master` session)"
+        )]
+        session_bearer: String,
+    },
+    /// HEADLESS #427 delegate SPAWN (CI/test masters only): zero rendezvous, ONE
+    /// ceremony — the broker derives the HDKD child omni, generates the delegate
+    /// K10, pre-checks the on-chain agent-slot allowance (loud 409 when
+    /// exhausted), and assembles executeBatch(registerDelegate + template
+    /// setScope); this signs the userOpHash with the #164 SOFTWARE passkey and
+    /// submits. The CLI twin of the parent-control "New agent" flow (#429). A
+    /// real operator master uses the web flow (Touch ID).
+    #[command(
+        about = "Master (headless/CI): spawn a delegate under the agent-slot allowance (#427)"
+    )]
+    Spawn {
+        #[arg(long, help = "Delegate name + HDKD label (^[a-z0-9-]{1,32}$)")]
+        label: String,
+        #[arg(
+            long,
+            default_value = "",
+            help = "Preset slug (#428 catalog); empty = blank spawn"
+        )]
+        preset: String,
+        #[arg(
+            long,
+            default_value = "",
+            help = "knowledge:<ns> namespace; empty = fresh, named after the label"
+        )]
+        memory_ns: String,
+        #[arg(
+            long,
+            help = "The namespace is INHERITED from an archived delegate (#425 O2)"
+        )]
+        memory_inherited: bool,
+        #[arg(
+            long,
+            env = "AGENTKEYS_K11_SOFTWARE_KEY_FILE",
+            help = "Software P-256 passkey PEM enrolled as this master's K11"
+        )]
+        k11_key_file: String,
+        #[arg(
+            long,
+            default_value = "localhost",
+            help = "WebAuthn RP id the software passkey was enrolled under"
+        )]
+        rp_id: String,
+        #[arg(
+            long,
+            env = "AGENTKEYS_BROKER_URL",
+            help = "Broker base URL (OIDC issuer)"
+        )]
+        broker_url: String,
+        #[arg(
+            long,
+            default_value = "",
+            help = "Master J1 bearer (defaults to the stored `master` session)"
+        )]
+        session_bearer: String,
+    },
+    /// HEADLESS #427 delegate ARCHIVE (CI/test masters only): revoke ONE
+    /// delegate (its agent slot returns in-contract), record keep-vs-delete for
+    /// its resources (#425 O4), deprovision its gate relay key, tear down its
+    /// sandbox. Devices unbind via the revoke flow; masters via recovery.
+    #[command(
+        about = "Master (headless/CI): archive a delegate — slot returns, resources keep-vs-delete"
+    )]
+    Archive {
+        #[arg(long, help = "The delegate's on-chain device_key_hash (0x + 64 hex)")]
+        device_key_hash: String,
+        #[arg(
+            long,
+            help = "KEEP the delegate's resources (knowledge:<ns> stays inheritable); default deletes"
+        )]
+        keep_resources: bool,
+        #[arg(
+            long,
+            default_value = "",
+            help = "The delegate's knowledge:<ns> name (recorded for O2 inheritance discovery)"
+        )]
+        memory_ns: String,
+        #[arg(
+            long,
+            env = "AGENTKEYS_K11_SOFTWARE_KEY_FILE",
+            help = "Software P-256 passkey PEM enrolled as this master's K11"
+        )]
+        k11_key_file: String,
+        #[arg(
+            long,
+            default_value = "localhost",
+            help = "WebAuthn RP id the software passkey was enrolled under"
+        )]
+        rp_id: String,
+        #[arg(
+            long,
+            env = "AGENTKEYS_BROKER_URL",
+            help = "Broker base URL (OIDC issuer)"
+        )]
+        broker_url: String,
+        #[arg(
+            long,
+            default_value = "",
+            help = "Master J1 bearer (defaults to the stored `master` session)"
+        )]
+        session_bearer: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum LocalAction {
+    Channel(agentkeys_cli::local_channel::ChannelOptions),
+    Credential(agentkeys_cli::local_data::CredentialOptions),
+    Agent(agentkeys_cli::local_agent::AgentOptions),
+}
+
+async fn cmd_chain(ctx: &CommandContext, action: &ChainAction) -> anyhow::Result<String> {
+    use agentkeys_core::chain_profile::ChainProfile;
+    match action {
+        ChainAction::DeviceIdentity {
+            key_file,
+            operator_omni,
+            label,
+            kind,
+        } => Ok(serde_json::to_string(
+            &agentkeys_cli::local_owner::device_identity(
+                ctx,
+                key_file,
+                operator_omni,
+                label,
+                *kind,
+            )?,
+        )?),
+        ChainAction::PrepareOwner(options) => {
+            let plan = agentkeys_cli::local_owner::prepare(ctx, options).await?;
+            Ok(serde_json::to_string(&plan)?)
+        }
+        ChainAction::OwnerLogin(options) => Ok(serde_json::to_string(
+            &agentkeys_cli::local_owner::login(ctx, options).await?,
+        )?),
+        ChainAction::VerifyOwner { transaction } => {
+            use std::io::Read;
+            const MAX_OWNER_PLAN_BYTES: u64 = 1024 * 1024;
+            let mut input = String::new();
+            std::io::stdin()
+                .take(MAX_OWNER_PLAN_BYTES + 1)
+                .read_to_string(&mut input)?;
+            anyhow::ensure!(
+                input.len() as u64 <= MAX_OWNER_PLAN_BYTES,
+                "owner plan exceeds input size limit"
+            );
+            let plan = serde_json::from_str(&input)?;
+            Ok(serde_json::to_string(
+                &agentkeys_cli::local_owner::verify(ctx, transaction, plan).await?,
+            )?)
+        }
+        ChainAction::List => Ok(ChainProfile::list_builtin_names().join("\n")),
+        ChainAction::Show { name } => {
+            let profile = match name {
+                Some(n) => ChainProfile::load_builtin(n).map_err(|e| anyhow::anyhow!("{e}"))?,
+                None => ctx.chain_profile()?.clone(),
+            };
+            serde_json::to_string_pretty(&profile)
+                .map_err(|e| anyhow::anyhow!("serialize profile: {e}"))
+        }
+    }
+}
+
+async fn cmd_models(action: &ModelAction) -> anyhow::Result<String> {
+    let ModelAction::Probe {
+        base_url,
+        chat_model,
+        embedding_model,
+    } = action
+    else {
+        return Ok(serde_json::to_string_pretty(
+            agentkeys_core::models::local_recipe(),
+        )?);
+    };
+    Ok(serde_json::to_string_pretty(
+        &agentkeys_core::models::qualification::probe(base_url, chat_model, embedding_model)
+            .await?,
+    )?)
+}
+
+async fn cmd_k11(ctx: &CommandContext, action: &K11Action) -> anyhow::Result<String> {
+    if matches!(
+        action,
+        K11Action::SoftwareKeygen { .. } | K11Action::SoftwareSign { .. }
+    ) {
+        ctx.require_local_development()?;
+        eprintln!("Development software passkey: local test use only; no hardware protection.");
+    }
+    match action {
+        K11Action::SoftwareKeygen {
+            key_file,
+            rp_id,
+            derive_from,
+        } => {
+            let (x, y, h) = agentkeys_cli::k11_webauthn::software_webauthn_keygen_with_derive(
+                &ctx.development_signing()?,
+                key_file,
+                rp_id,
+                derive_from.as_deref(),
+            )
+            .map_err(|e| anyhow::anyhow!("software-keygen: {e}"))?;
+            return Ok(format!("PUBX=0x{x}\nPUBY=0x{y}\nRPIDHASH=0x{h}"));
+        }
+        K11Action::SoftwareSign {
+            key_file,
+            userop_hash,
+            rp_id,
+        } => {
+            let (ad, cdj, loc, r, s) = agentkeys_cli::k11_webauthn::software_webauthn_sign(
+                &ctx.development_signing()?,
+                key_file,
+                userop_hash,
+                rp_id,
+            )
+            .map_err(|e| anyhow::anyhow!("software-sign: {e}"))?;
+            return Ok(format!(
+                "AUTHDATA=0x{ad}\nCDJ=0x{cdj}\nCHALLENGE_LOC={loc}\nR=0x{r}\nS=0x{s}"
+            ));
+        }
+        // Hardware WebAuthn authenticator (#164 LOCAL register) — real Touch ID, the
+        // private key sealed in the Secure Enclave. Same eval-able output as the
+        // software path, so the harness submit flow is identical.
+        K11Action::WebauthnKeygen {
+            operator_omni,
+            rp_id,
+        } => {
+            let (x, y, h) =
+                agentkeys_cli::k11_webauthn::hardware_webauthn_keygen(operator_omni, rp_id)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("webauthn-keygen: {e}"))?;
+            return Ok(format!("PUBX=0x{x}\nPUBY=0x{y}\nRPIDHASH=0x{h}"));
+        }
+        K11Action::WebauthnUseropSign {
+            operator_omni,
+            userop_hash,
+            rp_id,
+            intent_text,
+        } => {
+            let (ad, cdj, loc, r, s) = agentkeys_cli::k11_webauthn::hardware_webauthn_userop_sign(
+                operator_omni,
+                userop_hash,
+                rp_id,
+                intent_text.clone(),
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("webauthn-userop-sign: {e}"))?;
+            return Ok(format!(
+                "AUTHDATA=0x{ad}\nCDJ=0x{cdj}\nCHALLENGE_LOC={loc}\nR=0x{r}\nS=0x{s}"
+            ));
+        }
+        _ => {}
+    }
+
+    let stub_env = std::env::var("AGENTKEYS_K11_STUB")
+        .map(|value| value == "1")
+        .unwrap_or(false);
+
+    // Resolve mode: --webauthn flag wins over AGENTKEYS_K11_STUB env.
+    let use_webauthn = matches!(
+        action,
+        K11Action::Enroll { webauthn: true, .. } | K11Action::Assert { webauthn: true, .. }
+    );
+
+    if !use_webauthn && !stub_env {
+        anyhow::bail!(
+            "K11 stub mode disabled (AGENTKEYS_K11_STUB=0) and --webauthn not passed. \
+             Either pass --webauthn for the real Touch ID ceremony, or set \
+             AGENTKEYS_K11_STUB=1 to use the deterministic stub."
+        );
+    }
+
+    if !use_webauthn {
+        ctx.require_local_development()?;
+        eprintln!("Development stub assertion: no cryptographic proof; use software-sign for real local authorization.");
+    }
+
+    match action {
+        // Software/hardware passkey actions return early in the dispatch above.
+        K11Action::SoftwareKeygen { .. }
+        | K11Action::SoftwareSign { .. }
+        | K11Action::WebauthnKeygen { .. }
+        | K11Action::WebauthnUseropSign { .. } => {
+            unreachable!("software/hardware passkey actions are handled by the early dispatch")
+        }
+        K11Action::Enroll {
+            operator_omni,
+            webauthn,
+            rp_id,
+        } => {
+            if *webauthn {
+                let enrollment =
+                    agentkeys_cli::k11_webauthn::enroll_webauthn_with_rp(operator_omni, rp_id)
+                        .await
+                        .map_err(|e| anyhow::anyhow!("k11 webauthn enroll: {e}"))?;
+                serde_json::to_string_pretty(&enrollment)
+                    .map_err(|e| anyhow::anyhow!("serialize: {e}"))
+            } else {
+                let enrollment = agentkeys_cli::k11::enroll(operator_omni)
+                    .map_err(|e| anyhow::anyhow!("k11 enroll: {e}"))?;
+                serde_json::to_string_pretty(&enrollment)
+                    .map_err(|e| anyhow::anyhow!("serialize: {e}"))
+            }
+        }
+        K11Action::Assert {
+            operator_omni,
+            message_hex,
+            webauthn,
+            rp_id,
+            emit_chain_payload,
+            intent_text,
+            intent_fields,
+            intent_op_json,
+        } => {
+            let msg = hex::decode(message_hex.trim_start_matches("0x"))
+                .map_err(|e| anyhow::anyhow!("decode --message-hex: {e}"))?;
+            // Typed-intent path takes precedence over the raw flags. When
+            // `--intent-op-json` is passed, parse to K11OpIntent + render
+            // via the shared formatter. Otherwise fall back to the legacy
+            // `--intent-text` + `--intent-field` raw path.
+            let intent_ctx = if let Some(json) = intent_op_json.as_deref() {
+                let op = agentkeys_cli::k11_intent::K11OpIntent::from_json(json)
+                    .map_err(|e| anyhow::anyhow!("--intent-op-json: {e}"))?;
+                op.render()
+            } else {
+                // Parse repeatable `Label=Value` rows into a K11IntentContext.
+                // Split on the FIRST `=` so values may contain `=`. Rows
+                // without `=` are rejected with a clear error so the
+                // operator doesn't silently get a mis-rendered intent field.
+                let mut k11_fields: Vec<(String, String)> = Vec::with_capacity(intent_fields.len());
+                for raw in intent_fields {
+                    let (label, value) = match raw.split_once('=') {
+                        Some((l, v)) => (l.trim().to_string(), v.trim().to_string()),
+                        None => anyhow::bail!(
+                            "--intent-field must be `Label=Value` (no `=` found in {raw:?})"
+                        ),
+                    };
+                    if label.is_empty() {
+                        anyhow::bail!("--intent-field has empty label (in {raw:?})");
+                    }
+                    k11_fields.push((label, value));
+                }
+                agentkeys_cli::k11_webauthn::K11IntentContext {
+                    text: intent_text.clone(),
+                    fields: k11_fields,
+                }
+            };
+
+            if *webauthn {
+                if *emit_chain_payload {
+                    // The contract reconstructs `expected_challenge` from
+                    // operation params + nonce; the CLI caller passes the
+                    // exact 32 bytes via --message-hex.
+                    if msg.len() != 32 {
+                        anyhow::bail!(
+                            "--emit-chain-payload requires --message-hex to be a 32-byte challenge \
+                             (got {} bytes). The contract expects the message to BE the challenge \
+                             (operation params hashed); the WebAuthn ceremony then signs over \
+                             sha256(authData || sha256(clientDataJSON)) with clientDataJSON.challenge \
+                             = base64url(msg).",
+                            msg.len()
+                        );
+                    }
+                    let mut challenge = [0u8; 32];
+                    challenge.copy_from_slice(&msg);
+                    let payload =
+                        agentkeys_cli::k11_webauthn::assert_webauthn_for_chain_with_intent(
+                            operator_omni,
+                            challenge,
+                            rp_id,
+                            intent_ctx,
+                        )
+                        .await
+                        .map_err(|e| anyhow::anyhow!("k11 webauthn assert: {e}"))?;
+                    serde_json::to_string_pretty(&payload)
+                        .map_err(|e| anyhow::anyhow!("serialize: {e}"))
+                } else {
+                    let assertion = agentkeys_cli::k11_webauthn::assert_webauthn_with_intent(
+                        operator_omni,
+                        &msg,
+                        rp_id,
+                        intent_ctx,
+                    )
+                    .await
+                    .map_err(|e| anyhow::anyhow!("k11 webauthn assert: {e}"))?;
+                    Ok(format!("0x{}", hex::encode(assertion)))
+                }
+            } else {
+                // Stub mode ignores intent (no UI to render it on).
+                let _ = intent_ctx;
+                let assertion = agentkeys_cli::k11::assert_stub(operator_omni, &msg)
+                    .map_err(|e| anyhow::anyhow!("k11 assert: {e}"))?;
+                Ok(format!("0x{}", hex::encode(assertion)))
+            }
+        }
+    }
+}
+
+#[tokio::main]
+async fn main() {
+    let cli = Cli::parse();
+    let cred_kind = match CredentialBackendKind::parse(&cli.credential_backend) {
+        Ok(k) => k,
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+    };
+    let ctx = CommandContext::new(&cli.backend, cli.verbose, cli.json)
+        .with_broker_url(cli.broker_url.clone())
+        .with_session_id(cli.session_id.clone())
+        .with_credential_backend(cred_kind)
+        .with_chain_profile_name(cli.chain.clone())
+        .with_signer_url(cli.signer_url.clone())
+        .with_omni_account(cli.omni_account.clone());
+
+    let result: anyhow::Result<String> = match &cli.command {
+        Commands::Init {
+            email,
+            oauth2_google,
+            broker_url,
+            signer_url,
+            chain_id,
+            poll_timeout_seconds,
+            force,
+        } => {
+            let broker_opt = broker_url.clone().or_else(|| ctx.broker_url.clone());
+            let signer = signer_url
+                .clone()
+                .unwrap_or_else(|| ctx.backend_url.clone());
+            let mode_result: anyhow::Result<InitMode> = match (email, *oauth2_google) {
+                (Some(addr), false) => broker_opt
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "agentkeys init: missing --broker-url (or AGENTKEYS_BROKER_URL)"
+                        )
+                    })
+                    .map(|broker| InitMode::Email {
+                        email: addr.clone(),
+                        broker_url: broker,
+                        signer_url: signer.clone(),
+                        chain_id: *chain_id,
+                        poll_timeout_seconds: *poll_timeout_seconds,
+                    }),
+                (None, true) => broker_opt
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "agentkeys init: missing --broker-url (or AGENTKEYS_BROKER_URL)"
+                        )
+                    })
+                    .map(|broker| InitMode::Oauth2Google {
+                        broker_url: broker,
+                        signer_url: signer.clone(),
+                        chain_id: *chain_id,
+                        poll_timeout_seconds: *poll_timeout_seconds,
+                    }),
+                (Some(_), true) => unreachable!("clap conflicts_with prevents both"),
+                (None, false) => Err(anyhow::anyhow!(
+                    "agentkeys init: pass --email <addr> or --oauth2-google (the legacy --mock-token flag was hard-cut in issue #74 step 1)"
+                )),
+            };
+            match mode_result {
+                Ok(mode) => cmd_init_with_force(&ctx, mode, *force)
+                    .await
+                    .map(|(msg, _session)| msg),
+                Err(e) => Err(e),
+            }
+        }
+        Commands::Store {
+            agent,
+            service,
+            key,
+        } => cmd_store(&ctx, agent.as_deref(), service, key).await,
+        Commands::Read { agent, service } => cmd_read(&ctx, agent.as_deref(), service).await,
+        Commands::Run { agent, env, cmd } => cmd_run(&ctx, agent.as_deref(), env, cmd).await,
+        Commands::Revoke { agent } => cmd_revoke(&ctx, agent.as_deref()).await,
+        Commands::Teardown { agent } => cmd_teardown(&ctx, agent).await,
+        Commands::Approve { pair_code, yes } => cmd_approve(&ctx, pair_code, *yes).await,
+        Commands::Scope {
+            agent,
+            add,
+            remove,
+            set,
+            list,
+        } => cmd_scope(&ctx, agent, add, remove, set.as_deref(), *list).await,
+        Commands::Provision { service, force } => {
+            cmd_provision(&ctx, service, *force, None).await.map(|out| {
+                for line in &out.stderr_lines {
+                    eprintln!("{}", line);
+                }
+                out.stdout_line
+            })
+        }
+        Commands::Feedback => Ok(cmd_feedback()),
+        Commands::Inbox { action } => match action {
+            InboxAction::Provision { agent } => cmd_inbox_provision(&ctx, agent.as_deref()).await,
+            InboxAction::List { agent } => cmd_inbox_list(&ctx, agent.as_deref()).await,
+        },
+        Commands::Whoami {
+            signer_url,
+            omni_account,
+        } => cmd_whoami(&ctx, signer_url.as_deref(), omni_account.as_deref()).await,
+        Commands::Signer { action } => match action {
+            SignerAction::Derive {
+                signer_url,
+                omni_account,
+            } => cmd_signer_derive(&ctx, signer_url, omni_account).await,
+            SignerAction::Sign {
+                signer_url,
+                omni_account,
+                message,
+            } => cmd_signer_sign(&ctx, signer_url, omni_account, message).await,
+            SignerAction::SignTypedData {
+                signer_url,
+                omni_account,
+                typed_data_file,
+                preview_7730,
+            } => {
+                cmd_signer_sign_typed_data(
+                    &ctx,
+                    signer_url,
+                    omni_account,
+                    typed_data_file,
+                    *preview_7730,
+                )
+                .await
+            }
+            SignerAction::Preview7730 {
+                typed_data_file,
+                seven_thirty_file,
+            } => cmd_signer_preview_7730(&ctx, typed_data_file, seven_thirty_file.as_deref()).await,
+        },
+        Commands::Chain { action } => cmd_chain(&ctx, action).await,
+        Commands::Models { action } => cmd_models(action).await,
+        Commands::Local {
+            action: LocalAction::Channel(options),
+        } => agentkeys_cli::local_channel::execute(&ctx, options)
+            .await
+            .and_then(|result| serde_json::to_string(&result).map_err(Into::into)),
+        Commands::Local {
+            action: LocalAction::Credential(options),
+        } => agentkeys_cli::local_data::credential(&ctx, options)
+            .await
+            .and_then(|result| serde_json::to_string(&result).map_err(Into::into)),
+        Commands::Local {
+            action: LocalAction::Agent(options),
+        } => agentkeys_cli::local_agent::execute(&ctx, options)
+            .await
+            .and_then(|result| serde_json::to_string(&result).map_err(Into::into)),
+        Commands::K11 { action } => cmd_k11(&ctx, action).await,
+        Commands::Memory { action } => match action {
+            MemoryAction::CanonicalGet {
+                namespace,
+                operator_omni,
+                actor_omni,
+                device_key_file,
+                session_bearer,
+                broker_url,
+                memory_url,
+                delegation_file,
+            } => {
+                agentkeys_cli::cred_admin::memory_canonical_get(
+                    namespace,
+                    operator_omni,
+                    actor_omni,
+                    device_key_file.as_deref(),
+                    session_bearer,
+                    broker_url,
+                    memory_url,
+                    delegation_file.as_deref(),
+                )
+                .await
+            }
+            MemoryAction::InboxPush {
+                namespace,
+                key,
+                body,
+                kind,
+                operator_omni,
+                actor_omni,
+                device_key_file,
+                session_bearer,
+                broker_url,
+                memory_url,
+            } => match agentkeys_backend_client::protocol::ContextKind::parse(kind) {
+                None => Err(anyhow::anyhow!(
+                    "--kind must be one of knowledge|skill|persona (got `{kind}`)"
+                )),
+                Some(kind) => {
+                    agentkeys_cli::cred_admin::memory_inbox_push(
+                        namespace,
+                        key,
+                        body,
+                        kind,
+                        operator_omni,
+                        actor_omni,
+                        device_key_file,
+                        session_bearer,
+                        broker_url,
+                        memory_url,
+                    )
+                    .await
+                }
+            },
+            MemoryAction::InboxList { daemon_url } => {
+                agentkeys_cli::inbox_curate::inbox_list(daemon_url).await
+            }
+            MemoryAction::InboxView { s3_key, daemon_url } => {
+                agentkeys_cli::inbox_curate::inbox_view(daemon_url, s3_key).await
+            }
+            MemoryAction::InboxAccept {
+                s3_key,
+                confirm_content_hash,
+                daemon_url,
+            } => {
+                agentkeys_cli::inbox_curate::inbox_accept(
+                    daemon_url,
+                    s3_key,
+                    confirm_content_hash.as_deref(),
+                )
+                .await
+            }
+            MemoryAction::InboxReject { s3_key, daemon_url } => {
+                agentkeys_cli::inbox_curate::inbox_reject(daemon_url, s3_key).await
+            }
+        },
+        Commands::Agent { action } => match action {
+            AgentAction::DeviceSession {
+                broker_url,
+                key_file,
+                link_code,
+                chain_id,
+                regen,
+            } => {
+                agentkeys_cli::device_session::device_session(
+                    broker_url, key_file, link_code, *chain_id, *regen,
+                )
+                .await
+            }
+            AgentAction::Claim {
+                pairing_code,
+                label,
+                services,
+                broker_url,
+                session_bearer,
+            } => {
+                agentkeys_cli::agent_admin::agent_claim(
+                    broker_url,
+                    pairing_code,
+                    label,
+                    services,
+                    session_bearer,
+                )
+                .await
+            }
+            AgentAction::Pending {
+                broker_url,
+                session_bearer,
+            } => agentkeys_cli::agent_admin::agent_pending(broker_url, session_bearer).await,
+            AgentAction::Accept {
+                request_id,
+                services,
+                is_device,
+                k11_key_file,
+                rp_id,
+                operator_omni,
+                broker_url,
+                session_bearer,
+            } => {
+                // Same load-bearing notice as `k11 software-sign` (headless/CI
+                // stand-in — an on-disk key, no hardware boundary, no biometric).
+                eprintln!(
+                    "==> ⚠️  WARN: headless accept signs with the SOFTWARE P-256 passkey on disk \
+                     — CI / headless / throwaway-TEST masters ONLY. A real operator master \
+                     accepts in parent-control (Touch ID). See arch.md §9 / §22b.1."
+                );
+                async {
+                    agentkeys_cli::agent_admin::agent_accept(
+                        &ctx.development_signing()?,
+                        broker_url,
+                        request_id,
+                        services,
+                        *is_device,
+                        k11_key_file,
+                        rp_id,
+                        operator_omni,
+                        session_bearer,
+                    )
+                    .await
+                }
+                .await
+            }
+            AgentAction::Spawn {
+                label,
+                preset,
+                memory_ns,
+                memory_inherited,
+                k11_key_file,
+                rp_id,
+                broker_url,
+                session_bearer,
+            } => {
+                eprintln!(
+                    "==> ⚠️  WARN: headless spawn signs with the SOFTWARE P-256 passkey on disk \
+                     — CI / headless / throwaway-TEST masters ONLY. A real operator master \
+                     spawns in parent-control (Touch ID). See arch.md §9 / §22b.1."
+                );
+                async {
+                    agentkeys_cli::agent_admin::agent_spawn(
+                        &ctx.development_signing()?,
+                        broker_url,
+                        label,
+                        preset,
+                        memory_ns,
+                        *memory_inherited,
+                        k11_key_file,
+                        rp_id,
+                        session_bearer,
+                        None,
+                    )
+                    .await
+                }
+                .await
+            }
+            AgentAction::Archive {
+                device_key_hash,
+                keep_resources,
+                memory_ns,
+                k11_key_file,
+                rp_id,
+                broker_url,
+                session_bearer,
+            } => {
+                eprintln!(
+                    "==> ⚠️  WARN: headless archive signs with the SOFTWARE P-256 passkey on \
+                     disk — CI / headless / throwaway-TEST masters ONLY."
+                );
+                async {
+                    agentkeys_cli::agent_admin::agent_archive(
+                        &ctx.development_signing()?,
+                        broker_url,
+                        device_key_hash,
+                        *keep_resources,
+                        memory_ns,
+                        k11_key_file,
+                        rp_id,
+                        session_bearer,
+                        None,
+                    )
+                    .await
+                }
+                .await
+            }
+        },
+        Commands::App { action } => match action {
+            AppAction::Install {
+                template,
+                label,
+                bind,
+                resource,
+                audience,
+                tz_offset_minutes,
+                skip_endpoint_enrollment,
+                k11_key_file,
+                rp_id,
+                daemon_url,
+            } => {
+                eprintln!(
+                    "==> ⚠️  WARN: headless app install signs with the SOFTWARE P-256 passkey on \
+                     disk — CI / headless / throwaway-TEST masters ONLY. A real owner installs \
+                     from parent-control (Touch ID)."
+                );
+                let label = label.clone().unwrap_or_else(|| template.clone());
+                async {
+                    agentkeys_cli::app_admin::app_install(
+                        &ctx.development_signing()?,
+                        daemon_url,
+                        template,
+                        &label,
+                        bind,
+                        resource,
+                        audience,
+                        *tz_offset_minutes,
+                        !*skip_endpoint_enrollment,
+                        k11_key_file,
+                        rp_id,
+                    )
+                    .await
+                }
+                .await
+            }
+            AppAction::List { daemon_url } => agentkeys_cli::app_admin::app_list(daemon_url).await,
+            AppAction::Show { label, daemon_url } => {
+                agentkeys_cli::app_admin::app_show(daemon_url, label).await
+            }
+            AppAction::Uninstall {
+                label,
+                keep_memory,
+                k11_key_file,
+                rp_id,
+                daemon_url,
+            } => {
+                eprintln!(
+                    "==> ⚠️  WARN: headless app uninstall signs with the SOFTWARE P-256 passkey \
+                     on disk — CI / headless / throwaway-TEST masters ONLY."
+                );
+                async {
+                    agentkeys_cli::app_admin::app_uninstall(
+                        &ctx.development_signing()?,
+                        daemon_url,
+                        label,
+                        *keep_memory,
+                        k11_key_file,
+                        rp_id,
+                    )
+                    .await
+                }
+                .await
+            }
+            AppAction::Rebind {
+                label,
+                bind,
+                skip_endpoint_enrollment,
+                k11_key_file,
+                rp_id,
+                daemon_url,
+            } => {
+                eprintln!(
+                    "==> ⚠️  WARN: headless app rebind signs with the SOFTWARE P-256 passkey on \
+                     disk — CI / headless / throwaway-TEST masters ONLY. A real owner rebinds \
+                     from parent-control (Touch ID)."
+                );
+                async {
+                    agentkeys_cli::app_admin::app_rebind(
+                        &ctx.development_signing()?,
+                        daemon_url,
+                        label,
+                        bind,
+                        !*skip_endpoint_enrollment,
+                        k11_key_file,
+                        rp_id,
+                    )
+                    .await
+                }
+                .await
+            }
+            AppAction::Command {
+                label,
+                action,
+                command,
+                args,
+                daemon_url,
+            } => {
+                agentkeys_cli::app_admin::app_command(daemon_url, label, action, command, args)
+                    .await
+            }
+        },
+        Commands::Resource { action } => match action {
+            ResourceAction::Add {
+                id,
+                name,
+                name_zh,
+                kind,
+                tags,
+                sensitivity,
+                ns,
+                file,
+                daemon_url,
+            } => {
+                let body: anyhow::Result<String> = match file {
+                    Some(path) => std::fs::read_to_string(path)
+                        .map_err(|e| anyhow::anyhow!("read {path}: {e}")),
+                    None => {
+                        let mut buf = String::new();
+                        std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)
+                            .map(|_| buf)
+                            .map_err(|e| anyhow::anyhow!("read stdin: {e}"))
+                    }
+                };
+                match body {
+                    Ok(body) => {
+                        agentkeys_cli::app_admin::resource_add(
+                            daemon_url,
+                            id,
+                            name,
+                            name_zh,
+                            kind,
+                            tags,
+                            sensitivity,
+                            ns,
+                            body,
+                        )
+                        .await
+                    }
+                    Err(e) => Err(e),
+                }
+            }
+            ResourceAction::List { daemon_url } => {
+                agentkeys_cli::app_admin::resource_list(daemon_url).await
+            }
+        },
+        Commands::Cred { action } => match action {
+            CredAction::Fetch {
+                service,
+                select,
+                manifest,
+                operator_omni,
+                actor_omni,
+                device_key_file,
+                session_bearer,
+                broker_url,
+                cred_url,
+            } => {
+                // #216 default-key selection (off-chain). Resolve which service to
+                // fetch — explicit > --select N (1-based) > master-designated
+                // default — from the cred manifest, then fetch it (still on-chain
+                // verified). An explicit service needs no manifest.
+                let mpath = agentkeys_cli::cred_admin::cred_manifest_path(manifest.as_deref());
+                match agentkeys_types::CredManifest::load(&mpath)
+                    .map_err(|e| anyhow::anyhow!("load cred manifest {}: {e}", mpath.display()))
+                    .and_then(|m| {
+                        m.resolve(service.as_deref(), *select)
+                            .map_err(|e| anyhow::anyhow!("{e}"))
+                    }) {
+                    Ok(resolved) => {
+                        agentkeys_cli::cred_admin::cred_fetch(
+                            &resolved,
+                            operator_omni,
+                            actor_omni,
+                            device_key_file,
+                            session_bearer,
+                            broker_url,
+                            cred_url,
+                        )
+                        .await
+                    }
+                    Err(e) => Err(e),
+                }
+            }
+            CredAction::Store {
+                service,
+                secret,
+                secret_env,
+                operator_omni,
+                actor_omni,
+                device_key_file,
+                session_bearer,
+                broker_url,
+                cred_url,
+            } => {
+                let resolved: anyhow::Result<String> = match (secret, secret_env) {
+                    (Some(s), _) => Ok(s.clone()),
+                    (None, Some(env_name)) => std::env::var(env_name).map_err(|_| {
+                        anyhow::anyhow!("--secret-env {env_name} is not set in the environment")
+                    }),
+                    (None, None) => Err(anyhow::anyhow!(
+                        "provide the secret via --secret <value> or --secret-env <ENV_NAME>"
+                    )),
+                };
+                match resolved {
+                    Ok(secret_value) => agentkeys_cli::cred_admin::cred_store(
+                        service,
+                        &secret_value,
+                        operator_omni,
+                        actor_omni,
+                        device_key_file,
+                        session_bearer,
+                        broker_url,
+                        cred_url,
+                    )
+                    .await
+                    .map(|s3_key| format!("stored `{service}` → {s3_key}")),
+                    Err(e) => Err(e),
+                }
+            }
+            CredAction::List { manifest } => {
+                let mpath = agentkeys_cli::cred_admin::cred_manifest_path(manifest.as_deref());
+                agentkeys_cli::cred_admin::cred_list(&mpath)
+            }
+            CredAction::Manifest {
+                services,
+                default,
+                manifest,
+            } => {
+                let mpath = agentkeys_cli::cred_admin::cred_manifest_path(manifest.as_deref());
+                agentkeys_cli::cred_admin::cred_manifest_write(&mpath, services, default.clone())
+            }
+        },
+        Commands::Delegation { action } => match action {
+            DelegationAction::Resolve {
+                broker_url,
+                key_file,
+                is_device,
+            } => {
+                agentkeys_cli::delegation_admin::device_resolve(broker_url, key_file, *is_device)
+                    .await
+            }
+            DelegationAction::Cosign {
+                broker_url,
+                key_file,
+                scope,
+                ttl_seconds,
+                once,
+                poll_interval_secs,
+            } => {
+                agentkeys_cli::delegation_admin::device_cosign(
+                    broker_url,
+                    key_file,
+                    scope,
+                    *ttl_seconds,
+                    *once,
+                    *poll_interval_secs,
+                )
+                .await
+            }
+            DelegationAction::Bootstrap {
+                broker_url,
+                session_bearer,
+                scope,
+                ttl_seconds,
+                ephemeral_key_file,
+                out_file,
+                poll_attempts,
+                poll_interval_secs,
+                regen,
+            } => {
+                agentkeys_cli::delegation_admin::delegation_bootstrap(
+                    broker_url,
+                    session_bearer,
+                    scope,
+                    *ttl_seconds,
+                    ephemeral_key_file,
+                    out_file,
+                    *poll_attempts,
+                    *poll_interval_secs,
+                    *regen,
+                )
+                .await
+            }
+        },
+    };
+
+    match result {
+        Ok(output) => {
+            if !output.is_empty() {
+                println!("{}", output);
+            }
+        }
+        Err(err) => {
+            if let Some(incomplete) =
+                err.downcast_ref::<agentkeys_cli::local_agent::IncompleteOperation>()
+            {
+                println!("{}", incomplete.0);
+            }
+            // {:#} prints the FULL anyhow context chain (e.g.
+            // "memory.put: MCP error (http 200): ... 502 ... s3_put"), not just
+            // the top context ("memory.put") — without it the real cause of a
+            // failed command is invisible (the harness only saw "memory.put").
+            eprintln!("{:#}", err);
+            std::process::exit(1);
+        }
+    }
+}

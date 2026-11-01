@@ -1,0 +1,35 @@
+[package]
+license.workspace = true
+name = "agentkeys-worker-classify"
+version = "0.1.0"
+edition = "2021"
+description = "Authorized local catalog classification"
+
+[[bin]]
+name = "agentkeys-worker-classify"
+path = "src/main.rs"
+
+[lib]
+name = "agentkeys_worker_classify"
+path = "src/lib.rs"
+
+[dependencies]
+agentkeys-core = { workspace = true }
+agentkeys-protocol = { workspace = true }
+agentkeys-worker-creds = { path = "../agentkeys-worker-creds" }
+agentkeys-catalog = { path = "../agentkeys-catalog" }
+axum = { version = "0.7", features = ["json"] }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+reqwest = { version = "0.12", features = ["json"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+clap = { version = "4", features = ["derive", "env"] }
+
+[dev-dependencies]
+p256 = { version = "0.13", features = ["pkcs8", "pem", "ecdsa"] }
+rand_core = { version = "0.6", features = ["std"] }
+tokio = { workspace = true }

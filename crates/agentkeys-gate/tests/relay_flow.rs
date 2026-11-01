@@ -1,0 +1,1503 @@
+//! End-to-end relay flows against a mock OpenAI upstream + a mock audit
+//! worker: custody (vendor key attached relay-side, caller key never
+//! forwarded), metering (non-streamed + streamed with include_usage
+//! injection), deterministic budgets, upstream error triage, and the
+//! per-device/per-key → user rollup (#384).
+
+use std::net::SocketAddr;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+
+use axum::{
+    body::Body,
+    extract::State,
+    http::{HeaderMap, StatusCode},
+    response::{IntoResponse, Response},
+    routing::{get, post},
+    Json, Router,
+};
+use serde_json::{json, Value};
+
+use agentkeys_gate::config::DecisionEndpoint;
+use agentkeys_gate::config::{DecisionUpstreams, GateConfig, RelayKey, UpstreamConfig};
+use agentkeys_gate::relay::Relay;
+use agentkeys_gate::server;
+
+const UPSTREAM_KEY: &str = "synthetic-upstream-secret";
+/// #722 — the gate-held TypeSafe key (independent of the chat key).
+const TYPESAFE_KEY: &str = "ts-vendor-secret";
+/// The gate-held key of the self-hosted Kev server (a third credential).
+const KEV_KEY: &str = "kev-server-secret";
+const RELAY_KEY_1: &str = "gk_device_one";
+const RELAY_KEY_2: &str = "gk_device_two";
+
+fn user_omni() -> String {
+    format!("0x{}", "aa".repeat(32))
+}
+
+/// (authorization header, request body) pairs the mock upstream captured.
+type CapturedRequests = Arc<Mutex<Vec<(Option<String>, Value)>>>;
+
+#[derive(Clone, Default)]
+struct UpstreamState {
+    requests: CapturedRequests,
+    calls: Arc<AtomicUsize>,
+    mode: Arc<Mutex<String>>,
+}
+
+async fn upstream_chat(
+    State(state): State<UpstreamState>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Response {
+    state.calls.fetch_add(1, Ordering::SeqCst);
+    let auth = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    state.requests.lock().unwrap().push((auth, body));
+    let mode = state.mode.lock().unwrap().clone();
+    match mode.as_str() {
+        "ok" => Json(json!({
+            "id": "cmpl-1", "object": "chat.completion", "created": 1, "model": "ep-doubao",
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": "hi"}, "finish_reason": "stop"}],
+            "usage": {
+                "prompt_tokens": 100, "completion_tokens": 40, "total_tokens": 140,
+                "prompt_tokens_details": {"cached_tokens": 60},
+                "completion_tokens_details": {"reasoning_tokens": 15}
+            }
+        }))
+        .into_response(),
+        "stream" => {
+            let sse = concat!(
+                "data: {\"choices\":[{\"delta\":{\"content\":\"he\"}}],\"usage\":null}\n\n",
+                "data: {\"choices\":[{\"delta\":{\"content\":\"llo\"}}],\"usage\":null}\n\n",
+                "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":3,\"total_tokens\":10}}\n\n",
+                "data: [DONE]\n\n"
+            );
+            Response::builder()
+                .status(StatusCode::OK)
+                .header("content-type", "text/event-stream")
+                .body(Body::from(sse))
+                .unwrap()
+        }
+        "http500" => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "SECRET-INTERNAL-DETAIL: shard 7 down",
+        )
+            .into_response(),
+        "http404" => (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": {"message": "model not found", "type": "invalid_request_error"}})),
+        )
+            .into_response(),
+        "overdue" => account_quota_refusal(),
+        other => panic!("unknown upstream mode {other}"),
+    }
+}
+
+/// Synthetic account-scoped refusal.
+const ACCOUNT_REFUSAL: &str = r#"{"error":{"code":"insufficient_quota","message":"Synthetic account quota exhausted.","param":"","type":"Forbidden"}}"#;
+
+fn account_quota_refusal() -> Response {
+    Response::builder()
+        .status(StatusCode::FORBIDDEN)
+        .header("content-type", "application/json")
+        .body(Body::from(ACCOUNT_REFUSAL))
+        .unwrap()
+}
+
+async fn upstream_models() -> Response {
+    Json(json!({"object": "list", "data": [{"id": "ep-doubao"}]})).into_response()
+}
+
+/// #572 — the mock embeddings endpoint: OpenAI shape, one vector per input,
+/// `usage` with prompt == total (embeddings have no completion tokens).
+async fn upstream_embeddings(
+    State(state): State<UpstreamState>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Response {
+    state.calls.fetch_add(1, Ordering::SeqCst);
+    let auth = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    state.requests.lock().unwrap().push((auth, body.clone()));
+    if state.mode.lock().unwrap().as_str() == "overdue" {
+        return account_quota_refusal();
+    }
+    let input_count = match body.get("input") {
+        Some(Value::Array(a)) => a.len(),
+        Some(Value::String(_)) => 1,
+        _ => 0,
+    };
+    let data: Vec<Value> = (0..input_count)
+        .map(|i| json!({"object": "embedding", "index": i, "embedding": [0.1, 0.2]}))
+        .collect();
+    Json(json!({
+        "object": "list",
+        "data": data,
+        "model": body.get("model").cloned().unwrap_or_default(),
+        "usage": {"prompt_tokens": 21, "total_tokens": 21}
+    }))
+    .into_response()
+}
+
+/// #722 — the mock System One endpoint (TypeSafe, or a Kev server): one
+/// Choice answer in the documented shape (API reference "Choice answer") + the
+/// input/output token usage, answered as the model it was asked for.
+async fn upstream_systemone(
+    State(state): State<UpstreamState>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Response {
+    state.calls.fetch_add(1, Ordering::SeqCst);
+    let auth = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    state.requests.lock().unwrap().push((auth, body.clone()));
+    let mode = state.mode.lock().unwrap().clone();
+    if mode == "http500" {
+        return (StatusCode::INTERNAL_SERVER_ERROR, "vendor exploded").into_response();
+    }
+    let first_question = body
+        .get("questions")
+        .and_then(Value::as_object)
+        .and_then(|q| q.keys().next().cloned())
+        .unwrap_or_else(|| "q".to_string());
+    Json(json!({
+        "model": body.get("model").cloned().unwrap_or_default(),
+        "answers": {
+            first_question: {
+                "type": "choice",
+                "choice": "chef",
+                "probabilities": {"chef": 0.88, "storyteller": 0.12},
+                "confidence": 0.81
+            }
+        },
+        "usage": {"input_tokens": 318, "output_tokens": 34}
+    }))
+    .into_response()
+}
+
+async fn spawn_upstream() -> (SocketAddr, UpstreamState) {
+    let state = UpstreamState {
+        mode: Arc::new(Mutex::new("ok".to_string())),
+        ..Default::default()
+    };
+    let app = Router::new()
+        .route("/v1/chat/completions", post(upstream_chat))
+        .route("/v1/embeddings", post(upstream_embeddings))
+        .route("/v1/embeddings/multimodal", post(upstream_embeddings))
+        .route("/v1/systemone", post(upstream_systemone))
+        .route("/v1/models", get(upstream_models))
+        // The real Kev server sits under a path prefix (`…/kev/v1/…`).
+        .route("/kev/v1/systemone", post(upstream_systemone))
+        .route("/kev/v1/models", get(upstream_models))
+        .with_state(state.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    (addr, state)
+}
+
+#[derive(Clone, Default)]
+struct AuditState {
+    envelopes: Arc<Mutex<Vec<Value>>>,
+}
+
+async fn audit_append(State(state): State<AuditState>, Json(body): Json<Value>) -> Response {
+    state.envelopes.lock().unwrap().push(body);
+    Json(json!({"ok": true, "envelope_hash": format!("0x{}", "ee".repeat(32))})).into_response()
+}
+
+async fn spawn_audit() -> (SocketAddr, AuditState) {
+    let state = AuditState::default();
+    let app = Router::new()
+        .route("/v1/audit/append/v2", post(audit_append))
+        .with_state(state.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    (addr, state)
+}
+
+fn relay_keys() -> Vec<RelayKey> {
+    vec![
+        RelayKey {
+            key: RELAY_KEY_1.into(),
+            key_id: "k1".into(),
+            user_omni: user_omni(),
+            device_id: "esp32-01".into(),
+            label: "kid tablet".into(),
+            delegate_omni: None,
+            budget_tokens: None,
+            disabled: false,
+        },
+        RelayKey {
+            key: RELAY_KEY_2.into(),
+            key_id: "k2".into(),
+            user_omni: user_omni(),
+            device_id: "esp32-02".into(),
+            label: "living room".into(),
+            delegate_omni: None,
+            budget_tokens: None,
+            disabled: false,
+        },
+    ]
+}
+
+struct TestGate {
+    base: String,
+    upstream: UpstreamState,
+    /// The Kev server (its own host and key).
+    kev: UpstreamState,
+    audit: AuditState,
+}
+
+async fn spawn_gate(budget: Option<u64>) -> TestGate {
+    let (up_addr, upstream) = spawn_upstream().await;
+    let (kev_addr, kev) = spawn_upstream().await;
+    let (audit_addr, audit) = spawn_audit().await;
+    let config = GateConfig {
+        listen: "127.0.0.1:0".parse().unwrap(),
+        upstream: UpstreamConfig {
+            base_url: format!("http://{up_addr}/v1"),
+            api_key: UPSTREAM_KEY.into(),
+            model_override: None,
+            default_model: Some("ep-stack-chat".into()),
+        },
+        keys: relay_keys(),
+        user_budgets: Default::default(),
+        default_budget_tokens: budget,
+        admin_token: Some("admintok".into()),
+        keys_file: None,
+        audit_url: Some(format!("http://{audit_addr}")),
+        require_audit: false,
+        speech_backend: None,
+        search: None,
+        // #722 — the mock upstream doubles as TypeSafe (same host, own key);
+        // Kev is a second server with a third key.
+        decision: DecisionUpstreams {
+            jev: Some(DecisionEndpoint {
+                api_key: TYPESAFE_KEY.into(),
+                base_url: format!("http://{up_addr}"),
+            }),
+            kev: Some(DecisionEndpoint {
+                api_key: KEV_KEY.into(),
+                base_url: format!("http://{kev_addr}/kev"),
+            }),
+        },
+    };
+    let relay = Arc::new(Relay::new(config));
+    let app = server::router(relay);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    TestGate {
+        base: format!("http://{addr}"),
+        upstream,
+        kev,
+        audit,
+    }
+}
+
+fn chat_body(stream: bool) -> Value {
+    json!({
+        "model": "ep-doubao",
+        "messages": [{"role": "user", "content": "hello"}],
+        "stream": stream,
+        "temperature": 0.4
+    })
+}
+
+async fn wait_for<F: Fn() -> bool>(cond: F, what: &str) {
+    for _ in 0..100 {
+        if cond() {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    panic!("timed out waiting for {what}");
+}
+
+#[tokio::test]
+async fn non_streamed_turn_custody_metering_audit() {
+    let gate = spawn_gate(None).await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .post(format!("{}/v1/chat/completions", gate.base))
+        .bearer_auth(RELAY_KEY_1)
+        .json(&chat_body(false))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["choices"][0]["message"]["content"], "hi");
+    assert_eq!(body["usage"]["total_tokens"], 140);
+
+    // Custody: upstream saw the VENDOR key, never the relay key; the caller's
+    // extra params rode through.
+    let reqs = gate.upstream.requests.lock().unwrap().clone();
+    assert_eq!(reqs.len(), 1);
+    assert_eq!(
+        reqs[0].0.as_deref(),
+        Some("Bearer synthetic-upstream-secret")
+    );
+    assert_eq!(reqs[0].1["temperature"], 0.4);
+    assert!(reqs[0].1.get("stream_options").is_none());
+
+    // Metering: rolled up to the user with device/key attribution.
+    let usage: Value = client
+        .get(format!("{}/v1/usage", gate.base))
+        .bearer_auth(RELAY_KEY_1)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(usage["user_omni"], user_omni());
+    assert_eq!(usage["used_tokens"], 140);
+    assert_eq!(usage["totals"]["cached_tokens"], 60);
+    assert_eq!(usage["totals"]["reasoning_tokens"], 15);
+    assert_eq!(usage["by_device"][0]["device_id"], "esp32-01");
+    assert_eq!(usage["by_api_key"][0]["api_key_id"], "k1");
+
+    // Audit: one GateTurn (op_kind 90) envelope with the attribution + usage.
+    let envs = gate.audit.envelopes.lock().unwrap().clone();
+    assert_eq!(envs.len(), 1);
+    assert_eq!(envs[0]["op_kind"], 90);
+    assert_eq!(envs[0]["actor_omni"], user_omni());
+    assert_eq!(envs[0]["op_body"]["device_id"], "esp32-01");
+    assert_eq!(envs[0]["op_body"]["api_key_id"], "k1");
+    assert_eq!(envs[0]["op_body"]["total_tokens"], 140);
+    assert_eq!(envs[0]["op_body"]["outcome"], "ok");
+    assert_eq!(envs[0]["result"], 0);
+}
+
+/// A caller that names no model (the perception step, the contact gate's
+/// photo description) runs on the stack's chat endpoint; a named one rides
+/// through untouched.
+#[tokio::test]
+async fn a_chat_that_names_no_model_runs_on_the_stacks_chat_endpoint() {
+    let gate = spawn_gate(None).await;
+    let client = reqwest::Client::new();
+    let mut unnamed = chat_body(false);
+    unnamed.as_object_mut().unwrap().remove("model");
+    for body in [unnamed, chat_body(false)] {
+        let resp = client
+            .post(format!("{}/v1/chat/completions", gate.base))
+            .bearer_auth(RELAY_KEY_1)
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+    }
+    let reqs = gate.upstream.requests.lock().unwrap().clone();
+    assert_eq!(reqs[0].1["model"], "ep-stack-chat");
+    assert_eq!(reqs[1].1["model"], "ep-doubao");
+}
+
+/// #572 — the embeddings relay: custody (vendor key attached relay-side),
+/// metering into the shared totals + the embed dimension, and the GateEmbed
+/// (op_kind 93) audit row.
+#[tokio::test]
+async fn embeddings_call_custody_metering_audit() {
+    let gate = spawn_gate(None).await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .post(format!("{}/v1/embeddings", gate.base))
+        .bearer_auth(RELAY_KEY_1)
+        .json(&json!({"model": "ep-doubao-embedding", "input": ["one", "two", "three"]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["data"][0]["object"], "embedding");
+    assert_eq!(body["usage"]["total_tokens"], 21);
+
+    // Custody: the upstream saw the VENDOR key, never the relay key; the
+    // caller's model rode through untouched (no chat model_override applied).
+    let reqs = gate.upstream.requests.lock().unwrap().clone();
+    assert_eq!(reqs.len(), 1);
+    assert_eq!(
+        reqs[0].0.as_deref(),
+        Some("Bearer synthetic-upstream-secret")
+    );
+    assert_eq!(reqs[0].1["model"], "ep-doubao-embedding");
+
+    // Metering: embed tokens land in the shared totals AND the embed slice.
+    let usage: Value = client
+        .get(format!("{}/v1/usage", gate.base))
+        .bearer_auth(RELAY_KEY_1)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(usage["used_tokens"], 21);
+    assert_eq!(usage["totals"]["embed_tokens"], 21);
+    assert_eq!(usage["totals"]["embed_turns"], 1);
+    assert_eq!(usage["totals"]["turns"], 0);
+
+    // Audit: one GateEmbed (op_kind 93) envelope with the attribution.
+    let envs = gate.audit.envelopes.lock().unwrap().clone();
+    assert_eq!(envs.len(), 1);
+    assert_eq!(envs[0]["op_kind"], 93);
+    assert_eq!(envs[0]["actor_omni"], user_omni());
+    assert_eq!(envs[0]["op_body"]["api_key_id"], "k1");
+    assert_eq!(envs[0]["op_body"]["input_count"], 3);
+    assert_eq!(envs[0]["op_body"]["total_tokens"], 21);
+    assert_eq!(envs[0]["op_body"]["outcome"], "ok");
+    assert_eq!(envs[0]["result"], 0);
+}
+
+/// #572 — chat and embeddings burn ONE per-user budget: a chat turn that
+/// exhausts it makes the next embeddings call (any key of the user) a
+/// deterministic 429 that never reaches the upstream.
+#[tokio::test]
+async fn embeddings_share_the_user_budget_with_chat() {
+    let gate = spawn_gate(Some(100)).await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .post(format!("{}/v1/chat/completions", gate.base))
+        .bearer_auth(RELAY_KEY_1)
+        .json(&chat_body(false))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let resp = client
+        .post(format!("{}/v1/embeddings", gate.base))
+        .bearer_auth(RELAY_KEY_2)
+        .json(&json!({"model": "ep-doubao-embedding", "input": "late text"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 429);
+    let err: Value = resp.json().await.unwrap();
+    assert_eq!(err["error"]["code"], "budget_exceeded");
+
+    // The embeddings call never reached the upstream (only the chat turn did).
+    assert_eq!(gate.upstream.calls.load(Ordering::SeqCst), 1);
+
+    // The denial landed as a GateEmbed row with the NotPermitted result byte.
+    let envs = gate.audit.envelopes.lock().unwrap().clone();
+    assert_eq!(envs.len(), 2);
+    assert_eq!(envs[1]["op_kind"], 93);
+    assert_eq!(envs[1]["op_body"]["outcome"], "denied:budget_exceeded");
+    assert_eq!(envs[1]["result"], 2);
+}
+
+#[tokio::test]
+async fn streamed_turn_injects_include_usage_and_meters_after_stream() {
+    let gate = spawn_gate(None).await;
+    *gate.upstream.mode.lock().unwrap() = "stream".into();
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .post(format!("{}/v1/chat/completions", gate.base))
+        .bearer_auth(RELAY_KEY_1)
+        .json(&chat_body(true))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let text = resp.text().await.unwrap();
+    // Byte-faithful passthrough of the SSE stream.
+    assert!(text.contains("data: {\"choices\":[{\"delta\":{\"content\":\"he\"}}]"));
+    assert!(text.contains("data: [DONE]"));
+
+    // The relay injected include_usage so the final chunk carries usage.
+    let reqs = gate.upstream.requests.lock().unwrap().clone();
+    assert_eq!(reqs[0].1["stream_options"]["include_usage"], true);
+
+    // Metering + audit run in the stream finalizer.
+    let meter_done = {
+        let audit = gate.audit.envelopes.clone();
+        move || !audit.lock().unwrap().is_empty()
+    };
+    wait_for(meter_done, "stream finalizer audit").await;
+    let envs = gate.audit.envelopes.lock().unwrap().clone();
+    assert_eq!(envs[0]["op_body"]["streamed"], true);
+    assert_eq!(envs[0]["op_body"]["total_tokens"], 10);
+
+    let usage: Value = client
+        .get(format!("{}/v1/usage", gate.base))
+        .bearer_auth(RELAY_KEY_1)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(usage["used_tokens"], 10);
+}
+
+#[tokio::test]
+async fn unknown_key_is_401_and_never_reaches_upstream() {
+    let gate = spawn_gate(None).await;
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{}/v1/chat/completions", gate.base))
+        .bearer_auth("gk_wrong")
+        .json(&chat_body(false))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["error"]["type"], "authentication_error");
+    assert_eq!(gate.upstream.calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn budget_zero_denies_deterministically_without_upstream() {
+    let gate = spawn_gate(Some(0)).await;
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{}/v1/chat/completions", gate.base))
+        .bearer_auth(RELAY_KEY_1)
+        .json(&chat_body(false))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 429);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["error"]["type"], "insufficient_quota");
+    assert_eq!(body["error"]["code"], "budget_exceeded");
+    assert_eq!(gate.upstream.calls.load(Ordering::SeqCst), 0);
+
+    let envs = gate.audit.envelopes.lock().unwrap().clone();
+    assert_eq!(envs.len(), 1);
+    assert_eq!(envs[0]["op_body"]["outcome"], "denied:budget_exceeded");
+    assert_eq!(envs[0]["result"], 2);
+}
+
+#[tokio::test]
+async fn budget_enforced_after_accumulation() {
+    // Budget 200: the first 140-token turn fits; the second is denied
+    // (used 140 >= remaining check happens against 200? no — 140 < 200 so a
+    // second turn runs; after 280 the third is denied).
+    let gate = spawn_gate(Some(200)).await;
+    let client = reqwest::Client::new();
+    for _ in 0..2 {
+        let resp = client
+            .post(format!("{}/v1/chat/completions", gate.base))
+            .bearer_auth(RELAY_KEY_1)
+            .json(&chat_body(false))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+    }
+    let resp = client
+        .post(format!("{}/v1/chat/completions", gate.base))
+        .bearer_auth(RELAY_KEY_1)
+        .json(&chat_body(false))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 429);
+    assert_eq!(gate.upstream.calls.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn upstream_5xx_is_operator_logged_never_echoed() {
+    let gate = spawn_gate(None).await;
+    *gate.upstream.mode.lock().unwrap() = "http500".into();
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{}/v1/chat/completions", gate.base))
+        .bearer_auth(RELAY_KEY_1)
+        .json(&chat_body(false))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 502);
+    let text = resp.text().await.unwrap();
+    assert!(
+        !text.contains("SECRET-INTERNAL-DETAIL"),
+        "upstream 5xx body must not be echoed: {text}"
+    );
+    let body: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(body["error"]["type"], "upstream_error");
+
+    let envs = gate.audit.envelopes.lock().unwrap().clone();
+    assert_eq!(envs[0]["op_body"]["outcome"], "upstream_error");
+    assert_eq!(envs[0]["result"], 1);
+}
+
+#[tokio::test]
+async fn upstream_4xx_is_forwarded_verbatim() {
+    let gate = spawn_gate(None).await;
+    *gate.upstream.mode.lock().unwrap() = "http404".into();
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{}/v1/chat/completions", gate.base))
+        .bearer_auth(RELAY_KEY_1)
+        .json(&chat_body(false))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["error"]["message"], "model not found");
+
+    // A refusal of THIS request says nothing about the account: still ready.
+    let resp = client
+        .get(format!("{}/readyz", gate.base))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+}
+
+/// An account-scoped failure holds readiness until a successful inference.
+async fn readyz(client: &reqwest::Client, base: &str) -> (reqwest::StatusCode, Value) {
+    let response = client.get(format!("{base}/readyz")).send().await.unwrap();
+    let status = response.status();
+    (status, response.json::<Value>().await.unwrap())
+}
+
+#[tokio::test]
+async fn an_account_refusal_is_forwarded_and_holds_readyz_until_a_2xx() {
+    let gate = spawn_gate(None).await;
+    let client = reqwest::Client::new();
+    let (status, body) = readyz(&client, &gate.base).await;
+    assert_eq!(status, 200);
+    assert_eq!(body["status"], "ready");
+
+    *gate.upstream.mode.lock().unwrap() = "overdue".into();
+    let resp = client
+        .post(format!("{}/v1/embeddings/multimodal", gate.base))
+        .bearer_auth(RELAY_KEY_1)
+        .json(&json!({"model": "ep-embed", "input": [{"type": "text", "text": "rice"}]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 403);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "insufficient_quota");
+    // A different key, a different route — the same account refusal.
+    let resp = client
+        .post(format!("{}/v1/chat/completions", gate.base))
+        .bearer_auth(RELAY_KEY_2)
+        .json(&chat_body(false))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 403);
+
+    let (status, body) = readyz(&client, &gate.base).await;
+    assert_eq!(status, 503);
+    assert_eq!(body["status"], "unready");
+    let refused = &body["upstream_account_refused"];
+    assert_eq!(refused["code"], "insufficient_quota");
+    assert_eq!(refused["status"], 403);
+    assert_eq!(refused["route"], "/chat/completions");
+    assert_eq!(refused["refusals"], 2);
+    assert!(refused["first_seen_unix"].as_u64().unwrap() > 0);
+    assert!(
+        refused.get("message").is_none(),
+        "the public readiness body names the code, never the upstream message"
+    );
+    let resp = client
+        .get(format!("{}/healthz", gate.base))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "liveness is not readiness");
+
+    // The account is paid up: the next real call is the proof, and clears it.
+    *gate.upstream.mode.lock().unwrap() = "ok".into();
+    let resp = client
+        .post(format!("{}/v1/chat/completions", gate.base))
+        .bearer_auth(RELAY_KEY_1)
+        .json(&chat_body(false))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let (status, body) = readyz(&client, &gate.base).await;
+    assert_eq!(status, 200);
+    assert_eq!(body["status"], "ready");
+}
+
+#[tokio::test]
+async fn two_keys_roll_up_to_one_user_and_admin_sees_all() {
+    let gate = spawn_gate(None).await;
+    let client = reqwest::Client::new();
+    for key in [RELAY_KEY_1, RELAY_KEY_2] {
+        let resp = client
+            .post(format!("{}/v1/chat/completions", gate.base))
+            .bearer_auth(key)
+            .json(&chat_body(false))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+    }
+
+    // Both keys' usage accumulated to the ONE owning user.
+    let usage: Value = client
+        .get(format!("{}/v1/usage", gate.base))
+        .bearer_auth(RELAY_KEY_2)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(usage["used_tokens"], 280);
+    assert_eq!(usage["by_device"].as_array().unwrap().len(), 2);
+    assert_eq!(usage["by_api_key"].as_array().unwrap().len(), 2);
+
+    // Admin token: all-users view.
+    let all: Value = client
+        .get(format!("{}/v1/usage", gate.base))
+        .bearer_auth("admintok")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(all.as_array().unwrap().len(), 1);
+    assert_eq!(all[0]["used_tokens"], 280);
+
+    // A relay key cannot query another user.
+    let other = format!("0x{}", "bb".repeat(32));
+    let resp = client
+        .get(format!("{}/v1/usage?user_omni={other}", gate.base))
+        .bearer_auth(RELAY_KEY_1)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 403);
+}
+
+#[tokio::test]
+async fn models_passthrough_requires_a_key() {
+    let gate = spawn_gate(None).await;
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("{}/v1/models", gate.base))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+    let resp = client
+        .get(format!("{}/v1/models", gate.base))
+        .bearer_auth(RELAY_KEY_1)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["data"][0]["id"], "ep-doubao");
+}
+
+// ─── #427 — broker-driven provisioning + per-delegate budgets ────────────────
+
+#[tokio::test]
+async fn admin_provisions_a_delegate_key_and_disable_refuses_turns() {
+    let gate = spawn_gate(None).await;
+    let client = reqwest::Client::new();
+    let delegate_dkh = format!("0x{}", "11".repeat(32));
+
+    // Non-admin provisioning is refused (a relay key is NOT an admin).
+    let resp = client
+        .post(format!("{}/v1/admin/keys", gate.base))
+        .bearer_auth(RELAY_KEY_1)
+        .json(&json!({"key_id": delegate_dkh, "user_omni": user_omni(), "device_id": delegate_dkh}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+
+    // Admin provision (the broker's spawn-finalize call) → a one-shot secret.
+    let resp = client
+        .post(format!("{}/v1/admin/keys", gate.base))
+        .bearer_auth("admintok")
+        .json(&json!({
+            "key_id": delegate_dkh,
+            "user_omni": user_omni(),
+            "delegate_omni": format!("0x{}", "cc".repeat(32)),
+            "device_id": delegate_dkh,
+            "label": "watchdog"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let minted: Value = resp.json().await.unwrap();
+    let secret = minted["secret"].as_str().unwrap().to_string();
+    assert!(secret.starts_with("gk_"));
+
+    // The minted key relays a turn and rolls up under its key_id.
+    let resp = client
+        .post(format!("{}/v1/chat/completions", gate.base))
+        .bearer_auth(&secret)
+        .json(&chat_body(false))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let usage: Value = client
+        .get(format!("{}/v1/usage", gate.base))
+        .bearer_auth(&secret)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(usage["by_api_key"][0]["api_key_id"], delegate_dkh);
+
+    // Archive → disable (idempotent) → the very same secret is a plain 401.
+    let resp = client
+        .post(format!(
+            "{}/v1/admin/keys/{delegate_dkh}/disable",
+            gate.base
+        ))
+        .bearer_auth("admintok")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["disabled"], true);
+    let resp = client
+        .post(format!(
+            "{}/v1/admin/keys/{delegate_dkh}/disable",
+            gate.base
+        ))
+        .bearer_auth("admintok")
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["disabled"], false);
+
+    let resp = client
+        .post(format!("{}/v1/chat/completions", gate.base))
+        .bearer_auth(&secret)
+        .json(&chat_body(false))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+}
+
+#[tokio::test]
+async fn per_delegate_budget_429s_deterministically_under_the_user_budget() {
+    // No user-level budget; the DELEGATE key carries its own 100-token ceiling.
+    let gate = spawn_gate(None).await;
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{}/v1/admin/keys", gate.base))
+        .bearer_auth("admintok")
+        .json(&json!({
+            "key_id": "delegate-b", "user_omni": user_omni(),
+            "device_id": "delegate-b", "budget_tokens": 100u64
+        }))
+        .send()
+        .await
+        .unwrap();
+    let secret = resp.json::<Value>().await.unwrap()["secret"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // First turn burns 140 tokens (over the 100 ceiling) — allowed (pre-burn
+    // gate compares BEFORE the turn), second is the deterministic 429.
+    let resp = client
+        .post(format!("{}/v1/chat/completions", gate.base))
+        .bearer_auth(&secret)
+        .json(&chat_body(false))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let resp = client
+        .post(format!("{}/v1/chat/completions", gate.base))
+        .bearer_auth(&secret)
+        .json(&chat_body(false))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 429);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "budget_exceeded");
+
+    // The sibling boot key (same user) is untouched — the ceiling was
+    // per-delegate, not per-user.
+    let resp = client
+        .post(format!("{}/v1/chat/completions", gate.base))
+        .bearer_auth(RELAY_KEY_1)
+        .json(&chat_body(false))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // Denial audited as a GateTurn with the denied outcome.
+    wait_for(
+        || {
+            gate.audit
+                .envelopes
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|e| e["op_body"]["outcome"] == "denied:budget_exceeded")
+        },
+        "denied GateTurn envelope",
+    )
+    .await;
+}
+
+// ── #653 — the web-search relay ─────────────────────────────────────────────
+
+#[derive(Clone, Default)]
+struct SearxState {
+    queries: Arc<Mutex<Vec<Value>>>,
+}
+
+async fn searx_search(
+    State(state): State<SearxState>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    state
+        .queries
+        .lock()
+        .unwrap()
+        .push(serde_json::to_value(&params).unwrap());
+    Json(json!({
+        "query": params.get("q").cloned().unwrap_or_default(),
+        "results": [
+            {"title": "Weather in Hangzhou", "url": "https://a.example/w", "content": "Sunny, 31°C.", "engine": "bing"},
+            {"title": "Hangzhou 7-day", "url": "https://b.example/7d", "content": "Forecast…", "engine": "bing"}
+        ],
+        "answers": ["31°C and sunny"]
+    }))
+    .into_response()
+}
+
+/// The search relay: gk_ auth, the ENGINE SET pinned by gate config (never
+/// the caller), the compact wire shape, and the GateSearch (op_kind 94) row.
+#[tokio::test]
+async fn search_call_pins_engines_maps_results_and_audits() {
+    let searx = SearxState::default();
+    let searx_app = Router::new()
+        .route("/search", get(searx_search))
+        .with_state(searx.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let searx_addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, searx_app).await.unwrap() });
+
+    let (up_addr, _upstream) = spawn_upstream().await;
+    let (audit_addr, audit) = spawn_audit().await;
+    let config = GateConfig {
+        listen: "127.0.0.1:0".parse().unwrap(),
+        upstream: UpstreamConfig {
+            base_url: format!("http://{up_addr}/v1"),
+            api_key: UPSTREAM_KEY.into(),
+            model_override: None,
+            default_model: None,
+        },
+        keys: relay_keys(),
+        user_budgets: Default::default(),
+        default_budget_tokens: None,
+        admin_token: None,
+        keys_file: None,
+        audit_url: Some(format!("http://{audit_addr}")),
+        require_audit: false,
+        speech_backend: None,
+        search: Some(agentkeys_gate::config::SearchConfig {
+            base_url: format!("http://{searx_addr}"),
+            engines: "bing".into(),
+        }),
+        decision: DecisionUpstreams::default(),
+    };
+    let relay = Arc::new(Relay::new(config));
+    let app = server::router(relay);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("http://{addr}/v1/search"))
+        .bearer_auth(RELAY_KEY_1)
+        .json(&json!({"q": "hangzhou weather", "count": 1, "engines": "google,duckduckgo"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["engine"], "bing");
+    assert_eq!(body["results"].as_array().unwrap().len(), 1, "count cap");
+    assert_eq!(body["results"][0]["url"], "https://a.example/w");
+    assert_eq!(body["answers"][0], "31°C and sunny");
+
+    // The engine set the mock saw is the GATE's, not the caller's attempt.
+    let queries = searx.queries.lock().unwrap().clone();
+    assert_eq!(queries.len(), 1);
+    assert_eq!(queries[0]["engines"], "bing");
+    assert_eq!(queries[0]["format"], "json");
+
+    // Audit: one GateSearch (op_kind 94) row, counts not query text.
+    wait_for(
+        || !audit.envelopes.lock().unwrap().is_empty(),
+        "GateSearch audit row",
+    )
+    .await;
+    let envs = audit.envelopes.lock().unwrap().clone();
+    assert_eq!(envs[0]["op_kind"], 94);
+    assert_eq!(envs[0]["op_body"]["engines"], "bing");
+    assert_eq!(envs[0]["op_body"]["result_count"], 1);
+    assert_eq!(envs[0]["op_body"]["query_chars"], 16);
+    assert!(
+        envs[0]["op_body"].get("q").is_none(),
+        "no query text in audit"
+    );
+
+    // An unauthenticated call refuses.
+    let resp = client
+        .post(format!("http://{addr}/v1/search"))
+        .json(&json!({"q": "x"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+}
+
+// ── #722 — the System One (Jev) decision relay ───────────────────────────────
+
+fn systemone_body() -> Value {
+    json!({
+        "model": "jev-1.13.0",
+        "state": {"message": "今晚吃什么", "sender_tier": "kid"},
+        "questions": {
+            "destination": {
+                "type": "choice",
+                "instructions": "Who should receive `message`?",
+                "criteria": {"chef": "plans meals", "storyteller": "tells stories"}
+            }
+        }
+    })
+}
+
+/// Custody (the TypeSafe key is attached by the gate, the relay key never
+/// leaves), the answer body verbatim, the decide dimension of the meter, and
+/// the GateDecide (op_kind 95) row with counts only.
+#[tokio::test]
+async fn systemone_call_custody_metering_audit() {
+    let gate = spawn_gate(None).await;
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{}/v1/systemone", gate.base))
+        .bearer_auth(RELAY_KEY_1)
+        .json(&systemone_body())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["answers"]["destination"]["choice"], "chef");
+    assert_eq!(body["answers"]["destination"]["confidence"], 0.81);
+    assert_eq!(body["model"], "jev-1.13.0");
+
+    // The vendor saw the TypeSafe key — not the chat key, not the caller's.
+    let seen = gate.upstream.requests.lock().unwrap().clone();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(
+        seen[0].0.as_deref(),
+        Some(&format!("Bearer {TYPESAFE_KEY}")[..])
+    );
+    assert_eq!(seen[0].1["questions"]["destination"]["type"], "choice");
+    let raw = serde_json::to_string(&seen[0].1).unwrap();
+    assert!(!raw.contains(RELAY_KEY_1) && !raw.contains(UPSTREAM_KEY));
+
+    // Metered into the shared budget + the decide dimension.
+    let usage: Value = client
+        .get(format!("{}/v1/usage", gate.base))
+        .bearer_auth(RELAY_KEY_1)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(usage["used_tokens"], 352);
+    assert_eq!(usage["totals"]["decide_tokens"], 352);
+    assert_eq!(usage["totals"]["decide_turns"], 1);
+    assert_eq!(usage["totals"]["turns"], 0, "a decision is not a chat turn");
+
+    // The audit row: op_kind 95, counts only — never the state text.
+    wait_for(
+        || !gate.audit.envelopes.lock().unwrap().is_empty(),
+        "GateDecide audit row",
+    )
+    .await;
+    let env = gate.audit.envelopes.lock().unwrap()[0].clone();
+    assert_eq!(env["op_kind"], 95);
+    assert_eq!(env["op_body"]["question_count"], 1);
+    assert_eq!(env["op_body"]["input_tokens"], 318);
+    assert_eq!(env["op_body"]["output_tokens"], 34);
+    assert_eq!(env["op_body"]["model"], "jev-1.13.0");
+    assert_eq!(env["op_body"]["outcome"], "ok");
+    let env_raw = env.to_string();
+    assert!(
+        !env_raw.contains("今晚吃什么"),
+        "state text leaked into audit: {env_raw}"
+    );
+}
+
+/// #722 — the router view's model cards: the gate names each provider's
+/// server and relays its `/v1/models` to a live relay key; the keys stay here.
+#[tokio::test]
+async fn systemone_models_names_each_providers_server_for_a_relay_key() {
+    let gate = spawn_gate(None).await;
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("{}/v1/systemone/models", gate.base))
+        .bearer_auth(RELAY_KEY_1)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: Value = resp.json().await.unwrap();
+    for provider in ["jev", "kev"] {
+        let p = &body["providers"][provider];
+        assert_eq!(p["configured"], true, "{body}");
+        assert_eq!(p["status"], 200, "{body}");
+        assert!(
+            p["base_url"]
+                .as_str()
+                .is_some_and(|u| u.starts_with("http://127.0.0.1:")),
+            "{body}"
+        );
+        assert!(p["models"]["data"].is_array(), "{body}");
+    }
+    assert!(body["providers"]["kev"]["base_url"]
+        .as_str()
+        .is_some_and(|u| u.ends_with("/kev")));
+    let raw = body.to_string();
+    assert!(!raw.contains(TYPESAFE_KEY) && !raw.contains(KEV_KEY));
+    let seen = gate.upstream.requests.lock().unwrap().clone();
+    assert!(seen.is_empty(), "a models read is not a metered decision");
+    let status = client
+        .get(format!("{}/v1/systemone/models", gate.base))
+        .bearer_auth("gk_unknown")
+        .send()
+        .await
+        .unwrap()
+        .status()
+        .as_u16();
+    assert_eq!(status, 401);
+}
+
+/// No explicit decision endpoint → 503, loud, and the vendor is never contacted (the
+/// contact gate's router reads this as "gate down" and runs its deterministic
+/// tier). The models report still lists both providers, saying what is missing.
+#[tokio::test]
+async fn systemone_is_503_when_no_endpoint_is_configured() {
+    let (up_addr, upstream) = spawn_upstream().await;
+    let config = GateConfig {
+        listen: "127.0.0.1:0".parse().unwrap(),
+        upstream: UpstreamConfig {
+            base_url: format!("http://{up_addr}/v1"),
+            api_key: UPSTREAM_KEY.into(),
+            model_override: None,
+            default_model: None,
+        },
+        keys: relay_keys(),
+        user_budgets: Default::default(),
+        default_budget_tokens: None,
+        admin_token: None,
+        keys_file: None,
+        audit_url: None,
+        require_audit: false,
+        speech_backend: None,
+        search: None,
+        decision: DecisionUpstreams::default(),
+    };
+    let relay = Arc::new(Relay::new(config));
+    let app = server::router(relay);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("http://{addr}/v1/systemone"))
+        .bearer_auth(RELAY_KEY_1)
+        .json(&systemone_body())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 503);
+    assert_eq!(upstream.calls.load(Ordering::SeqCst), 0);
+    let report: Value = client
+        .get(format!("http://{addr}/v1/systemone/models"))
+        .bearer_auth(RELAY_KEY_1)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    for provider in ["jev", "kev"] {
+        let p = &report["providers"][provider];
+        assert_eq!(p["configured"], false, "{report}");
+        assert!(
+            p["error"]
+                .as_str()
+                .is_some_and(|e| e.contains("No explicit endpoint configured")),
+            "{report}"
+        );
+    }
+}
+
+/// #722 — two providers behind one route: a `kev-*` model goes to the Kev
+/// server with Kev's key, a `jev-*` model to TypeSafe with TypeSafe's — each
+/// key reaches only its own server, and both decisions meter and audit alike.
+#[tokio::test]
+async fn systemone_sends_each_model_to_its_providers_server_with_its_key() {
+    let gate = spawn_gate(None).await;
+    let client = reqwest::Client::new();
+    let mut kev_body = systemone_body();
+    kev_body["model"] = json!("kev-9b@2629c06");
+    let resp = client
+        .post(format!("{}/v1/systemone", gate.base))
+        .bearer_auth(RELAY_KEY_1)
+        .json(&kev_body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["model"], "kev-9b@2629c06");
+    let resp = client
+        .post(format!("{}/v1/systemone", gate.base))
+        .bearer_auth(RELAY_KEY_1)
+        .json(&systemone_body())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+
+    let kev_seen = gate.kev.requests.lock().unwrap().clone();
+    assert_eq!(kev_seen.len(), 1, "only the kev-* decision reached Kev");
+    assert_eq!(
+        kev_seen[0].0.as_deref(),
+        Some(&format!("Bearer {KEV_KEY}")[..])
+    );
+    assert_eq!(kev_seen[0].1["model"], "kev-9b@2629c06");
+    let jev_seen = gate.upstream.requests.lock().unwrap().clone();
+    assert_eq!(
+        jev_seen.len(),
+        1,
+        "only the jev-* decision reached TypeSafe"
+    );
+    assert_eq!(
+        jev_seen[0].0.as_deref(),
+        Some(&format!("Bearer {TYPESAFE_KEY}")[..])
+    );
+
+    let usage: Value = client
+        .get(format!("{}/v1/usage", gate.base))
+        .bearer_auth(RELAY_KEY_1)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(usage["totals"]["decide_turns"], 2);
+    wait_for(
+        || gate.audit.envelopes.lock().unwrap().len() >= 2,
+        "two GateDecide rows",
+    )
+    .await;
+    let models: Vec<Value> = gate
+        .audit
+        .envelopes
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|e| e["op_body"]["model"].clone())
+        .collect();
+    assert!(models.contains(&json!("kev-9b@2629c06")), "{models:?}");
+    assert!(models.contains(&json!("jev-1.13.0")), "{models:?}");
+}
+
+/// A model no provider owns is refused before any egress (never guessed onto
+/// a server), and a provider this gate holds no key for is a 503 — even when
+/// the other provider is armed.
+#[tokio::test]
+async fn systemone_refuses_an_unknown_model_and_503s_an_unarmed_provider() {
+    let (up_addr, upstream) = spawn_upstream().await;
+    let config = GateConfig {
+        listen: "127.0.0.1:0".parse().unwrap(),
+        upstream: UpstreamConfig {
+            base_url: format!("http://{up_addr}/v1"),
+            api_key: UPSTREAM_KEY.into(),
+            model_override: None,
+            default_model: None,
+        },
+        keys: relay_keys(),
+        user_budgets: Default::default(),
+        default_budget_tokens: None,
+        admin_token: None,
+        keys_file: None,
+        audit_url: None,
+        require_audit: false,
+        speech_backend: None,
+        search: None,
+        decision: DecisionUpstreams {
+            jev: Some(DecisionEndpoint {
+                api_key: TYPESAFE_KEY.into(),
+                base_url: format!("http://{up_addr}"),
+            }),
+            kev: None,
+        },
+    };
+    let relay = Arc::new(Relay::new(config));
+    let app = server::router(relay);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let client = reqwest::Client::new();
+
+    let mut unknown = systemone_body();
+    unknown["model"] = json!("gpt-4o");
+    let resp = client
+        .post(format!("http://{addr}/v1/systemone"))
+        .bearer_auth(RELAY_KEY_1)
+        .json(&unknown)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 400);
+    let mut kev = systemone_body();
+    kev["model"] = json!("kev-9b");
+    let resp = client
+        .post(format!("http://{addr}/v1/systemone"))
+        .bearer_auth(RELAY_KEY_1)
+        .json(&kev)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 503);
+    let body: Value = resp.json().await.unwrap();
+    assert!(
+        body.to_string()
+            .contains("No explicit endpoint configured for Kev"),
+        "{body}"
+    );
+    assert_eq!(
+        upstream.calls.load(Ordering::SeqCst),
+        0,
+        "nothing left the gate"
+    );
+    // The armed provider still answers.
+    let resp = client
+        .post(format!("http://{addr}/v1/systemone"))
+        .bearer_auth(RELAY_KEY_1)
+        .json(&systemone_body())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+}
+
+/// A body that is not the shared SystemOneRequest shape is refused here
+/// (400) before any egress; a vendor 5xx is a safe 502 envelope.
+#[tokio::test]
+async fn systemone_rejects_malformed_bodies_and_wraps_vendor_5xx() {
+    let gate = spawn_gate(None).await;
+    let client = reqwest::Client::new();
+    let no_questions = client
+        .post(format!("{}/v1/systemone", gate.base))
+        .bearer_auth(RELAY_KEY_1)
+        .json(&json!({"model": "jev-1.13.0", "state": "hi", "questions": {}}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(no_questions.status().as_u16(), 400);
+    let bad_type = client
+        .post(format!("{}/v1/systemone", gate.base))
+        .bearer_auth(RELAY_KEY_1)
+        .json(&json!({"model": "jev-1.13.0", "state": "hi",
+            "questions": {"q": {"type": "essay", "instructions": "write"}}}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(bad_type.status().as_u16(), 400);
+    assert_eq!(gate.upstream.calls.load(Ordering::SeqCst), 0);
+
+    *gate.upstream.mode.lock().unwrap() = "http500".to_string();
+    let resp = client
+        .post(format!("{}/v1/systemone", gate.base))
+        .bearer_auth(RELAY_KEY_1)
+        .json(&systemone_body())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 502);
+    let body: Value = resp.json().await.unwrap();
+    assert!(
+        !body.to_string().contains("vendor exploded"),
+        "5xx body echoed: {body}"
+    );
+}
+
+/// Decisions burn the SAME per-user budget as chat: once exhausted, the next
+/// decision is a deterministic 429 with no egress.
+#[tokio::test]
+async fn systemone_shares_the_user_budget_with_chat() {
+    let gate = spawn_gate(Some(300)).await;
+    let client = reqwest::Client::new();
+    let first = client
+        .post(format!("{}/v1/systemone", gate.base))
+        .bearer_auth(RELAY_KEY_1)
+        .json(&systemone_body())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(first.status().as_u16(), 200); // 0 used < 300
+    let second = client
+        .post(format!("{}/v1/systemone", gate.base))
+        .bearer_auth(RELAY_KEY_2)
+        .json(&systemone_body())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(second.status().as_u16(), 429); // 352 used ≥ 300
+    let body: Value = second.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "budget_exceeded");
+    assert_eq!(gate.upstream.calls.load(Ordering::SeqCst), 1);
+    // …and chat is denied too — one budget.
+    let chat = client
+        .post(format!("{}/v1/chat/completions", gate.base))
+        .bearer_auth(RELAY_KEY_1)
+        .json(&chat_body(false))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(chat.status().as_u16(), 429);
+}

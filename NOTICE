@@ -1,0 +1,23 @@
+Agent Terrier
+
+The default project license is Apache-2.0. Existing file-level licenses and
+third-party notices take precedence for their covered material.
+
+Current Solidity sources, tests and deployment scripts under
+crates/agentkeys-chain declare AGPL-3.0-only. IERC4337.sol identifies interface
+declarations adapted from eth-infinitism/account-abstraction v0.7.0, whose
+upstream IAccount and PackedUserOperation sources declare GPL-3.0. Both license
+texts are included. These notices are preserved; Apache-2.0 does not relicense
+that material.
+
+The historical AgentKeysScope.deployed-stage1.sol snapshot under
+crates/agentkeys-chain/archived retains its existing MIT and AGPL-3.0-only
+notices. It is outside the active contract source/build directories.
+
+crates/agentkeys-broker-server/solidity/src/AgentKeysAudit.sol declares MIT.
+packages/agentkeys-dsh/package.json declares MIT. Their existing license
+identifiers remain in place; the MIT terms are included in LICENSES/MIT.txt.
+
+Downloaded dependencies, container base images, agent runtimes and model
+artifacts retain their own licenses. See docs/wiki/licensing.md for source
+references and distribution responsibilities.

@@ -1,0 +1,43 @@
+{
+  "name": "anvil",
+  "display_name": "Anvil local dev node",
+  "chain_id": 31337,
+  "chain_kind": "local-dev",
+  "rpc": {
+    "http": "http://localhost:8545",
+    "wss": "ws://localhost:8545"
+  },
+  "explorer": {
+    "url": "",
+    "tx_url_template": "",
+    "address_url_template": ""
+  },
+  "token": {
+    "symbol": "ETH",
+    "decimals": 18
+  },
+  "finality": {
+    "default_block_tag": "latest",
+    "confirmation_blocks": 0,
+    "confirmation_seconds": 0,
+    "notes": "Local development only. Generate throwaway signing material during setup; no signing key is embedded in this profile."
+  },
+  "gas": {
+    "model": "legacy",
+    "max_priority_fee_gwei": 0,
+    "max_fee_gwei": 0
+  },
+  "deploy": {
+    "deployer_env_var": "AGENTKEYS_ANVIL_DEPLOYER_KEY",
+    "foundry_chain_arg": "anvil"
+  },
+  "dev_environment": {
+    "is_development_default": true
+  },
+  "funding": {
+    "deploy_min_wei": "10000000000000000",
+    "account_deposit_wei": "100000000000000000",
+    "ed_buffer_wei": "0",
+    "entrypoint_native_buffer_wei": "0"
+  }
+}

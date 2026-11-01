@@ -1,0 +1,294 @@
+{
+  "schema_version": 1,
+  "lane": "qualification",
+  "selected": [
+    "isolated-security-guards"
+  ],
+  "success": true,
+  "affected": null,
+  "revision": null,
+  "security_qualification": {
+    "source_revision": "8aac8193cc6de6ac34d434a124b5a605ae6c4211",
+    "guards": [
+      "operation",
+      "data-class",
+      "chain-scope",
+      "actor-proof"
+    ],
+    "recipe_sha256": "f050cbc69fcb02421403114e9fe20d031370ec092b9cf26d9819917c27b76196",
+    "source_tree_sha256": "21ddb5541a19d79d0f04d22ab5d60616527fd72346b78f0d53ac5733a19c9a25",
+    "source_files": 1070
+  },
+  "runner": {
+    "system": "Darwin",
+    "architecture": "arm64"
+  },
+  "seconds": 68.587,
+  "warm_target_seconds": null,
+  "target_exceeded": null,
+  "phase_seconds": {
+    "setup": 5.001,
+    "build": 60.229,
+    "execution": 2.937
+  },
+  "queue_seconds": null,
+  "cleanup_seconds": 0.394,
+  "checks": [
+    {
+      "name": "security-source",
+      "phase": "setup",
+      "status": "passed",
+      "seconds": 5.001
+    },
+    {
+      "status": "passed",
+      "exit_code": 0,
+      "seconds": 0.042,
+      "name": "security-metadata",
+      "phase": "build",
+      "log": "security-01-metadata.log"
+    },
+    {
+      "status": "passed",
+      "exit_code": 0,
+      "seconds": 30.953,
+      "name": "security-baseline-build",
+      "phase": "build",
+      "log": "security-02-baseline-build.log"
+    },
+    {
+      "status": "passed",
+      "exit_code": 0,
+      "seconds": 0.294,
+      "tests": {
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0
+      },
+      "name": "security-baseline-check_op_accepts_match",
+      "phase": "execution",
+      "log": "security-03-baseline-check_op_accepts_match.log"
+    },
+    {
+      "status": "passed",
+      "exit_code": 0,
+      "seconds": 0.011,
+      "tests": {
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0
+      },
+      "name": "security-baseline-check_op_rejects_mismatch",
+      "phase": "execution",
+      "log": "security-04-baseline-check_op_rejects_mismatch.log"
+    },
+    {
+      "status": "passed",
+      "exit_code": 0,
+      "seconds": 0.011,
+      "tests": {
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0
+      },
+      "name": "security-baseline-check_data_class_accepts_match",
+      "phase": "execution",
+      "log": "security-05-baseline-check_data_class_accepts_match.log"
+    },
+    {
+      "status": "passed",
+      "exit_code": 0,
+      "seconds": 0.005,
+      "tests": {
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0
+      },
+      "name": "security-baseline-check_data_class_rejects_cross_class",
+      "phase": "execution",
+      "log": "security-06-baseline-check_data_class_rejects_cross_class.log"
+    },
+    {
+      "status": "passed",
+      "exit_code": 0,
+      "seconds": 0.02,
+      "tests": {
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0
+      },
+      "name": "security-baseline-check_chain_scope_ok_when_chain_grants",
+      "phase": "execution",
+      "log": "security-07-baseline-check_chain_scope_ok_when_chain_grants.log"
+    },
+    {
+      "status": "passed",
+      "exit_code": 0,
+      "seconds": 0.011,
+      "tests": {
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0
+      },
+      "name": "security-baseline-check_chain_scope_rejects_when_chain_denies",
+      "phase": "execution",
+      "log": "security-08-baseline-check_chain_scope_rejects_when_chain_denies.log"
+    },
+    {
+      "status": "passed",
+      "exit_code": 0,
+      "seconds": 0.041,
+      "tests": {
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0
+      },
+      "name": "security-baseline-check_client_pop_accepts_valid",
+      "phase": "execution",
+      "log": "security-09-baseline-check_client_pop_accepts_valid.log"
+    },
+    {
+      "status": "passed",
+      "exit_code": 0,
+      "seconds": 0.011,
+      "tests": {
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0
+      },
+      "name": "security-baseline-missing_actor_proof_is_rejected_without_a_rollout_flag",
+      "phase": "execution",
+      "log": "security-10-baseline-missing_actor_proof_is_rejected_without_a_rollout_flag.log"
+    },
+    {
+      "status": "passed",
+      "exit_code": 0,
+      "seconds": 6.545,
+      "name": "security-operation-build",
+      "phase": "build",
+      "log": "security-11-operation-build.log"
+    },
+    {
+      "status": "passed",
+      "exit_code": 0,
+      "seconds": 0.679,
+      "tests": {
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0
+      },
+      "name": "security-operation-positive",
+      "phase": "execution",
+      "log": "security-12-operation-positive.log"
+    },
+    {
+      "status": "passed",
+      "exit_code": 101,
+      "seconds": 0.011,
+      "name": "security-operation-negative",
+      "phase": "execution",
+      "log": "security-13-operation-negative.log",
+      "outcome": "guard-detected",
+      "expected_test_exit_code": 101
+    },
+    {
+      "status": "passed",
+      "exit_code": 0,
+      "seconds": 8.941,
+      "name": "security-data-class-build",
+      "phase": "build",
+      "log": "security-14-data-class-build.log"
+    },
+    {
+      "status": "passed",
+      "exit_code": 0,
+      "seconds": 0.294,
+      "tests": {
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0
+      },
+      "name": "security-data-class-positive",
+      "phase": "execution",
+      "log": "security-15-data-class-positive.log"
+    },
+    {
+      "status": "passed",
+      "exit_code": 101,
+      "seconds": 0.011,
+      "name": "security-data-class-negative",
+      "phase": "execution",
+      "log": "security-16-data-class-negative.log",
+      "outcome": "guard-detected",
+      "expected_test_exit_code": 101
+    },
+    {
+      "status": "passed",
+      "exit_code": 0,
+      "seconds": 7.501,
+      "name": "security-chain-scope-build",
+      "phase": "build",
+      "log": "security-17-chain-scope-build.log"
+    },
+    {
+      "status": "passed",
+      "exit_code": 0,
+      "seconds": 0.351,
+      "tests": {
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0
+      },
+      "name": "security-chain-scope-positive",
+      "phase": "execution",
+      "log": "security-18-chain-scope-positive.log"
+    },
+    {
+      "status": "passed",
+      "exit_code": 101,
+      "seconds": 0.022,
+      "name": "security-chain-scope-negative",
+      "phase": "execution",
+      "log": "security-19-chain-scope-negative.log",
+      "outcome": "guard-detected",
+      "expected_test_exit_code": 101
+    },
+    {
+      "status": "passed",
+      "exit_code": 0,
+      "seconds": 6.247,
+      "name": "security-actor-proof-build",
+      "phase": "build",
+      "log": "security-20-actor-proof-build.log"
+    },
+    {
+      "status": "passed",
+      "exit_code": 0,
+      "seconds": 1.154,
+      "tests": {
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0
+      },
+      "name": "security-actor-proof-positive",
+      "phase": "execution",
+      "log": "security-21-actor-proof-positive.log"
+    },
+    {
+      "status": "passed",
+      "exit_code": 101,
+      "seconds": 0.011,
+      "name": "security-actor-proof-negative",
+      "phase": "execution",
+      "log": "security-22-actor-proof-negative.log",
+      "outcome": "guard-detected",
+      "expected_test_exit_code": 101
+    },
+    {
+      "name": "security-cleanup",
+      "phase": "cleanup",
+      "status": "passed",
+      "seconds": 0.394
+    }
+  ]
+}

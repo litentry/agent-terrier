@@ -1,0 +1,213 @@
+#!/usr/bin/env python3
+import argparse
+from bisect import bisect_right
+import hashlib
+from functools import lru_cache
+import json
+from pathlib import Path
+import re
+import sys
+
+IGNORED_DIRECTORIES = {
+    ".git", ".jj", "node_modules", "target", ".next", ".venv",
+    "__pycache__", ".omc", ".claude", ".pytest_cache",
+}
+FORBIDDEN_DIRECTORIES = {
+    "firmware", "operator-docs", "infra", "wallets", "keystores",
+}
+FORBIDDEN_SUFFIXES = {".pem", ".key", ".p12", ".keystore", ".sqlite", ".sqlite3"}
+RULES = {
+    "internal-documentation-reference": re.compile(r"docs[/]plan[/]"),
+    "private-key": re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH |ENCRYPTED )?PRIVATE KEY-----"),
+    "access-token": re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{40,})\b"),
+    "cloud-access-key": re.compile(r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b"),
+    "credential-literal": re.compile(
+        r"""(?i)(?:private[_-]?key|secret[_-]?key|api[_-]?key|password|mnemonic|seed[_-]?phrase|default[_-]?test[_-]?key|access[_-]?token)\s*["']?\s*[:=]\s*["']([A-Za-z0-9+/=_ -]{24,})["']"""
+    ),
+    "personal-path": re.compile(r"/(?:Users|home)/(?!runner(?:/|$)|example(?:/|$))[A-Za-z0-9._-]+/"),
+    "unapproved-project-link": re.compile(
+        r"github\.com/litentry/(?!agent-terrier(?:\.wiki\.git)?(?:[/#?\s\"')]|$))[A-Za-z0-9_.-]+"
+    ),
+}
+EXCEPTION_RULES = {"private-key", "cloud-access-key", "credential-literal", "personal-path"}
+PRIVATE_DOMAIN_HASHES = {
+    "cc98cb5809704135c4a46cdd091e9f92fd9430909f6408d7720ed37d8568a414",
+    "eab45d2ca67d327618c0283d827db80eb74775fba40e374f23efc46eb69a7269",
+    "792ff6e944250c9171075f18fc1211a373d992932d0ba43362c7327dfd1ef18f",
+    "910bdb26f0e7524eebbb10623fb92040e4d5f76733e363df6376a00db5eae22c",
+    "635e1575548fc031c6be553c651882cf364b52764e63515d7638bfac5f9959e8",
+    "f67484e69b9e281f48767db6908b30372b0bdd55c3ceb409432a1cb5cf5b8680",
+}
+PRIVATE_CONTEXT_HASHES = {
+    "5c73bf19bcfe22a91577de80a66a0a4670719cd6f8ae81310e57f5f8397c204a",
+    "8ee42f808ed4b3e17a7d0235decf1a0b6bb6e33de17320394777b54a7e7f2a0f",
+    "ab34384db36caada7d8bd1906631acbbc8132ee2c6e1a6b41842760a4e4c4f45",
+    "88a59458d262c0a19f32a1c6e687e4fce2eb6ce42e66c1d5ef0fc2358ff3b223",
+    "4e5fb449ed28292b3a92c3693f5228f9e72637d21305e7a38be5e67dfd291b3f",
+    "1993b42445bd7b2049fbdd2fb3c90b0180118fd3d2d54028de6187276f558ced",
+    "1cd4fcde991bdd7c1f7d012b4679098d6dae5bbb3a9002417471ffcec2f1753f",
+    "f101c4a4f9a8d048ce693d5151aea2901d9b242367dbd039b891952eeeea521c",
+    "902034a92f6546e2d692519bdfa9965115117b522e19dcb61e95c0f01da60c90",
+    "8b7eef3475f0f46f034835b4ba7bbb33a7d44638dcc27d8919f9d468e08842a6",
+    "1c76aeb8ae2dd638ee9ebefdea58c6b7d90e4fdd8214f6289404421bd701773f",
+}
+CONTEXT_WORD = re.compile(r"[A-Za-z][A-Za-z0-9_.-]*")
+
+@lru_cache(maxsize=32768)
+def context_digest(value):
+    return hashlib.sha256(value.encode()).hexdigest()
+
+HOSTNAME = re.compile(r"\b(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}\b", re.IGNORECASE)
+
+def load_exceptions(root):
+    path = root / ".public-test-fixtures.json"
+    if not path.exists():
+        return []
+    if path.is_symlink():
+        raise ValueError("Exception manifest must be a regular file")
+    entries = json.loads(path.read_text())
+    if not isinstance(entries, list):
+        raise ValueError("Exception manifest must be a list")
+    for entry in entries:
+        if not isinstance(entry, dict) or set(entry) != {"path", "rule", "line_sha256", "reason"}:
+            raise ValueError("Invalid exception fields")
+        if not all(isinstance(value, str) for value in entry.values()):
+            raise ValueError("Exception fields must be strings")
+        relative = Path(entry["path"])
+        if (relative.is_absolute() or ".." in relative.parts or
+                relative.as_posix() != entry["path"] or not relative.parts):
+            raise ValueError("Exception paths must be repository-relative")
+        if entry["rule"] not in EXCEPTION_RULES:
+            raise ValueError("Only synthetic content findings may be excepted")
+        if not re.fullmatch(r"[0-9a-f]{64}", entry["line_sha256"]) or not entry["reason"].strip():
+            raise ValueError("Exceptions need an exact line hash and review reason")
+    return entries
+
+def inspect_file(root, path):
+    relative = path.relative_to(root)
+    findings = []
+    if path.is_symlink():
+        return [{"path": str(relative), "rule": "symlink", "line": 0}]
+    if set(relative.parts) & FORBIDDEN_DIRECTORIES:
+        findings.append({"path": str(relative), "rule": "excluded-source", "line": 0})
+    if path.suffix in FORBIDDEN_SUFFIXES or (
+        path.name.startswith(".env") and path.name != ".env.example"
+    ):
+        findings.append({"path": str(relative), "rule": "credential-or-state-file", "line": 0})
+    contents = path.read_bytes().decode("utf-8", errors="replace")
+    if path.suffix == ".json":
+        try:
+            payload = json.loads(contents)
+        except (ValueError, RecursionError):
+            payload = None
+        if isinstance(payload, dict):
+            metadata = payload.get("ResponseMetadata")
+            result = payload.get("Result")
+            images = result.get("Images") if isinstance(result, dict) else None
+            if (isinstance(metadata, dict) and {"RequestId", "Service", "Region"} <= metadata.keys()
+                    and isinstance(images, list)
+                    and any(isinstance(image, dict) and {"ImageId", "ImageUrl"} <= image.keys()
+                            for image in images)):
+                findings.append({"path": str(relative), "rule": "deployment-inventory", "line": 0})
+    newline_offsets = [match.start() for match in re.finditer("\n", contents)]
+    for rule_name, pattern in RULES.items():
+        found_lines = set()
+        for match in pattern.finditer(contents):
+            line_number = bisect_right(newline_offsets, match.start()) + 1
+            if line_number in found_lines:
+                continue
+            found_lines.add(line_number)
+            findings.append({
+                "path": str(relative), "rule": rule_name,
+                "line": line_number,
+            })
+    domain_lines = set()
+    for match in HOSTNAME.finditer(contents):
+        labels = match.group().lower().split(".")
+        if any(hashlib.sha256(".".join(labels[index:]).encode()).hexdigest() in PRIVATE_DOMAIN_HASHES
+               for index in range(len(labels) - 1)):
+            domain_lines.add(bisect_right(newline_offsets, match.start()) + 1)
+    findings.extend({"path":str(relative), "rule":"private-deployment-domain", "line":line}
+                    for line in sorted(domain_lines))
+    context_lines = set()
+    previous = None
+    for match in CONTEXT_WORD.finditer(contents):
+        word = match.group().rstrip(".").lower()
+        candidates = [(word, match.start())]
+        if previous:
+            candidates.append((previous[0] + " " + word, previous[1]))
+        for candidate, offset in candidates:
+            if context_digest(candidate) in PRIVATE_CONTEXT_HASHES:
+                context_lines.add(bisect_right(newline_offsets, offset) + 1)
+        previous = (word, match.start())
+    findings.extend({"path":str(relative), "rule":"private-deployment-context", "line":line}
+                    for line in sorted(context_lines))
+    return findings
+
+def inspect_tree(root):
+    findings = []
+    scanned_files = 0
+    surface_path = root / ".public-source.json"
+    surface = None
+    if surface_path.exists() and not surface_path.is_symlink():
+        try:
+            surface = json.loads(surface_path.read_text())
+            if set(surface) != {"files", "directories"} or not all(
+                isinstance(entries, list) and all(isinstance(entry, str) for entry in entries)
+                for entries in surface.values()
+            ):
+                raise ValueError("Invalid source manifest")
+        except (ValueError, TypeError):
+            findings.append({"path": ".public-source.json", "rule": "invalid-source-manifest", "line": 0})
+            surface = None
+    pending = [root]
+    while pending:
+        directory = pending.pop()
+        for path in sorted(directory.iterdir()):
+            if path.is_symlink():
+                findings.extend(inspect_file(root, path))
+            elif path.is_dir():
+                if path.name not in IGNORED_DIRECTORIES:
+                    pending.append(path)
+            elif path.is_file():
+                findings.extend(inspect_file(root, path))
+                relative = path.relative_to(root).as_posix()
+                if surface and relative not in surface["files"] and not any(
+                    relative.startswith(directory + "/") for directory in surface["directories"]
+                ):
+                    findings.append({"path": relative, "rule": "outside-public-surface", "line": 0})
+                scanned_files += 1
+    try:
+        exceptions = load_exceptions(root)
+    except (ValueError, OSError):
+        exceptions = []
+        findings.append({"path": ".public-test-fixtures.json", "rule": "invalid-exceptions", "line": 0})
+    reviewed_findings = []
+    for finding in findings:
+        path = root / finding["path"]
+        line_number = finding["line"]
+        line_digest = ""
+        if line_number:
+            line = path.read_bytes().decode("utf-8", errors="replace").splitlines()[line_number - 1]
+            line_digest = hashlib.sha256(line.encode()).hexdigest()
+        reviewed = any(
+            entry["path"] == finding["path"]
+            and entry["rule"] == finding["rule"]
+            and entry["line_sha256"] == line_digest
+            and entry.get("reason")
+            for entry in exceptions
+        )
+        if not reviewed:
+            reviewed_findings.append(finding)
+    return {"scanned_files": scanned_files, "findings": reviewed_findings}
+
+def main():
+    parser = argparse.ArgumentParser(description="Check a public source or artifact tree without printing secret values.")
+    parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[1])
+    arguments = parser.parse_args()
+    report = inspect_tree(arguments.root.resolve())
+    print(json.dumps(report, indent=2))
+    return 1 if report["findings"] else 0
+
+if __name__ == "__main__":
+    sys.exit(main())

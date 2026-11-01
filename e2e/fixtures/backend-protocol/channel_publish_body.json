@@ -1,0 +1,6 @@
+{
+  "body_b64": "<base64-plaintext>",
+  "cap": "<cap-token>",
+  "direction": "in",
+  "kind": "text"
+}

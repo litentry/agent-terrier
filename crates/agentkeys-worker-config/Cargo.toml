@@ -1,0 +1,26 @@
+[package]
+license.workspace = true
+name = "agentkeys-worker-config"
+version = "0.1.0"
+edition = "2021"
+description = "Owner-only encrypted configuration worker"
+
+[[bin]]
+name = "agentkeys-worker-config"
+path = "src/main.rs"
+
+[lib]
+name = "agentkeys_worker_config"
+path = "src/lib.rs"
+
+[dependencies]
+agentkeys-worker-creds = { path = "../agentkeys-worker-creds" }
+agentkeys-core = { workspace = true }
+agentkeys-protocol = { workspace = true }
+axum = { version = "0.7", features = ["json"] }
+tokio = { workspace = true }
+serde = { workspace = true }
+anyhow = { workspace = true }
+base64 = "0.22"
+clap = { version = "4", features = ["derive", "env"] }
+

@@ -1,0 +1,1180 @@
+//! The bundler JSON-RPC surface: `eth_sendUserOperation`,
+//! `eth_getUserOperationReceipt`, `eth_supportedEntryPoints`, `eth_chainId`,
+//! plus `/healthz`. One POST endpoint, standard JSON-RPC 2.0 envelope —
+//! protocol-compatible with eth-infinitism / rundler so the broker can't tell
+//! this thin submitter from a stock bundler.
+
+use crate::legacy_tx::LegacyTx;
+use agentkeys_core::device_crypto::evm_address;
+use agentkeys_core::erc4337::{decode_entrypoint_revert, handle_ops_calldata, RpcUserOp};
+use anyhow::{anyhow, Context, Result};
+use axum::extract::State;
+use axum::routing::{get, post};
+use axum::{Json, Router};
+use k256::ecdsa::{SigningKey, VerifyingKey};
+use serde_json::{json, Value};
+use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::Mutex;
+use tracing::{info, warn};
+
+fn addr20(hex_s: &str, name: &str) -> Result<[u8; 20]> {
+    hex::decode(hex_s.trim().trim_start_matches("0x"))
+        .map_err(|e| anyhow!("{name}: {e}"))?
+        .try_into()
+        .map_err(|_| anyhow!("{name} must be a 20-byte address"))
+}
+
+pub struct BundlerConfig {
+    pub rpc_url: String,
+    pub chain_id: u64,
+    pub entry_point: [u8; 20],
+    pub signer: SigningKey,
+    /// `handleOps` beneficiary — the submitter EOA's own address.
+    pub beneficiary: [u8; 20],
+    /// Pinned outer-tx gas limit (Heima reverts `eth_estimateGas` on handleOps).
+    pub gas_limit: u128,
+    /// Fixed gas price; `None` ⇒ read `eth_gasPrice` per submit (+25% headroom).
+    pub gas_price: Option<u128>,
+    /// #501: the submitter's gas floor (`funding.deploy_min_wei` from the chain
+    /// profile). Below it `/healthz` reports `ready:false` so the broker can
+    /// refuse a register BEFORE the browser mints a passkey — an out-of-gas
+    /// submitter otherwise burned two Touch IDs and orphaned a credential.
+    /// `None` ⇒ not enforced (no profile funding block).
+    pub gas_floor_wei: Option<u128>,
+}
+
+pub enum BundlerBoot {
+    /// Boxed: the config (signer key + addresses) dwarfs the `Degraded`
+    /// variant, and there is exactly ONE `BundlerBoot` per process.
+    Ready(Box<BundlerConfig>),
+    Degraded {
+        chain_id: u64,
+        missing: Vec<String>,
+    },
+}
+
+/// Raw env values consumed by [`BundlerBoot::from_values`]. Read once from
+/// process env in [`BundlerBoot::from_env`]; tests construct this struct
+/// with explicit values instead — process env is global, so `set_var` in
+/// one test leaks into parallel siblings (the #258/#259 deflake class).
+#[derive(Default, Clone)]
+pub struct BundlerBootValues {
+    /// `AGENTKEYS_CHAIN_RPC_HTTP`.
+    pub rpc_url: Option<String>,
+    /// `AGENTKEYS_CHAIN_ID[_<CHAIN>]` override, else the compiled chain profile
+    /// for `AGENTKEYS_CHAIN` (resolved in `from_process_env`). No Heima default —
+    /// an unresolved id makes `from_values` fail loud rather than mis-sign.
+    pub chain_id: Option<String>,
+    /// `ENTRYPOINT_ADDRESS[_<CHAIN>]`.
+    pub entry_point: Option<String>,
+    /// `AGENTKEYS_BUNDLER_SIGNER_KEY` (falls back to
+    /// `BROKER_SPONSOR_SIGNER_KEY` — today the same funded EOA submits).
+    pub signer_key: Option<String>,
+    pub signer_key_file: Option<String>,
+    /// `AGENTKEYS_HANDLEOPS_GAS_LIMIT` (default 4000000).
+    pub handleops_gas_limit: Option<String>,
+    /// `AGENTKEYS_BUNDLER_GAS_PRICE` (optional, wei).
+    pub gas_price: Option<String>,
+    /// #501: submitter gas floor (wei). `AGENTKEYS_BUNDLER_GAS_FLOOR_WEI`
+    /// override, else the compiled chain profile's `funding.deploy_min_wei`
+    /// (resolved in `from_process_env`). Absent ⇒ the gate is not enforced.
+    pub gas_floor_wei: Option<String>,
+}
+
+impl BundlerBootValues {
+    pub fn from_process_env() -> Result<Self> {
+        Self::from_lookup(|key| std::env::var(key).ok())
+    }
+
+    pub fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Result<Self> {
+        let (profile, _) = agentkeys_core::chain_profile::ChainProfile::resolve(
+            None,
+            lookup("AGENTKEYS_CHAIN").as_deref(),
+            lookup("AGENTKEYS_CHAIN_PROFILE_FILE").as_deref(),
+        )?;
+        let suffix = profile.name.to_uppercase().replace('-', "_");
+        let profile_value =
+            |base: &str| lookup(&format!("{base}_{suffix}")).or_else(|| lookup(base));
+        Ok(Self {
+            rpc_url: Some(
+                agentkeys_core::chain_profile::rpc_http_override(&profile.name, &lookup)
+                    .unwrap_or(profile.rpc.http),
+            ),
+            chain_id: profile_value("AGENTKEYS_CHAIN_ID")
+                .or_else(|| Some(profile.chain_id.to_string())),
+            entry_point: profile_value("ENTRYPOINT_ADDRESS").or_else(|| {
+                profile
+                    .contracts
+                    .iter()
+                    .find(|contract| contract.name == "EntryPoint")
+                    .map(|contract| contract.address.clone())
+            }),
+            signer_key: lookup("AGENTKEYS_BUNDLER_SIGNER_KEY")
+                .or_else(|| lookup("BROKER_SPONSOR_SIGNER_KEY")),
+            signer_key_file: lookup("AGENTKEYS_BUNDLER_SIGNER_KEY_FILE"),
+            handleops_gas_limit: lookup("AGENTKEYS_HANDLEOPS_GAS_LIMIT"),
+            gas_price: lookup("AGENTKEYS_BUNDLER_GAS_PRICE"),
+            gas_floor_wei: lookup("AGENTKEYS_BUNDLER_GAS_FLOOR_WEI")
+                .or_else(|| profile.funding.map(|funding| funding.deploy_min_wei)),
+        })
+    }
+}
+
+impl BundlerBoot {
+    /// Read the env vars listed on [`BundlerBootValues`] once, then
+    /// validate via [`Self::from_values`].
+    pub fn from_env() -> Result<Self> {
+        Self::from_values(BundlerBootValues::from_process_env()?)
+    }
+
+    /// Pure half of [`Self::from_env`] — all validation and Degraded/Ready
+    /// branching on already-read values (injectable for tests).
+    ///
+    /// Absent/empty EntryPoint or signer key ⇒ `Ok(Degraded)`; malformed
+    /// values ⇒ `Err` (fail fast); absent RPC URL ⇒ `Err` (static infra
+    /// config, always pinned in the systemd unit).
+    pub fn from_values(values: BundlerBootValues) -> Result<Self> {
+        let rpc_url = values.rpc_url.context("env AGENTKEYS_CHAIN_RPC_HTTP")?;
+        // No silent default. The legacy `unwrap_or(212_013)` made a Base (or any
+        // non-Heima) host quietly sign + broadcast `handleOps` for Heima's chain
+        // id, which the target RPC rejects — the Base master-register UserOp never
+        // broadcast (submitter nonce stayed 0; a fast, silent 502). `from_process_env`
+        // fills this from an explicit AGENTKEYS_CHAIN_ID[_<CHAIN>] override or the
+        // compiled chain profile; an unresolved/garbled id is a hard misconfig.
+        let chain_id: u64 = values
+            .chain_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .context(
+                "bundler chain id unresolved — set AGENTKEYS_CHAIN_ID[_<CHAIN>] or run with an \
+                 AGENTKEYS_CHAIN that has a compiled chain profile; refusing to assume Heima (212013)",
+            )?
+            .parse()
+            .context("AGENTKEYS_CHAIN_ID must be a u64 chain id")?;
+        let mut missing = Vec::new();
+        let entry_point = match values.entry_point.filter(|s| !s.trim().is_empty()) {
+            Some(s) => Some(addr20(&s, "ENTRYPOINT_ADDRESS")?),
+            None => {
+                missing.push("ENTRYPOINT_ADDRESS[_<CHAIN>]".to_string());
+                None
+            }
+        };
+        let signer = match (values.signer_key, values.signer_key_file) {
+            (Some(value), None) if value.trim().is_empty() => None,
+            (inline, file) => agentkeys_core::secp256k1_key::from_sources(inline, file)?,
+        };
+        if signer.is_none() {
+            missing.push("AGENTKEYS_BUNDLER_SIGNER_KEY_FILE or AGENTKEYS_BUNDLER_SIGNER_KEY (or BROKER_SPONSOR_SIGNER_KEY)".into());
+        }
+        let (Some(entry_point), Some(signer)) = (entry_point, signer) else {
+            return Ok(Self::Degraded { chain_id, missing });
+        };
+        let beneficiary = addr20(
+            &evm_address(&VerifyingKey::from(&signer)),
+            "derived bundler address",
+        )?;
+        let gas_limit = values
+            .handleops_gas_limit
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(4_000_000);
+        let gas_price = values.gas_price.and_then(|s| s.parse().ok());
+        let gas_floor_wei = values
+            .gas_floor_wei
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|value| {
+                value
+                    .parse()
+                    .context("invalid AGENTKEYS_BUNDLER_GAS_FLOOR_WEI")
+            })
+            .transpose()?;
+        Ok(Self::Ready(Box::new(BundlerConfig {
+            rpc_url,
+            chain_id,
+            entry_point,
+            signer,
+            beneficiary,
+            gas_limit,
+            gas_price,
+            gas_floor_wei,
+        })))
+    }
+}
+
+/// What `eth_sendUserOperation` recorded per userOpHash — enough to find the
+/// outer tx AND to replay its calldata as `eth_call` when the receipt comes
+/// back reverted (#247: recover the `FailedOp` `AAxx` reason).
+struct SubmittedTx {
+    tx_hash: String,
+    call_data: Vec<u8>,
+    operation: agentkeys_core::erc4337::PackedUserOp,
+}
+
+pub struct BundlerState {
+    pub boot: BundlerBoot,
+    pub http: reqwest::Client,
+    /// userOpHash (0x-hex) → the broadcast outer tx.
+    submitted: Mutex<HashMap<String, SubmittedTx>>,
+    /// Serializes submits so two concurrent ops can't race the same EOA nonce.
+    submit_lock: Mutex<()>,
+}
+
+impl BundlerState {
+    pub fn new(boot: BundlerBoot) -> Self {
+        Self {
+            boot,
+            http: reqwest::Client::new(),
+            submitted: Mutex::new(HashMap::new()),
+            submit_lock: Mutex::new(()),
+        }
+    }
+}
+
+pub fn build_router(state: Arc<BundlerState>) -> Router {
+    Router::new()
+        .route("/", post(rpc_handler))
+        .route("/healthz", get(healthz))
+        .with_state(state)
+}
+
+/// #501: can the submitter actually pay for a `handleOps` right now? The
+/// bundler is the ONE component that can answer — it holds the key, so it
+/// alone knows the address; the floor comes from the same chain profile the
+/// fleet board reds against. Fail-OPEN on an unreadable balance: an RPC blip
+/// must never block a funded stack, and a truly-down chain is already caught
+/// upstream by the #435 chain probe.
+enum GasVerdict {
+    /// Funded, or the gate is not enforced (no floor / balance unreadable).
+    Ok,
+    /// Definitively below the floor — refuse before anything irreversible.
+    Low { balance_wei: u128, floor_wei: u128 },
+}
+
+/// Format wei as a short decimal in native units (18 dp) for operator-facing
+/// text — `1500000000000000000` → `1.5`. Integer math only (no f64 rounding on
+/// a 30-digit balance).
+fn wei_to_units(wei: u128) -> String {
+    let whole = wei / 1_000_000_000_000_000_000u128;
+    let frac = wei % 1_000_000_000_000_000_000u128;
+    if frac == 0 {
+        return whole.to_string();
+    }
+    let s = format!("{frac:018}");
+    format!("{whole}.{}", s.trim_end_matches('0'))
+}
+
+async fn submitter_gas_verdict(state: &BundlerState, cfg: &BundlerConfig) -> GasVerdict {
+    let Some(floor_wei) = cfg.gas_floor_wei else {
+        return GasVerdict::Ok; // no floor configured — gate off
+    };
+    let addr = format!("0x{}", hex::encode(cfg.beneficiary));
+    // Bounded: /healthz is read by systemd + deploy probes, so it must never
+    // hang on a wedged RPC.
+    let probe = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        chain_rpc(state, cfg, "eth_getBalance", json!([addr, "latest"])),
+    )
+    .await;
+    let balance_wei = match probe {
+        Ok(Ok(Value::String(hex_bal))) => {
+            u128::from_str_radix(hex_bal.trim_start_matches("0x"), 16).ok()
+        }
+        _ => None,
+    };
+    match balance_wei {
+        Some(bal) if bal < floor_wei => GasVerdict::Low {
+            balance_wei: bal,
+            floor_wei,
+        },
+        _ => GasVerdict::Ok, // funded, or unreadable ⇒ fail-open
+    }
+}
+
+/// Operator-facing reason for a below-floor submitter — the exact string that
+/// reaches the browser panel via the broker's 503 and the daemon's preflight.
+fn out_of_gas_message(addr: &[u8; 20], balance_wei: u128, floor_wei: u128) -> String {
+    format!(
+        "bundler submitter 0x{} is OUT OF GAS: {} < {} (the chain's funding floor) — \
+         fund the configured transaction submitter before retrying",
+        hex::encode(addr),
+        wei_to_units(balance_wei),
+        wei_to_units(floor_wei),
+    )
+}
+
+/// 200 in BOTH boot states — a degraded bundler is a healthy process (the
+/// deploy probe + systemd must not flap); `ready:false` + `missing` tell the
+/// operator exactly what to provision. #501: a Ready bundler whose submitter
+/// cannot pay is ALSO `ready:false` (+ `reason`) — the broker gates the
+/// register on this, so an out-of-gas stack stops BEFORE the browser mints a
+/// passkey it could never register.
+async fn healthz(State(state): State<Arc<BundlerState>>) -> Json<Value> {
+    match &state.boot {
+        BundlerBoot::Ready(cfg) => match submitter_gas_verdict(&state, cfg).await {
+            GasVerdict::Ok => Json(json!({ "ok": true, "ready": true })),
+            GasVerdict::Low {
+                balance_wei,
+                floor_wei,
+            } => Json(json!({
+                "ok": true,
+                "ready": false,
+                "reason": out_of_gas_message(&cfg.beneficiary, balance_wei, floor_wei),
+            })),
+        },
+        BundlerBoot::Degraded { missing, .. } => {
+            Json(json!({ "ok": true, "ready": false, "missing": missing }))
+        }
+    }
+}
+
+fn degraded_message(missing: &[String]) -> String {
+    format!(
+        "bundler not configured — missing env: {}. Provision the submitter key in \
+         /etc/agentkeys/broker-sponsor.env and/or the EntryPoint address in \
+         agentkeys-bundler.service, then restart. Until then this host runs \
+         unsponsored and /v1/accept/submit is unavailable.",
+        missing.join(", ")
+    )
+}
+
+/// POST a JSON-RPC request and return the FULL response envelope. Raw `Value`
+/// reads only — Heima's mixHash-less receipts/headers crash typed eth parsers.
+/// Callers that need the raw `error` object (eth_call revert data) use this
+/// directly; everyone else goes through [`chain_rpc`].
+async fn chain_rpc_response(
+    state: &BundlerState,
+    cfg: &BundlerConfig,
+    method: &str,
+    params: Value,
+) -> Result<Value> {
+    let body = json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params });
+    state
+        .http
+        .post(&cfg.rpc_url)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| anyhow!("{method} send: {e}"))?
+        .json()
+        .await
+        .map_err(|e| anyhow!("{method} decode: {e}"))
+}
+
+/// JSON-RPC call to the chain node returning `result`; a JSON-RPC `error`
+/// becomes `Err`.
+async fn chain_rpc(
+    state: &BundlerState,
+    cfg: &BundlerConfig,
+    method: &str,
+    params: Value,
+) -> Result<Value> {
+    let resp = chain_rpc_response(state, cfg, method, params).await?;
+    if let Some(err) = resp.get("error").filter(|e| !e.is_null()) {
+        return Err(anyhow!("{method} error: {err}"));
+    }
+    resp.get("result")
+        .cloned()
+        .ok_or_else(|| anyhow!("{method} no result"))
+}
+
+/// Extract the revert blob from an `eth_call` JSON-RPC response. Geth and
+/// Frontier (Heima) both put the `0x`-hex revert bytes at `error.data`;
+/// absent on success and on non-revert errors (pruned state, transport).
+fn rpc_revert_data(resp: &Value) -> Option<Vec<u8>> {
+    let data = resp.get("error")?.get("data")?.as_str()?;
+    hex::decode(data.trim().trim_start_matches("0x")).ok()
+}
+
+/// #247: replay a reverted `handleOps` tx's calldata as `eth_call` and decode
+/// the EntryPoint `FailedOp` revert into its verbatim `AAxx ...` reason, so the
+/// broker can report "AA31 paymaster deposit too low" instead of guessing
+/// "wrong passkey" (the real 2026-06-10 incident). Tries the failing tx's
+/// PARENT block first (the faithful pre-state), then `latest` (covers pruned
+/// historical state and same-block interference). `None` when the replay no
+/// longer reverts or yields no decodable data — never an error (best-effort
+/// diagnostics must not mask the receipt itself).
+async fn replay_revert_reason(
+    state: &BundlerState,
+    cfg: &BundlerConfig,
+    call_data: &[u8],
+    receipt: &Value,
+) -> Option<String> {
+    let call = json!({
+        "from": format!("0x{}", hex::encode(cfg.beneficiary)),
+        "to": format!("0x{}", hex::encode(cfg.entry_point)),
+        "gas": format!("0x{:x}", cfg.gas_limit),
+        "data": format!("0x{}", hex::encode(call_data)),
+    });
+    let parent_block = receipt
+        .get("blockNumber")
+        .and_then(|b| b.as_str())
+        .and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok())
+        .filter(|n| *n > 0)
+        .map(|n| format!("0x{:x}", n - 1));
+    for block in parent_block.into_iter().chain(["latest".to_string()]) {
+        let Ok(resp) = chain_rpc_response(state, cfg, "eth_call", json!([call, block])).await
+        else {
+            continue;
+        };
+        if let Some(data) = rpc_revert_data(&resp) {
+            return Some(
+                decode_entrypoint_revert(&data)
+                    .unwrap_or_else(|| format!("unrecognized revert 0x{}", hex::encode(&data))),
+            );
+        }
+    }
+    None
+}
+
+fn parse_qty_u128(v: &Value, name: &str) -> Result<u128> {
+    let s = v.as_str().ok_or_else(|| anyhow!("{name} not a string"))?;
+    u128::from_str_radix(s.trim_start_matches("0x"), 16).map_err(|e| anyhow!("{name}: {e}"))
+}
+
+fn rpc_error(id: Value, code: i64, msg: impl Into<String>) -> Json<Value> {
+    Json(json!({ "jsonrpc": "2.0", "id": id,
+                 "error": { "code": code, "message": msg.into() } }))
+}
+
+fn rpc_ok(id: Value, result: Value) -> Json<Value> {
+    Json(json!({ "jsonrpc": "2.0", "id": id, "result": result }))
+}
+
+async fn rpc_handler(
+    State(state): State<Arc<BundlerState>>,
+    Json(req): Json<Value>,
+) -> Json<Value> {
+    let id = req.get("id").cloned().unwrap_or(Value::Null);
+    let method = req.get("method").and_then(|m| m.as_str()).unwrap_or("");
+    let params = req.get("params").cloned().unwrap_or(json!([]));
+    let cfg = match &state.boot {
+        BundlerBoot::Ready(cfg) => cfg,
+        BundlerBoot::Degraded { chain_id, missing } => {
+            return match method {
+                "eth_chainId" => rpc_ok(id, json!(format!("0x{chain_id:x}"))),
+                _ => rpc_error(id, -32500, degraded_message(missing)),
+            };
+        }
+    };
+    match method {
+        "eth_chainId" => rpc_ok(id, json!(format!("0x{:x}", cfg.chain_id))),
+        "eth_supportedEntryPoints" => {
+            rpc_ok(id, json!([format!("0x{}", hex::encode(cfg.entry_point))]))
+        }
+        "eth_sendUserOperation" => match send_user_operation(&state, cfg, &params).await {
+            Ok(user_op_hash) => rpc_ok(id, json!(user_op_hash)),
+            Err(e) => {
+                warn!("eth_sendUserOperation failed: {e:#}");
+                rpc_error(id, -32500, format!("{e:#}"))
+            }
+        },
+        "eth_getUserOperationReceipt" => {
+            match get_user_operation_receipt(&state, cfg, &params).await {
+                Ok(v) => rpc_ok(id, v),
+                Err(e) => rpc_error(id, -32603, format!("{e:#}")),
+            }
+        }
+        other => rpc_error(id, -32601, format!("method {other} not found")),
+    }
+}
+
+/// `eth_sendUserOperation([userOp, entryPoint])` → broadcast
+/// `handleOps([op], beneficiary)` as a signed legacy tx; returns the userOpHash.
+async fn send_user_operation(
+    state: &BundlerState,
+    cfg: &BundlerConfig,
+    params: &Value,
+) -> Result<String> {
+    let arr = params
+        .as_array()
+        .ok_or_else(|| anyhow!("params must be an array"))?;
+    let op_json = arr.first().ok_or_else(|| anyhow!("missing userOp param"))?;
+    let ep_param = arr
+        .get(1)
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("missing entryPoint param"))?;
+    let ep = addr20(ep_param, "entryPoint")?;
+    if ep != cfg.entry_point {
+        return Err(anyhow!(
+            "unsupported entryPoint {ep_param} (supported: 0x{})",
+            hex::encode(cfg.entry_point)
+        ));
+    }
+    let rpc_op: RpcUserOp =
+        serde_json::from_value(op_json.clone()).map_err(|e| anyhow!("userOp shape: {e}"))?;
+    let packed = rpc_op.to_packed().map_err(|e| anyhow!("userOp: {e}"))?;
+    let user_op_hash = format!(
+        "0x{}",
+        hex::encode(packed.user_op_hash(&cfg.entry_point, cfg.chain_id))
+    );
+
+    let call_data = handle_ops_calldata(std::slice::from_ref(&packed), &cfg.beneficiary);
+
+    // One submit at a time: the EOA nonce read + broadcast must not interleave.
+    let _guard = state.submit_lock.lock().await;
+    let submitter = format!("0x{}", hex::encode(cfg.beneficiary));
+    let nonce = parse_qty_u128(
+        &chain_rpc(
+            state,
+            cfg,
+            "eth_getTransactionCount",
+            json!([submitter, "pending"]),
+        )
+        .await?,
+        "eth_getTransactionCount",
+    )?;
+    let gas_price = match cfg.gas_price {
+        Some(p) => p,
+        // +25% headroom over the node's quote so a base-fee tick doesn't strand the tx.
+        None => {
+            parse_qty_u128(
+                &chain_rpc(state, cfg, "eth_gasPrice", json!([])).await?,
+                "eth_gasPrice",
+            )? * 125
+                / 100
+        }
+    };
+    let tx = LegacyTx {
+        nonce,
+        gas_price,
+        gas_limit: cfg.gas_limit,
+        to: cfg.entry_point,
+        value: 0,
+        data: call_data,
+        chain_id: cfg.chain_id,
+    };
+    let (raw, _) = tx.sign(&cfg.signer)?;
+    let tx_hash = chain_rpc(
+        state,
+        cfg,
+        "eth_sendRawTransaction",
+        json!([format!("0x{}", hex::encode(raw))]),
+    )
+    .await?
+    .as_str()
+    .ok_or_else(|| anyhow!("eth_sendRawTransaction returned non-string"))?
+    .to_string();
+    info!(
+        user_op_hash,
+        tx_hash, nonce, gas_price, "handleOps broadcast"
+    );
+    state.submitted.lock().await.insert(
+        user_op_hash.clone(),
+        SubmittedTx {
+            tx_hash,
+            call_data: tx.data,
+            operation: packed,
+        },
+    );
+    Ok(user_op_hash)
+}
+
+/// `eth_getUserOperationReceipt([userOpHash])` — `null` until the outer tx is
+/// mined; then `{ userOpHash, entryPoint, success, receipt }` with the RAW
+/// chain receipt embedded (the broker reads `success` + `receipt.transactionHash`).
+/// A reverted tx additionally carries `reason`: the `eth_call`-replayed
+/// `FailedOp` string (#247), when recoverable.
+async fn get_user_operation_receipt(
+    state: &BundlerState,
+    cfg: &BundlerConfig,
+    params: &Value,
+) -> Result<Value> {
+    let hash = params
+        .as_array()
+        .and_then(|a| a.first())
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("missing userOpHash param"))?
+        .to_lowercase();
+    let (tx_hash, call_data, operation) = match state.submitted.lock().await.get(&hash) {
+        Some(t) => (t.tx_hash.clone(), t.call_data.clone(), t.operation.clone()),
+        None => return Ok(Value::Null),
+    };
+    let receipt = chain_rpc(state, cfg, "eth_getTransactionReceipt", json!([tx_hash])).await?;
+    if receipt.is_null() {
+        return Ok(Value::Null);
+    }
+    anyhow::ensure!(
+        receipt["transactionHash"].as_str() == Some(tx_hash.as_str()),
+        "receipt transaction identity mismatch"
+    );
+    let success = agentkeys_core::user_operation_receipt::execution_succeeded(
+        &receipt,
+        &cfg.entry_point,
+        &operation,
+        &hash,
+    )
+    .map_err(anyhow::Error::msg)?;
+    let outer_reverted = receipt["status"] == "0x0";
+    let mut out = json!({
+        "userOpHash": hash,
+        "entryPoint": format!("0x{}", hex::encode(cfg.entry_point)),
+        "success": success,
+        "receipt": receipt,
+    });
+    if outer_reverted {
+        if let Some(reason) = replay_revert_reason(state, cfg, &call_data, &out["receipt"]).await {
+            warn!(
+                user_op_hash = hash,
+                reason, "handleOps reverted — replayed FailedOp"
+            );
+            out["reason"] = json!(reason);
+        }
+    } else if !success {
+        out["reason"] = json!("UserOperation execution reverted");
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_state() -> Arc<BundlerState> {
+        let cfg = BundlerConfig {
+            rpc_url: "http://127.0.0.1:1".into(), // unreachable — chain calls must not be hit
+            chain_id: 212_013,
+            entry_point: [0x66; 20],
+            signer: SigningKey::from_slice(&[0x46; 32]).unwrap(),
+            beneficiary: [0x77; 20],
+            gas_limit: 4_000_000,
+            gas_price: Some(40_000_000_000),
+            gas_floor_wei: None,
+        };
+        Arc::new(BundlerState::new(BundlerBoot::Ready(Box::new(cfg))))
+    }
+
+    fn degraded_state() -> Arc<BundlerState> {
+        Arc::new(BundlerState::new(BundlerBoot::Degraded {
+            chain_id: 212_013,
+            missing: vec![
+                "ENTRYPOINT_ADDRESS[_<CHAIN>]".into(),
+                "AGENTKEYS_BUNDLER_SIGNER_KEY (or BROKER_SPONSOR_SIGNER_KEY)".into(),
+            ],
+        }))
+    }
+
+    #[tokio::test]
+    async fn supported_entry_points_and_chain_id() {
+        let st = test_state();
+        let resp = rpc_handler(
+            State(st.clone()),
+            Json(json!({"jsonrpc":"2.0","id":1,"method":"eth_supportedEntryPoints","params":[]})),
+        )
+        .await;
+        assert_eq!(
+            resp.0["result"][0],
+            format!("0x{}", hex::encode([0x66u8; 20]))
+        );
+        let resp = rpc_handler(
+            State(st),
+            Json(json!({"jsonrpc":"2.0","id":2,"method":"eth_chainId","params":[]})),
+        )
+        .await;
+        assert_eq!(resp.0["result"], "0x33c2d");
+    }
+
+    #[tokio::test]
+    async fn send_user_operation_rejects_foreign_entry_point() {
+        let st = test_state();
+        let op = json!({
+            "sender": format!("0x{}", "11".repeat(20)), "nonce": "0x7",
+            "callData": "0xdeadbeef", "callGasLimit": "0x186a0",
+            "verificationGasLimit": "0x30d40", "preVerificationGas": "0xea60",
+            "maxFeePerGas": "0x77359400", "maxPriorityFeePerGas": "0x3b9aca00",
+            "signature": "0x"
+        });
+        let resp = rpc_handler(
+            State(st),
+            Json(
+                json!({"jsonrpc":"2.0","id":3,"method":"eth_sendUserOperation",
+                        "params":[op, format!("0x{}", "99".repeat(20))]}),
+            ),
+        )
+        .await;
+        let msg = resp.0["error"]["message"].as_str().unwrap();
+        assert!(msg.contains("unsupported entryPoint"), "{msg}");
+    }
+
+    #[test]
+    fn rpc_revert_data_extracts_only_error_data_hex() {
+        // revert: error.data carries the 0x-hex blob
+        let revert = json!({"jsonrpc":"2.0","id":1,"error":{
+            "code":3,"message":"execution reverted","data":"0xdeadbeef"}});
+        assert_eq!(rpc_revert_data(&revert), Some(vec![0xde, 0xad, 0xbe, 0xef]));
+        // success response → None
+        let ok = json!({"jsonrpc":"2.0","id":1,"result":"0x"});
+        assert_eq!(rpc_revert_data(&ok), None);
+        // non-revert error (no data) → None
+        let pruned = json!({"jsonrpc":"2.0","id":1,"error":{
+            "code":-32000,"message":"state already discarded"}});
+        assert_eq!(rpc_revert_data(&pruned), None);
+        // malformed data hex → None
+        let bad = json!({"jsonrpc":"2.0","id":1,"error":{"code":3,"data":"0xZZ"}});
+        assert_eq!(rpc_revert_data(&bad), None);
+    }
+
+    /// `cast abi-encode "f(uint256,string)" 0 "AA31 paymaster deposit too low"`
+    /// behind the `FailedOp` selector — the exact blob the 2026-06-10 incident
+    /// would have replayed.
+    const FAILED_OP_AA31_BLOB: &str = "0x220266b600000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000040000000000000000000000000000000000000000000000000000000000000001e41413331207061796d6173746572206465706f73697420746f6f206c6f770000";
+
+    /// Mock chain node: receipts come back with the given `status`; every
+    /// `eth_call` reverts with the `FailedOp(0, "AA31 ...")` blob.
+    async fn spawn_mock_chain(status: &'static str) -> String {
+        spawn_mock_chain_with_operation(status, None).await
+    }
+
+    async fn spawn_mock_chain_with_operation(
+        status: &'static str,
+        operation_success: Option<bool>,
+    ) -> String {
+        use axum::routing::post;
+        let logs = operation_success.map(|success| {
+            let mut data = [0u8; 128];
+            data[63] = u8::from(success);
+            let topic = agentkeys_core::device_crypto::keccak256(b"UserOperationEvent(bytes32,address,address,uint256,bool,uint256,uint256)");
+            vec![json!({"address":format!("0x{}", "66".repeat(20)),
+                "topics":[format!("0x{}", hex::encode(topic)), format!("0x{}", "ab".repeat(32)), format!("0x{}", "00".repeat(32)), format!("0x{}", "00".repeat(32))],
+                "data":format!("0x{}", hex::encode(data)), "removed":false,
+                "transactionHash":"0xfeed", "blockHash":"0xblock", "blockNumber":"0x10"})]
+        }).unwrap_or_default();
+        let receipt = json!({"transactionHash":"0xfeed","blockHash":"0xblock","blockNumber":"0x10","status":status,"logs":logs});
+        async fn handle(
+            axum::extract::State(receipt): axum::extract::State<Value>,
+            Json(req): Json<Value>,
+        ) -> Json<Value> {
+            let id = req.get("id").cloned().unwrap_or(Value::Null);
+            match req.get("method").and_then(|m| m.as_str()).unwrap_or("") {
+                "eth_getTransactionReceipt" => {
+                    Json(json!({"jsonrpc":"2.0","id":id,"result":receipt}))
+                }
+                "eth_call" => Json(json!({"jsonrpc":"2.0","id":id,"error":{
+                    "code":3,"message":"execution reverted","data":FAILED_OP_AA31_BLOB}})),
+                m => Json(json!({"jsonrpc":"2.0","id":id,"error":{
+                    "code":-32601,"message":format!("unexpected {m}")}})),
+            }
+        }
+        let app = Router::new().route("/", post(handle)).with_state(receipt);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        format!("http://{addr}/")
+    }
+
+    async fn state_with_submitted(rpc_url: String) -> Arc<BundlerState> {
+        let cfg = BundlerConfig {
+            rpc_url,
+            chain_id: 212_013,
+            entry_point: [0x66; 20],
+            signer: SigningKey::from_slice(&[0x46; 32]).unwrap(),
+            beneficiary: [0x77; 20],
+            gas_limit: 4_000_000,
+            gas_price: Some(40_000_000_000),
+            gas_floor_wei: None,
+        };
+        let st = Arc::new(BundlerState::new(BundlerBoot::Ready(Box::new(cfg))));
+        st.submitted.lock().await.insert(
+            format!("0x{}", "ab".repeat(32)),
+            SubmittedTx {
+                tx_hash: "0xfeed".into(),
+                call_data: vec![0xde, 0xad],
+                operation: agentkeys_core::erc4337::PackedUserOp {
+                    sender: [0; 20],
+                    nonce: [0; 32],
+                    init_code: Vec::new(),
+                    call_data: Vec::new(),
+                    account_gas_limits: [0; 32],
+                    pre_verification_gas: [0; 32],
+                    gas_fees: [0; 32],
+                    paymaster_and_data: Vec::new(),
+                    signature: Vec::new(),
+                },
+            },
+        );
+        st
+    }
+
+    #[tokio::test]
+    async fn reverted_receipt_carries_the_replayed_failed_op_reason() {
+        let st = state_with_submitted(spawn_mock_chain("0x0").await).await;
+        let resp = rpc_handler(
+            State(st),
+            Json(
+                json!({"jsonrpc":"2.0","id":8,"method":"eth_getUserOperationReceipt",
+                        "params":[format!("0x{}", "ab".repeat(32))]}),
+            ),
+        )
+        .await;
+        let r = &resp.0["result"];
+        assert_eq!(r["success"], false);
+        assert_eq!(r["reason"], "AA31 paymaster deposit too low");
+        assert_eq!(r["receipt"]["transactionHash"], "0xfeed");
+    }
+
+    #[tokio::test]
+    async fn successful_receipt_has_no_reason_and_skips_the_replay() {
+        let st =
+            state_with_submitted(spawn_mock_chain_with_operation("0x1", Some(true)).await).await;
+        let resp = rpc_handler(
+            State(st),
+            Json(
+                json!({"jsonrpc":"2.0","id":9,"method":"eth_getUserOperationReceipt",
+                        "params":[format!("0x{}", "ab".repeat(32))]}),
+            ),
+        )
+        .await;
+        let r = &resp.0["result"];
+        assert_eq!(r["success"], true);
+        assert!(r.get("reason").is_none(), "{r}");
+    }
+
+    #[tokio::test]
+    async fn mined_transaction_without_operation_event_is_not_success() {
+        let state = state_with_submitted(spawn_mock_chain("0x1").await).await;
+        let response = rpc_handler(
+            State(state),
+            Json(
+                json!({"jsonrpc":"2.0","id":10,"method":"eth_getUserOperationReceipt",
+                "params":[format!("0x{}", "ab".repeat(32))]}),
+            ),
+        )
+        .await;
+        assert!(
+            response.0["error"]["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("UserOperationEvent"),
+            "{}",
+            response.0
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_operation_inside_mined_transaction_is_reported_as_failure() {
+        let state =
+            state_with_submitted(spawn_mock_chain_with_operation("0x1", Some(false)).await).await;
+        let response = rpc_handler(
+            State(state),
+            Json(json!({"jsonrpc":"2.0","id":11,
+            "method":"eth_getUserOperationReceipt","params":[format!("0x{}", "ab".repeat(32))]})),
+        )
+        .await;
+        assert_eq!(response.0["result"]["success"], false);
+        assert_eq!(
+            response.0["result"]["reason"],
+            "UserOperation execution reverted"
+        );
+        assert_eq!(response.0["result"]["receipt"]["status"], "0x1");
+    }
+
+    #[tokio::test]
+    async fn unknown_user_op_hash_returns_null() {
+        let st = test_state();
+        let resp = rpc_handler(
+            State(st),
+            Json(
+                json!({"jsonrpc":"2.0","id":4,"method":"eth_getUserOperationReceipt",
+                        "params":[format!("0x{}", "ab".repeat(32))]}),
+            ),
+        )
+        .await;
+        assert!(resp.0["result"].is_null());
+    }
+
+    #[tokio::test]
+    async fn unknown_method_is_minus_32601() {
+        let st = test_state();
+        let resp = rpc_handler(
+            State(st),
+            Json(
+                json!({"jsonrpc":"2.0","id":5,"method":"eth_estimateUserOperationGas","params":[]}),
+            ),
+        )
+        .await;
+        assert_eq!(resp.0["error"]["code"], -32601);
+    }
+
+    // #501 — the gas gate. Mock chain returns a fixed `eth_getBalance`; the
+    // healthz gate compares it to the config floor.
+    async fn spawn_mock_balance(balance_hex: &'static str) -> String {
+        use axum::routing::post;
+        async fn handle(
+            axum::extract::State(bal): axum::extract::State<&'static str>,
+            Json(req): Json<Value>,
+        ) -> Json<Value> {
+            let id = req.get("id").cloned().unwrap_or(Value::Null);
+            match req.get("method").and_then(|m| m.as_str()).unwrap_or("") {
+                "eth_getBalance" => Json(json!({"jsonrpc":"2.0","id":id,"result":bal})),
+                m => Json(json!({"jsonrpc":"2.0","id":id,"error":{
+                    "code":-32601,"message":format!("unexpected {m}")}})),
+            }
+        }
+        let app = Router::new()
+            .route("/", post(handle))
+            .with_state(balance_hex);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        format!("http://{addr}/")
+    }
+
+    fn ready_state_with(rpc_url: String, gas_floor_wei: Option<u128>) -> Arc<BundlerState> {
+        let cfg = BundlerConfig {
+            rpc_url,
+            chain_id: 212_013,
+            entry_point: [0x66; 20],
+            signer: SigningKey::from_slice(&[0x46; 32]).unwrap(),
+            beneficiary: [0x77; 20],
+            gas_limit: 4_000_000,
+            gas_price: Some(40_000_000_000),
+            gas_floor_wei,
+        };
+        Arc::new(BundlerState::new(BundlerBoot::Ready(Box::new(cfg))))
+    }
+
+    #[test]
+    fn wei_to_units_formats_native_amounts() {
+        assert_eq!(wei_to_units(1_000_000_000_000_000_000), "1");
+        assert_eq!(wei_to_units(1_500_000_000_000_000_000), "1.5");
+        assert_eq!(wei_to_units(0), "0");
+        assert_eq!(wei_to_units(20_000_000_000_000_000), "0.02");
+    }
+
+    #[test]
+    fn bundler_uses_custom_profile_and_rejects_invalid_explicit_configuration() {
+        let profile_path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../e2e/fixtures/chain-profiles/local-test.json"
+        );
+        let values = BundlerBootValues::from_lookup(|key| {
+            (key == "AGENTKEYS_CHAIN_PROFILE_FILE").then(|| profile_path.to_string())
+        })
+        .unwrap();
+        assert_eq!(values.chain_id.as_deref(), Some("31338"));
+        assert!(values.entry_point.is_some());
+        assert!(BundlerBootValues::from_lookup(
+            |key| (key == "AGENTKEYS_CHAIN_PROFILE_FILE").then(|| "missing-profile.json".into())
+        )
+        .is_err());
+        assert!(BundlerBootValues::from_lookup(
+            |key| (key == "AGENTKEYS_CHAIN").then(|| "unknown".into())
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn gas_floor_from_profile_and_override_parse() {
+        let ep = format!("0x{}", "66".repeat(20));
+        let key = format!("0x{}", "46".repeat(32));
+        // Explicit override wins and parses.
+        let over = BundlerBootValues {
+            gas_floor_wei: Some("5000000000000000000".into()),
+            ..boot_values(Some("http://127.0.0.1:1"), Some(&ep), Some(&key))
+        };
+        match BundlerBoot::from_values(over).unwrap() {
+            BundlerBoot::Ready(c) => assert_eq!(c.gas_floor_wei, Some(5_000_000_000_000_000_000)),
+            _ => panic!("expected ready"),
+        }
+        let bad = BundlerBootValues {
+            gas_floor_wei: Some("not-a-number".into()),
+            ..boot_values(Some("http://127.0.0.1:1"), Some(&ep), Some(&key))
+        };
+        assert!(BundlerBoot::from_values(bad)
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("GAS_FLOOR"));
+        let values = BundlerBootValues::from_lookup(|_| None).unwrap();
+        assert!(values.gas_floor_wei.is_some());
+    }
+
+    #[tokio::test]
+    async fn healthz_reports_not_ready_when_submitter_below_floor() {
+        // Balance 0.5 HEI, floor 1 HEI → not ready, with an out-of-gas reason.
+        let rpc = spawn_mock_balance("0x6f05b59d3b20000").await; // 0.5e18
+        let st = ready_state_with(rpc, Some(1_000_000_000_000_000_000));
+        let hz = healthz(State(st)).await;
+        assert_eq!(hz.0["ready"], false, "{}", hz.0);
+        let reason = hz.0["reason"].as_str().unwrap();
+        assert!(reason.contains("OUT OF GAS"), "{reason}");
+        assert!(reason.contains("0.5"), "{reason}");
+    }
+
+    #[tokio::test]
+    async fn healthz_ready_when_submitter_at_or_above_floor() {
+        let rpc = spawn_mock_balance("0x1bc16d674ec80000").await; // 2e18
+        let st = ready_state_with(rpc, Some(1_000_000_000_000_000_000));
+        let hz = healthz(State(st)).await;
+        assert_eq!(hz.0["ready"], true, "{}", hz.0);
+    }
+
+    #[tokio::test]
+    async fn healthz_fails_open_when_balance_unreadable() {
+        // Unreachable RPC + a floor set ⇒ MUST NOT block (fail-open): a health
+        // blip cannot take down a funded stack.
+        let st = ready_state_with(
+            "http://127.0.0.1:1/".into(),
+            Some(1_000_000_000_000_000_000),
+        );
+        let hz = healthz(State(st)).await;
+        assert_eq!(
+            hz.0["ready"], true,
+            "unreadable balance must fail open: {}",
+            hz.0
+        );
+    }
+
+    #[tokio::test]
+    async fn healthz_ready_when_no_floor_configured() {
+        // No floor ⇒ gate off, never probes the chain.
+        let st = ready_state_with("http://127.0.0.1:1/".into(), None);
+        let hz = healthz(State(st)).await;
+        assert_eq!(hz.0["ready"], true, "{}", hz.0);
+    }
+
+    #[tokio::test]
+    async fn degraded_boot_serves_healthz_and_actionable_rpc_errors() {
+        let st = degraded_state();
+        // /healthz stays 200-shaped (ok:true) so the deploy probe + systemd
+        // don't flap on hosts with no sponsorship provisioning.
+        let hz = healthz(State(st.clone())).await;
+        assert_eq!(hz.0["ok"], true);
+        assert_eq!(hz.0["ready"], false);
+        assert!(hz.0["missing"].as_array().unwrap().len() == 2);
+        // eth_chainId still answers (static config).
+        let resp = rpc_handler(
+            State(st.clone()),
+            Json(json!({"jsonrpc":"2.0","id":6,"method":"eth_chainId","params":[]})),
+        )
+        .await;
+        assert_eq!(resp.0["result"], "0x33c2d");
+        // Submission errors actionably, naming the missing env.
+        let resp = rpc_handler(
+            State(st),
+            Json(json!({"jsonrpc":"2.0","id":7,"method":"eth_sendUserOperation","params":[]})),
+        )
+        .await;
+        let msg = resp.0["error"]["message"].as_str().unwrap();
+        assert!(msg.contains("bundler not configured"), "{msg}");
+        assert!(msg.contains("ENTRYPOINT_ADDRESS"), "{msg}");
+        assert!(msg.contains("AGENTKEYS_BUNDLER_SIGNER_KEY"), "{msg}");
+    }
+
+    // Boot branching is covered through the pure `from_values` half —
+    // injected values, no `set_var`/`remove_var` (process env is global;
+    // mutation leaks across parallel test threads).
+
+    fn boot_values(
+        rpc: Option<&str>,
+        entry_point: Option<&str>,
+        signer_key: Option<&str>,
+    ) -> BundlerBootValues {
+        BundlerBootValues {
+            rpc_url: rpc.map(str::to_string),
+            entry_point: entry_point.map(str::to_string),
+            signer_key: signer_key.map(str::to_string),
+            // chain id is resolved (override or compiled profile) BEFORE from_values;
+            // pin Heima's here so these tests exercise EntryPoint/key branching, not
+            // chain-id resolution.
+            chain_id: Some("212013".into()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn from_values_requires_rpc_url() {
+        // Absent RPC URL (static infra config) is a hard error.
+        assert!(BundlerBoot::from_values(boot_values(None, None, None)).is_err());
+    }
+
+    #[test]
+    fn from_values_degrades_on_absent_entrypoint_and_key() {
+        match BundlerBoot::from_values(boot_values(Some("http://127.0.0.1:1"), None, None)).unwrap()
+        {
+            BundlerBoot::Degraded { chain_id, missing } => {
+                assert_eq!(chain_id, 212_013);
+                assert_eq!(missing.len(), 2);
+            }
+            BundlerBoot::Ready(_) => panic!("expected Degraded"),
+        }
+    }
+
+    #[test]
+    fn from_values_degrades_on_empty_values() {
+        // Empty-string values (unit wrote `ENTRYPOINT_ADDRESS_HEIMA=`) ⇒ Degraded too.
+        match BundlerBoot::from_values(boot_values(Some("http://127.0.0.1:1"), Some(""), Some("")))
+            .unwrap()
+        {
+            BundlerBoot::Degraded { missing, .. } => assert_eq!(missing.len(), 2),
+            BundlerBoot::Ready(_) => panic!("expected Degraded on empty values"),
+        }
+    }
+
+    #[test]
+    fn from_values_names_only_the_missing_entrypoint() {
+        let key = format!("0x{}", "46".repeat(32));
+        match BundlerBoot::from_values(boot_values(Some("http://127.0.0.1:1"), None, Some(&key)))
+            .unwrap()
+        {
+            BundlerBoot::Degraded { missing, .. } => {
+                assert_eq!(missing.len(), 1);
+                assert!(missing[0].contains("ENTRYPOINT_ADDRESS"));
+            }
+            BundlerBoot::Ready(_) => panic!("expected Degraded"),
+        }
+    }
+
+    #[test]
+    fn from_values_rejects_malformed_entrypoint() {
+        // MALFORMED EntryPoint (present but bad) ⇒ hard error, not Degraded.
+        let key = format!("0x{}", "46".repeat(32));
+        assert!(BundlerBoot::from_values(boot_values(
+            Some("http://127.0.0.1:1"),
+            Some("0xnothex"),
+            Some(&key)
+        ))
+        .is_err());
+    }
+
+    #[test]
+    fn from_values_ready_when_complete() {
+        let key = format!("0x{}", "46".repeat(32));
+        let entry_point_hex = format!("0x{}", "66".repeat(20));
+        match BundlerBoot::from_values(boot_values(
+            Some("http://127.0.0.1:1"),
+            Some(&entry_point_hex),
+            Some(&key),
+        ))
+        .unwrap()
+        {
+            BundlerBoot::Ready(cfg) => assert_eq!(cfg.entry_point, [0x66; 20]),
+            BundlerBoot::Degraded { missing, .. } => panic!("expected Ready, missing={missing:?}"),
+        }
+    }
+
+    #[test]
+    fn from_values_rejects_unresolved_chain_id() {
+        // The old code silently defaulted a missing chain id to Heima's 212013, so a
+        // Base host signed handleOps for the wrong chain. Now unresolved ⇒ hard error.
+        let key = format!("0x{}", "46".repeat(32));
+        let ep = format!("0x{}", "66".repeat(20));
+        let mut v = boot_values(Some("http://127.0.0.1:1"), Some(&ep), Some(&key));
+        v.chain_id = None;
+        assert!(BundlerBoot::from_values(v).is_err());
+    }
+
+    #[test]
+    fn default_profile_is_local_and_other_chains_need_explicit_configuration() {
+        use agentkeys_core::chain_profile::{ChainProfile, DEFAULT_PROFILE};
+        assert_eq!(
+            ChainProfile::load_builtin(DEFAULT_PROFILE)
+                .unwrap()
+                .chain_id,
+            31337
+        );
+        assert!(ChainProfile::load_builtin("unconfigured-network").is_err());
+    }
+}

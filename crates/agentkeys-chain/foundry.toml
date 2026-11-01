@@ -1,0 +1,21 @@
+[profile.default]
+src = "src"
+out = "out"
+libs = ["lib"]
+script = "script"
+test = "test"
+# Keep the shared simulator compatibility target.
+evm_version = "london"
+solc_version = "0.8.20"
+optimizer = true
+optimizer_runs = 200
+# The P-256 verifier requires IR compilation for stack depth.
+via_ir = true
+extra_output = ["storageLayout"]
+fs_permissions = [{ access = "read", path = "./bytecode" }, { access = "write", path = "./deployment-registry.json" }]
+
+[profile.default.fmt]
+line_length = 100
+tab_width = 4
+bracket_spacing = true
+

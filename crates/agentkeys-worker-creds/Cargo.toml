@@ -1,0 +1,57 @@
+[package]
+license.workspace = true
+name = "agentkeys-worker-creds"
+version = "0.1.0"
+edition = "2021"
+description = "Scoped credential worker with independent chain verification and encrypted local storage"
+
+[[bin]]
+name = "agentkeys-worker-creds"
+path = "src/main.rs"
+
+[lib]
+name = "agentkeys_worker_creds"
+path = "src/lib.rs"
+
+[dependencies]
+tower-http = { version = "0.5", features = ["cors"] }
+agentkeys-types = { workspace = true }
+# K10 cap-PoP verification (issue #76): ecrecover + cap_pop_payload + device_key_hash.
+agentkeys-core = { workspace = true }
+# #369 — the shared DelegationPath wire type the worker deserializes + re-verifies.
+agentkeys-protocol = { workspace = true }
+axum = { version = "0.7", features = ["json"] }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+reqwest = { version = "0.12", features = ["json"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+sha2 = "0.10"
+sha3 = "0.10"
+hex = "0.4"
+base64 = "0.22"
+zeroize = "1"
+rand_core = { version = "0.6", features = ["std"] }
+# AES-256-GCM envelope (per arch.md §15 + §17).
+aes-gcm = "0.10"
+clap = { version = "4", features = ["derive", "env"] }
+
+[dev-dependencies]
+agentkeys-worker-classify = { path = "../agentkeys-worker-classify" }
+agentkeys-backend-client = { workspace = true }
+agentkeys-web-core = { workspace = true }
+agentkeys-worker-channel = { path = "../agentkeys-worker-channel" }
+agentkeys-worker-memory = { path = "../agentkeys-worker-memory" }
+agentkeys-worker-config = { path = "../agentkeys-worker-config" }
+agentkeys-local-store = { path = "../agentkeys-local-store" }
+async-trait = { workspace = true }
+tempfile = "3"
+rusqlite = { version = "0.31", features = ["bundled"] }
+p256 = { version = "0.13", features = ["pkcs8", "pem", "ecdsa"] }
+tower = { version = "0.5", features = ["util"] }
+tokio = { workspace = true }
+# In-process audit worker for the #229 durable-audit integration test.
+agentkeys-worker-audit = { path = "../agentkeys-worker-audit" }

@@ -1,0 +1,91 @@
+/* ============================================================================
+   Agent Terrier · 小荔管家 — component kit
+   Opt-in classes (prefix `ds-`) that compose the tokens in tokens.css into the
+   building blocks from the design system. Import after tokens.css. Apps may use
+   these directly or treat them as a reference for bespoke layouts.
+   ============================================================================ */
+
+/* ── Surface helper ────────────────────────────────────────────────────────── */
+.ds-app {
+  font-family: var(--ds-font-body);
+  background: var(--ds-background);
+  color: var(--ds-text);
+  font-size: 16px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ── Type roles ────────────────────────────────────────────────────────────── */
+.ds-display { font-family: var(--ds-font-display); font-weight: 700; font-size: clamp(34px, 5vw, 56px); letter-spacing: -0.025em; line-height: 1.03; }
+.ds-section-title { font-family: var(--ds-font-display); font-weight: 700; font-size: clamp(26px, 3vw, 36px); letter-spacing: -0.02em; }
+.ds-title { font-family: var(--ds-font-display); font-weight: 700; font-size: 20px; letter-spacing: -0.01em; }
+.ds-body { font-family: var(--ds-font-body); font-weight: 400; font-size: 17px; }
+.ds-label { font-family: var(--ds-font-body); font-weight: 600; font-size: 14px; }
+.ds-kicker { font-family: var(--ds-font-body); font-weight: 700; font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ds-text-faint); }
+
+/* ── Buttons ───────────────────────────────────────────────────────────────── */
+.ds-btn {
+  display: inline-flex; align-items: center; gap: 8px;
+  font-family: var(--ds-font-body); font-weight: 600; font-size: 15px;
+  border-radius: var(--ds-r-pill); padding: 12px 22px; border: none; cursor: pointer;
+}
+.ds-btn--primary { background: var(--ds-primary); color: var(--ds-on-primary); font-weight: 700; }
+.ds-btn--secondary { background: none; color: var(--ds-text); border: 1px solid var(--ds-border-secondary); }
+.ds-btn--ink { background: var(--ds-ink); color: var(--ds-paper-sun); }
+.ds-btn--add { background: none; color: var(--ds-text-muted); border: 1.5px dashed var(--ds-border-dashed); border-radius: var(--ds-r-card); padding: 11px 20px; font-size: 14px; }
+.ds-btn--destructive { background: none; color: var(--ds-blocked); padding: 11px 8px; font-size: 14px; }
+
+/* ── Badges & status ───────────────────────────────────────────────────────── */
+.ds-badge { font-family: var(--ds-font-body); display: inline-flex; align-items: center; }
+.ds-badge--high { font-size: 10px; font-weight: 800; letter-spacing: 0.04em; color: var(--ds-blocked); border: 1px solid #e3b3a3; border-radius: 5px; padding: 2px 6px; }
+.ds-badge--ai { font-size: 9px; font-weight: 800; letter-spacing: 0.08em; color: var(--ds-on-primary); background: var(--ds-primary); border-radius: 5px; padding: 3px 7px; }
+
+.ds-status { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; border-radius: var(--ds-r-pill); padding: 5px 12px; }
+.ds-status::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+.ds-status--allow { color: var(--ds-allow); background: color-mix(in srgb, var(--ds-allow) 12%, #fff); }
+.ds-status--blocked { color: var(--ds-blocked); background: color-mix(in srgb, var(--ds-blocked) 11%, #fff); }
+
+/* Permission value pills (Read & update / Ask Every Time / Don't Allow) */
+.ds-val { font-size: 12.5px; font-weight: 700; padding: 5px 12px; border-radius: var(--ds-r-pill); white-space: nowrap; }
+.ds-val--read { color: var(--ds-allow); background: color-mix(in srgb, var(--ds-allow) 12%, #fff); }
+.ds-val--ask { color: var(--ds-ask); background: var(--ds-ask-tint); }
+.ds-val--off { color: var(--ds-off); background: var(--ds-off-tint); }
+
+/* ── Cards & panels ────────────────────────────────────────────────────────── */
+.ds-card { background: var(--ds-card); border: 1px solid var(--ds-border-strong); border-radius: var(--ds-r-card); }
+.ds-panel { background: var(--ds-card); border: 1px solid var(--ds-border-strong); border-radius: var(--ds-r-panel); }
+.ds-panel--raised { border: none; box-shadow: var(--ds-shadow-panel); }
+
+/* ── Toggle ────────────────────────────────────────────────────────────────── */
+.ds-toggle { width: 44px; height: 26px; border-radius: var(--ds-r-pill); background: #d8d0c2; padding: 3px; display: inline-flex; justify-content: flex-start; border: none; cursor: pointer; transition: background 0.15s; }
+.ds-toggle > span { width: 20px; height: 20px; border-radius: 50%; background: #fff; box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25); transition: transform 0.15s; }
+.ds-toggle[aria-checked='true'] { background: var(--ds-primary); justify-content: flex-end; }
+
+/* ── Segmented control ─────────────────────────────────────────────────────── */
+.ds-seg { display: inline-flex; background: var(--ds-field); border-radius: var(--ds-r-field); padding: 3px; gap: 3px; }
+.ds-seg > button { flex: 1; text-align: center; white-space: nowrap; font-family: var(--ds-font-body); font-size: 12.5px; font-weight: 600; color: var(--ds-text-muted); padding: 8px 14px; border: none; background: none; border-radius: 8px; cursor: pointer; }
+.ds-seg > button[aria-selected='true'] { font-weight: 700; color: var(--ds-on-primary); background: #fff; color: #1c1a08; box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08); }
+
+/* ── Inputs ────────────────────────────────────────────────────────────────── */
+.ds-input { width: 100%; border: 1px solid #e4dac7; border-radius: 13px; padding: 13px 16px; font-family: var(--ds-font-body); font-size: 15px; color: var(--ds-text); background: #fff; outline: none; }
+.ds-search { display: inline-flex; align-items: center; gap: 8px; background: var(--ds-field); border-radius: var(--ds-r-field); padding: 11px 13px; color: var(--ds-text-faint); font-size: 14px; }
+
+/* ── Permission row ────────────────────────────────────────────────────────── */
+.ds-perm-rows { border: 1px solid var(--ds-border); border-radius: var(--ds-r-card); overflow: hidden; }
+.ds-perm-row { display: flex; align-items: center; gap: 13px; padding: 13px 15px; border-bottom: 1px solid #f0e8d9; }
+.ds-perm-row:last-child { border-bottom: none; }
+.ds-perm-row__tile { width: 32px; height: 32px; border-radius: 9px; color: #fff; display: flex; align-items: center; justify-content: center; flex: none; }
+.ds-perm-row__body { flex: 1; min-width: 0; }
+.ds-perm-row__name { font-weight: 600; font-size: 14.5px; }
+.ds-perm-row__sub { font-size: 12px; color: var(--ds-text-faint); }
+.ds-perm-row__chev { color: #c3baa8; font-size: 18px; flex: none; }
+
+/* ── Category tile ─────────────────────────────────────────────────────────── */
+.ds-cat { width: 42px; height: 42px; border-radius: 12px; color: #fff; display: inline-flex; align-items: center; justify-content: center; }
+.ds-cat--personal { background: var(--ds-cat-personal); }
+.ds-cat--family { background: var(--ds-cat-family); }
+.ds-cat--work { background: var(--ds-cat-work); }
+.ds-cat--travel { background: var(--ds-cat-travel); }
+.ds-cat--spending { background: var(--ds-cat-spending); }
+.ds-cat--email { background: var(--ds-cat-email); }
+.ds-cat--smarthome { background: var(--ds-cat-smarthome); }

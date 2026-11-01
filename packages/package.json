@@ -1,0 +1,10 @@
+{
+  "name": "agent-terrier-runtime-workspace",
+  "private": true,
+  "workspaces": ["agentkeys-dsh", "agent-terrier-runtime"],
+  "scripts": {
+    "typecheck": "npm run typecheck --workspace @agentkeys/dsh-suite",
+    "build": "npm run build --workspace @agentkeys/dsh-suite",
+    "test": "npm test --workspace @agentkeys/dsh-suite && npm test --workspace @agent-terrier/runtime"
+  }
+}

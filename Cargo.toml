@@ -1,0 +1,51 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/agentkeys-types",
+    "crates/agentkeys-device-core",
+    "crates/agentkeys-core",
+    "crates/agentkeys-runtime",
+    "crates/agentkeys-local-store",
+    "crates/agentkeys-memory-engine",
+    "crates/agentkeys-memory-openviking",
+    "crates/agentkeys-web-core",
+    "crates/agentkeys-mock-server",
+    "crates/agentkeys-cli",
+    "crates/agentkeys-daemon",
+    "crates/agentkeys-provisioner",
+    "crates/agentkeys-backend-client",
+    "crates/agentkeys-protocol",
+    "crates/agentkeys-broker-server",
+    "crates/agentkeys-worker-creds",
+    "crates/agentkeys-worker-memory",
+    "crates/agentkeys-worker-config",
+    "crates/agentkeys-worker-channel",
+    "crates/agentkeys-worker-channel-weixin",
+    "crates/agentkeys-catalog",
+    "crates/agentkeys-classify-dataset",
+    "crates/agentkeys-worker-classify",
+    "crates/agentkeys-worker-audit",
+    "crates/agentkeys-gate",
+    "crates/agentkeys-bundler",
+]
+
+[workspace.package]
+license = "Apache-2.0"
+
+[workspace.dependencies]
+agentkeys-types = { path = "crates/agentkeys-types" }
+agentkeys-device-core = { path = "crates/agentkeys-device-core" }
+agentkeys-core = { path = "crates/agentkeys-core" }
+agentkeys-runtime = { path = "crates/agentkeys-runtime" }
+agentkeys-memory-engine = { path = "crates/agentkeys-memory-engine" }
+agentkeys-memory-openviking = { path = "crates/agentkeys-memory-openviking" }
+agentkeys-web-core = { path = "crates/agentkeys-web-core" }
+agentkeys-backend-client = { path = "crates/agentkeys-backend-client" }
+agentkeys-protocol = { path = "crates/agentkeys-protocol" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+async-trait = "0.1"
+thiserror = "2"
+anyhow = "1"
+zeroize = { version = "1", features = ["derive"] }

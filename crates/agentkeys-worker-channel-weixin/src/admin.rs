@@ -1,0 +1,2127 @@
+//! The OPERATOR admin surface (#418) — parent-control drives these through the
+//! daemon proxy (`/v1/master/gateway/*` → `/v1/gateway/admin/*` here). Every
+//! endpoint is admin-bearer-gated (constant-time compare; 503 when no token is
+//! configured — never open). Two ceremonies live here:
+//!
+//! 1. **Login** — the iLink QR ceremony over HTTP: `login/start` mints a QR the
+//!    app renders, `login/status` drives one server-held poll step per call,
+//!    `login/verify` supplies the on-phone pairing number. On `confirmed` the
+//!    worker WRITES ITS OWN secrets file (#384 custody stays on this host) and
+//!    hot-swaps the inbound loop — no process restart, no laptop.
+//! 2. **Bind** — the D5 contact ceremony: `bind/invite` mints a one-time code
+//!    for a family member (the app shows it as QR + text), the member echoes it
+//!    to the bot (the relay claims it), `bind/pending` shows the D13-safe queue
+//!    (bind_code-keyed, NEVER the openid), `bind/approve` is the master's
+//!    confirm that actually binds. The model may PROPOSE; only the master's
+//!    invite + approve decide (D10).
+
+use axum::{
+    extract::{Query, State},
+    http::{HeaderMap, StatusCode},
+    response::IntoResponse,
+    Json,
+};
+use serde::Deserialize;
+use serde_json::json;
+use tracing::{info, warn};
+
+use agentkeys_core::audit::{envelope_for, AuditOpKind, AuditResult, ContactBindBody};
+use agentkeys_protocol::{
+    BindInvite, Contact, GatewayActivityResponse, GatewayApproveRequest, GatewayApproveResponse,
+    GatewayBindInviteRequest, GatewayBindInviteResponse, GatewayBindRejectRequest,
+    GatewayContactRevokeRequest, GatewayContactUpdateRequest, GatewayContactsResponse,
+    GatewayHistoryResponse, GatewayLoginStartResponse, GatewayLoginStatusResponse,
+    GatewayLoginVerifyRequest, GatewayMonitorResponse, GatewayPendingBindView,
+    GatewayRouterSettingsRequest, GatewayRouterSettingsResponse, GatewayRouterView,
+    GatewayStatusView, PendingBind, RouterContactView, RouterModelView, RouterOptionView,
+    RouterSettings, TierProposal,
+};
+
+use crate::config::WeixinTransport;
+use crate::ilink::IlinkClient;
+use crate::ilink_login::{self, LoginOutcome};
+use crate::state::{AdminLogin, SharedWeixinGatewayState};
+
+/// Constant-time bearer compare (avoid a timing oracle on the admin token).
+pub(crate) fn ct_eq(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
+/// The shared admin gate: `Ok(())` iff a token is configured AND the bearer
+/// matches. 503 (never open) / 401 otherwise. The `Err` IS the ready-to-return
+/// refusal response — the by-value `Response` is deliberate (every caller
+/// returns it immediately), so the size lint doesn't buy anything here.
+#[allow(clippy::result_large_err)]
+pub(crate) fn admin_gate(
+    state: &SharedWeixinGatewayState,
+    headers: &HeaderMap,
+) -> Result<(), axum::response::Response> {
+    let Some(expected) = state.config.admin_token.as_deref() else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({
+                "ok": false,
+                "reason": "admin_disabled",
+                "detail": "set AGENTKEYS_WEIXIN_ADMIN_TOKEN to enable the operator admin surface"
+            })),
+        )
+            .into_response());
+    };
+    let presented = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|h| h.strip_prefix("Bearer "))
+        .unwrap_or_default();
+    if !ct_eq(presented, expected) {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            Json(json!({"ok": false, "reason": "admin_unauthorized"})),
+        )
+            .into_response());
+    }
+    Ok(())
+}
+
+// ── status ────────────────────────────────────────────────────────────────────
+
+/// `GET /v1/gateway/admin/status` — the parent-control gateway card.
+pub(crate) async fn admin_status(
+    State(state): State<SharedWeixinGatewayState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(resp) = admin_gate(&state, &headers) {
+        return resp;
+    }
+    let reg = state.registry.snapshot();
+    let pending_binds = reg.pending.len() as u32;
+    let open_invites = reg
+        .invites
+        .iter()
+        .filter(|i| !reg.pending.iter().any(|p| p.bind_code == i.bind_code))
+        .count() as u32;
+    let body = GatewayStatusView {
+        ok: true,
+        transport: match state.config.transport {
+            WeixinTransport::Oa => "oa".to_string(),
+            WeixinTransport::Ilink => "ilink".to_string(),
+            WeixinTransport::Telegram => "telegram".to_string(),
+        },
+        // `online` = a receive credential is loaded for THIS transport (iLink's
+        // is hot-swappable at runtime; telegram's is boot-static, #444).
+        online: match state.config.transport {
+            WeixinTransport::Telegram => state.config.telegram_bot_token.is_some(),
+            _ => state.ilink_online(),
+        },
+        bot_id: state.current_ilink_bot_id(),
+        bound_contacts: reg.bound.len() as u32,
+        open_invites,
+        pending_binds,
+        bots_online: state
+            .bots_snapshot()
+            .values()
+            .filter(|b| !b.token.trim().is_empty())
+            .count() as u32,
+        bots_unpersisted: state.bots_unpersisted(),
+        ilink_last_ok_ms: state.ilink_last_ok_ms(),
+        audit_on_chain: state.audit_on_chain(),
+        actor_omni: state.device.actor_omni(),
+        device_key_hash: state.device.device_key_hash(),
+        feed_hop: state.device.hop_blocker().is_none(),
+        feeds: crate::outbound::feeds_for_transport(
+            &reg,
+            transport_namespace(state.config.transport),
+        ),
+    };
+    (StatusCode::OK, Json(body)).into_response()
+}
+
+/// The registry-facing identity namespace of a transport (`weixin` for the
+/// OA + iLink family, `telegram`) — the feed id prefix.
+fn transport_namespace(t: WeixinTransport) -> &'static str {
+    match t {
+        WeixinTransport::Telegram => "telegram",
+        WeixinTransport::Oa | WeixinTransport::Ilink => "weixin",
+    }
+}
+
+// ── #667 — the gateway's OWN device actor ────────────────────────────────────
+
+/// `GET /v1/gateway/admin/device/status`
+pub(crate) async fn device_status(
+    State(state): State<SharedWeixinGatewayState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(resp) = admin_gate(&state, &headers) {
+        return resp;
+    }
+    let reg = state.registry.snapshot();
+    let d = &state.device;
+    let body = agentkeys_protocol::GatewayDeviceStatus {
+        ok: true,
+        configured: d.configured(),
+        enrolled: d.enrolled(),
+        actor_omni: d.actor_omni(),
+        device_key_hash: d.device_key_hash(),
+        broker_url: d.broker_url(),
+        transport: transport_namespace(state.config.transport).to_string(),
+        feed_hop: d.hop_blocker().is_none(),
+        blocker: d.hop_blocker().map(str::to_string),
+        feeds: crate::outbound::feeds_for_transport(
+            &reg,
+            transport_namespace(state.config.transport),
+        ),
+    };
+    (StatusCode::OK, Json(body)).into_response()
+}
+
+/// `POST /v1/gateway/admin/device/pairing-request` — step 1 of the gateway's
+/// §10.2 enrollment: this host's K10 mints the pairing code at the broker; the
+/// daemon (master) claims it and builds the accept for the ONE Touch ID.
+pub(crate) async fn device_pairing_request(
+    State(state): State<SharedWeixinGatewayState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(resp) = admin_gate(&state, &headers) {
+        return resp;
+    }
+    if state.device.enrolled() {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({
+                "ok": false,
+                "reason": "device_already_enrolled",
+                "actor_omni": state.device.actor_omni(),
+            })),
+        )
+            .into_response();
+    }
+    match state.device.pairing_request().await {
+        Ok(start) => (StatusCode::OK, Json(start)).into_response(),
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({ "ok": false, "reason": "pairing_request_failed", "detail": format!("{e:#}") })),
+        )
+            .into_response(),
+    }
+}
+
+/// `POST /v1/gateway/admin/device/pairing-complete` — step 2, after the
+/// master's accept CONFIRMED: prove the binding from this side, record the
+/// actor omni, arm the feed hop.
+pub(crate) async fn device_pairing_complete(
+    State(state): State<SharedWeixinGatewayState>,
+    headers: HeaderMap,
+    Json(req): Json<agentkeys_protocol::GatewayDevicePairingCompleteRequest>,
+) -> impl IntoResponse {
+    if let Err(resp) = admin_gate(&state, &headers) {
+        return resp;
+    }
+    match state.device.pairing_complete(&req.request_id).await {
+        Ok(done) => {
+            state.push_activity(
+                "device_enrolled",
+                "gateway",
+                &format!("actor {} (feed hop armed)", done.actor_omni),
+                false,
+            );
+            (StatusCode::OK, Json(done)).into_response()
+        }
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({ "ok": false, "reason": "pairing_complete_failed", "detail": format!("{e:#}") })),
+        )
+            .into_response(),
+    }
+}
+
+// ── login ceremony over HTTP ──────────────────────────────────────────────────
+
+/// `POST /v1/gateway/admin/login/start` — mint the QR. A new start replaces any
+/// in-flight session (the old QR goes stale server-side anyway).
+pub(crate) async fn login_start(
+    State(state): State<SharedWeixinGatewayState>,
+    headers: HeaderMap,
+    body: Option<Json<agentkeys_protocol::GatewayLoginStartRequest>>,
+) -> impl IntoResponse {
+    if let Err(resp) = admin_gate(&state, &headers) {
+        return resp;
+    }
+    let (session_omni, member_contact_id) = match body {
+        Some(Json(body)) => (
+            body.operator_omni,
+            body.contact_id
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty()),
+        ),
+        None => (None, None),
+    };
+    if let Some(session_omni) = session_omni.as_deref() {
+        if let Err(reason) = state.validate_connect_operator(session_omni) {
+            let status = if reason == "invalid_operator_omni" {
+                StatusCode::BAD_REQUEST
+            } else {
+                StatusCode::FORBIDDEN
+            };
+            return (status, Json(json!({"ok":false,"reason":reason}))).into_response();
+        }
+    }
+    if state.config.transport != WeixinTransport::Ilink {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({
+                "ok": false,
+                "reason": "transport_not_ilink",
+                "detail": "the QR login ceremony is the iLink transport's; this contact gate runs `oa`"
+            })),
+        )
+            .into_response();
+    }
+    // Present the current token so an already-bound account reports
+    // `binded_redirect` instead of double-binding. The QR always boots from the
+    // FIXED bootstrap host (config; env-overridable for the headless e2e).
+    // A MEMBER login (2026-09-11): the QR is minted FOR an open invite — the scan
+    // binds that contact (tier/reach from the invite) and custodies its own bot
+    // token. The owner's own id is always allowed (the console mints its invite
+    // anyway so the reach is recorded).
+    if let Some(cid) = member_contact_id.as_deref() {
+        let reg = state.registry.snapshot();
+        let known = cid == crate::bots::OWNER_CONTACT_ID
+            || reg.invites.iter().any(|i| i.contact_id == cid)
+            || reg.bound.iter().any(|c| c.contact_id == cid);
+        if !known {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({
+                    "ok": false,
+                    "reason": "invite_unknown",
+                    "detail": format!("no open invite for contact `{cid}` — mint one first")
+                })),
+            )
+                .into_response();
+        }
+    }
+    let local_tokens: Vec<String> = state.all_ilink_tokens();
+    let bootstrap = state.config.ilink_bootstrap_url.clone();
+    let client = IlinkClient::new(&bootstrap, None, &state.config.bot_agent);
+    match client.get_bot_qrcode(&local_tokens).await {
+        Ok(qr) => {
+            let login = AdminLogin {
+                login_id: format!("login-{:x}", now_nanos()),
+                qrcode: qr.qrcode,
+                qrcode_url: qr.qrcode_img_content.clone(),
+                base_url: bootstrap,
+                pending_verify: None,
+                operator_omni: session_omni,
+                contact_id: member_contact_id.clone(),
+            };
+            let resp = GatewayLoginStartResponse {
+                ok: true,
+                login_id: login.login_id.clone(),
+                qrcode_url: qr.qrcode_img_content,
+            };
+            *state.admin_login.lock().await = Some(login);
+            info!("admin login ceremony started (QR minted)");
+            (StatusCode::OK, Json(resp)).into_response()
+        }
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({"ok": false, "reason": "qrcode_mint_failed", "detail": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct LoginStatusQuery {
+    pub login_id: String,
+}
+
+/// `GET /v1/gateway/admin/login/status?login_id=` — ONE server-held poll step
+/// (up to ~35 s). The app loops on this until a terminal status.
+pub(crate) async fn login_status(
+    State(state): State<SharedWeixinGatewayState>,
+    headers: HeaderMap,
+    Query(q): Query<LoginStatusQuery>,
+) -> impl IntoResponse {
+    if let Err(resp) = admin_gate(&state, &headers) {
+        return resp;
+    }
+    // Snapshot the session WITHOUT holding the lock across the long poll (the
+    // verify endpoint needs the lock while we wait).
+    let snapshot = { state.admin_login.lock().await.clone() };
+    let Some(login) = snapshot.filter(|l| l.login_id == q.login_id) else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({"ok": false, "reason": "no_active_login"})),
+        )
+            .into_response();
+    };
+
+    let client = IlinkClient::new(&login.base_url, None, &state.config.bot_agent);
+    let status = client
+        .get_qrcode_status(&login.qrcode, login.pending_verify.as_deref())
+        .await;
+
+    let reply = |status: &str,
+                 bot_id: Option<String>,
+                 scanned_by: Option<String>,
+                 detail: Option<String>| {
+        Json(GatewayLoginStatusResponse {
+            ok: true,
+            status: status.to_string(),
+            bot_id,
+            scanned_by,
+            detail,
+        })
+        .into_response()
+    };
+
+    match status.status.as_str() {
+        "wait" => reply("wait", None, None, None),
+        "scaned" => {
+            // A carried verify code was accepted — clear it.
+            if login.pending_verify.is_some() {
+                let mut guard = state.admin_login.lock().await;
+                if let Some(l) = guard.as_mut().filter(|l| l.login_id == q.login_id) {
+                    l.pending_verify = None;
+                }
+            }
+            reply("scaned", None, None, None)
+        }
+        "scaned_but_redirect" => {
+            if let Some(host) = status.redirect_host.filter(|h| !h.is_empty()) {
+                let mut guard = state.admin_login.lock().await;
+                if let Some(l) = guard.as_mut().filter(|l| l.login_id == q.login_id) {
+                    l.base_url = format!("https://{host}");
+                }
+            }
+            reply("scaned", None, None, None)
+        }
+        "need_verifycode" => {
+            let detail = if login.pending_verify.is_some() {
+                // The carried code was WRONG — clear it and re-prompt.
+                let mut guard = state.admin_login.lock().await;
+                if let Some(l) = guard.as_mut().filter(|l| l.login_id == q.login_id) {
+                    l.pending_verify = None;
+                }
+                Some("verify_code_rejected — 请重新输入手机上显示的数字".to_string())
+            } else {
+                Some("输入手机微信显示的数字以继续".to_string())
+            };
+            reply("need_verifycode", None, None, detail)
+        }
+        "verify_code_blocked" => {
+            *state.admin_login.lock().await = None;
+            reply(
+                "verify_code_blocked",
+                None,
+                None,
+                Some("多次输入错误 — 稍后重新发起连接".to_string()),
+            )
+        }
+        "expired" => {
+            *state.admin_login.lock().await = None;
+            reply(
+                "expired",
+                None,
+                None,
+                Some("二维码已过期 — 重新点击连接生成新码".to_string()),
+            )
+        }
+        "binded_redirect" => {
+            *state.admin_login.lock().await = None;
+            reply(
+                "already_bound",
+                None,
+                None,
+                Some("该账号已绑定此网关，沿用现有 token（如需换发请先在微信侧解绑）".to_string()),
+            )
+        }
+        "confirmed" => {
+            // Upstream-plugin parity: a confirmed WITHOUT ilink_bot_id is a
+            // HALF-BIND (the on-phone authorize didn't finish) — refuse loudly.
+            let Some(bot_id) = status.ilink_bot_id.clone().filter(|b| !b.is_empty()) else {
+                *state.admin_login.lock().await = None;
+                return reply(
+                    "failed",
+                    None,
+                    None,
+                    Some(
+                        "服务器返回 confirmed 但缺少 ilink_bot_id — 请在手机上点\
+                         “连接/授权”完成绑定后重新发起"
+                            .to_string(),
+                    ),
+                );
+            };
+            let Some(bot_token) = status.bot_token.clone().filter(|t| !t.is_empty()) else {
+                *state.admin_login.lock().await = None;
+                return reply(
+                    "failed",
+                    None,
+                    None,
+                    Some("confirmed 但服务器未返回 bot_token".to_string()),
+                );
+            };
+            let base_url = status
+                .baseurl
+                .clone()
+                .filter(|b| !b.is_empty())
+                .unwrap_or_else(|| login.base_url.clone());
+            let scanned_by = status.ilink_user_id.clone().unwrap_or_default();
+
+            if let Some(owner) = login.operator_omni.as_deref() {
+                if let Err(reason) = state.set_runtime_operator_omni(owner) {
+                    return reply("failed", None, None, Some(reason.into()));
+                }
+            }
+            // #384 custody: the worker persists its OWN secrets file in place.
+            let outcome = LoginOutcome {
+                bot_token: bot_token.clone(),
+                base_url: base_url.clone(),
+                bot_id: bot_id.clone(),
+                scanned_by: scanned_by.clone(),
+            };
+            if let Some(cid) = login.contact_id.clone() {
+                // Member login: bind by scan, custody the member's own bot.
+                if let Some(omni) = login.operator_omni.clone() {
+                    if let Err(e) = ilink_login::upsert_operator_omni(
+                        std::path::Path::new(&state.config.secrets_file),
+                        &omni,
+                    ) {
+                        warn!(error = %e, "connect-recorded operator omni NOT persisted");
+                    }
+                }
+                let bound = bind_member_by_scan(&state, &cid, &outcome).await;
+                *state.admin_login.lock().await = None;
+                return match bound {
+                    Ok((contact, persist_err)) => {
+                        info!(contact_id = %contact.contact_id, bot_id = %bot_id, "member bot connected — contact bound by scan");
+                        let detail = match persist_err {
+                            Some(e) => {
+                                format!("bound:{}; tokens_not_persisted: {e}", contact.display_name)
+                            }
+                            None => format!("bound:{}", contact.display_name),
+                        };
+                        reply("connected", Some(bot_id), Some(scanned_by), Some(detail))
+                    }
+                    Err(e) => reply(
+                        "failed",
+                        Some(bot_id),
+                        Some(scanned_by),
+                        Some(format!("member_bind_failed: {e}")),
+                    ),
+                };
+            }
+            let mut detail = None;
+            let secrets_path = std::path::Path::new(&state.config.secrets_file);
+            match ilink_login::write_secrets_file(secrets_path, &outcome) {
+                Ok(rebound) => info!(
+                    path = %state.config.secrets_file,
+                    rebound,
+                    "admin login confirmed — secrets file upserted"
+                ),
+                Err(e) => {
+                    warn!(error = %e, "admin login confirmed but the secrets-file write FAILED — \
+                          the bot is online for THIS process only (a restart loses the token)");
+                    detail = Some(format!(
+                        "secrets_write_failed: {e} — bot 在线，但重启会丢失 token；\
+                         检查 {} 的属主/权限",
+                        state.config.secrets_file
+                    ));
+                }
+            }
+
+            // #502 (plan T9): record the connecting master's omni — runtime
+            // (audit emits key on it immediately) + persisted into the same
+            // secrets file (restarts keep it). An armed household owner was
+            // checked above before any credential or registry mutation.
+            if let Some(omni) = login.operator_omni.clone() {
+                match ilink_login::upsert_operator_omni(secrets_path, &omni) {
+                    Ok(_) => {
+                        info!(omni = %omni, "operator omni recorded at connect (session-sourced)")
+                    }
+                    Err(e) => warn!(
+                        error = %e,
+                        "connect-recorded operator omni NOT persisted — armed for THIS \
+                         process only (a restart falls back to the env stamp)"
+                    ),
+                }
+            }
+
+            // Hot-swap the runtime identity → the supervisor restarts the loop.
+            if let Err(e) = state.set_ilink_identity(bot_token, base_url, bot_id.clone()) {
+                detail = Some(match detail {
+                    Some(d) => format!("{d}; tokens_not_persisted: {e}"),
+                    None => format!("tokens_not_persisted: {e}"),
+                });
+            }
+            *state.admin_login.lock().await = None;
+            reply("connected", Some(bot_id), Some(scanned_by), detail)
+        }
+        other => reply(
+            "wait",
+            None,
+            None,
+            Some(format!("unrecognized status `{other}`")),
+        ),
+    }
+}
+
+/// `POST /v1/gateway/admin/login/verify` — carry the on-phone pairing number.
+pub(crate) async fn login_verify(
+    State(state): State<SharedWeixinGatewayState>,
+    headers: HeaderMap,
+    Json(req): Json<GatewayLoginVerifyRequest>,
+) -> impl IntoResponse {
+    if let Err(resp) = admin_gate(&state, &headers) {
+        return resp;
+    }
+    let mut guard = state.admin_login.lock().await;
+    match guard.as_mut().filter(|l| l.login_id == req.login_id) {
+        Some(login) => {
+            login.pending_verify = Some(req.verify_code.trim().to_string());
+            (StatusCode::OK, Json(json!({"ok": true}))).into_response()
+        }
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(json!({"ok": false, "reason": "no_active_login"})),
+        )
+            .into_response(),
+    }
+}
+
+/// `POST /v1/gateway/admin/login/disconnect` — operator DISCONNECT. Clears the
+/// runtime identity (bot offline immediately) AND blanks the persisted token
+/// (stays offline across restarts) so the next connect is a clean QR from
+/// scratch. Idempotent: disconnecting an already-offline bot is a no-op `ok`.
+pub(crate) async fn login_disconnect(
+    State(state): State<SharedWeixinGatewayState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(resp) = admin_gate(&state, &headers) {
+        return resp;
+    }
+    let was = state.current_ilink_bot_id();
+    state.clear_ilink_identity();
+    *state.admin_login.lock().await = None;
+    let mut detail: Option<String> = None;
+    if let Err(e) =
+        ilink_login::clear_secrets_file(std::path::Path::new(&state.config.secrets_file))
+    {
+        warn!(error = %e, "disconnect: runtime cleared but the secrets-file blank FAILED — a restart may reload the old token");
+        detail = Some(format!("secrets_clear_failed: {e}"));
+    }
+    info!(was = ?was, "operator disconnect — iLink identity cleared, bot offline");
+    (
+        StatusCode::OK,
+        Json(json!({"ok": true, "online": false, "was_bot_id": was, "detail": detail})),
+    )
+        .into_response()
+}
+
+// ── bind ceremony (D5) ────────────────────────────────────────────────────────
+
+/// `POST /v1/gateway/admin/bind/invite` — mint a one-time invite for a family
+/// member. Idempotent-ish: re-inviting the same `contact_id` replaces the open
+/// invite (a stale unclaimed code stops working).
+pub(crate) async fn bind_invite(
+    State(state): State<SharedWeixinGatewayState>,
+    headers: HeaderMap,
+    Json(req): Json<GatewayBindInviteRequest>,
+) -> impl IntoResponse {
+    if let Err(resp) = admin_gate(&state, &headers) {
+        return resp;
+    }
+    if req.contact_id.trim().is_empty() || req.display_name.trim().is_empty() {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({"ok": false, "reason": "missing_contact_id_or_display_name"})),
+        )
+            .into_response();
+    }
+    // L3 rule, enforced at mint too: only `owner` may speak where an
+    // operator-grade app is bound.
+    if let Some(bad) = operator_grade_grant(&state, req.tier, &req.channels) {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({
+                "ok": false,
+                "reason": "operator_grade_reach_denied",
+                "detail": format!("`{bad}` is operator-grade — only the owner tier may speak on its channel")
+            })),
+        )
+            .into_response();
+    }
+
+    let result = state.registry.mutate(|reg| {
+        let mut code;
+        let mut salt = 0u64;
+        loop {
+            code = mint_bind_code(salt);
+            if !reg.invites.iter().any(|i| i.bind_code == code)
+                && !reg.pending.iter().any(|p| p.bind_code == code)
+            {
+                break;
+            }
+            salt += 1;
+        }
+        // Replace any open invite for the same contact_id (stale code dies).
+        reg.invites.retain(|i| i.contact_id != req.contact_id);
+        reg.invites.push(BindInvite {
+            bind_code: code.clone(),
+            contact_id: req.contact_id.clone(),
+            display_name: req.display_name.clone(),
+            tier: req.tier,
+            channels: req.channels.clone(),
+            legacy_reach: Vec::new(),
+        });
+        Ok(code)
+    });
+    match result {
+        Ok(code) => {
+            info!(contact_id = %req.contact_id, "bind invite minted");
+            state.push_activity(
+                "invite",
+                &req.display_name,
+                &format!("{} · {} channel(s)", req.tier.as_str(), req.channels.len()),
+                false,
+            );
+            let resp = GatewayBindInviteResponse {
+                ok: true,
+                bind_code: code.clone(),
+                send_text: format!("绑定 {code}"),
+            };
+            (StatusCode::OK, Json(resp)).into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"ok": false, "reason": "registry_write_failed", "detail": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+/// `GET /v1/gateway/admin/bind/pending` — the D13-safe approve queue.
+pub(crate) async fn bind_pending(
+    State(state): State<SharedWeixinGatewayState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(resp) = admin_gate(&state, &headers) {
+        return resp;
+    }
+    let reg = state.registry.snapshot();
+    let views: Vec<GatewayPendingBindView> = reg
+        .invites
+        .iter()
+        .map(|i| GatewayPendingBindView {
+            bind_code: i.bind_code.clone(),
+            contact_id: i.contact_id.clone(),
+            display_name: i.display_name.clone(),
+            tier: i.tier,
+            channels: i.channels.clone(),
+            claimed: reg.pending.iter().any(|p| p.bind_code == i.bind_code),
+        })
+        .collect();
+    (StatusCode::OK, Json(json!({"ok": true, "pending": views}))).into_response()
+}
+
+/// `POST /v1/gateway/admin/bind/approve` — the master's confirm (the actual
+/// bind). Requires a CLAIMED invite; tier/channel overrides re-run the
+/// operator-grade guard. The member's rows land on the channel documents.
+pub(crate) async fn bind_approve(
+    State(state): State<SharedWeixinGatewayState>,
+    headers: HeaderMap,
+    Json(req): Json<GatewayApproveRequest>,
+) -> impl IntoResponse {
+    if let Err(resp) = admin_gate(&state, &headers) {
+        return resp;
+    }
+    let approved: anyhow::Result<Contact> = state.registry.mutate(|reg| {
+        let invite = reg
+            .invites
+            .iter()
+            .find(|i| i.bind_code.eq_ignore_ascii_case(&req.bind_code))
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("bind_code_unknown"))?;
+        let pending = reg
+            .pending
+            .iter()
+            .find(|p| p.bind_code.eq_ignore_ascii_case(&req.bind_code))
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("bind_not_claimed"))?;
+
+        let tier = req.tier.unwrap_or(invite.tier);
+        let grants = req
+            .channels
+            .clone()
+            .unwrap_or_else(|| invite.channels.clone());
+        if let Some(bad) = operator_grade_grant_in(reg, &state.config, tier, &grants) {
+            anyhow::bail!("operator_grade_reach_denied:{bad}");
+        }
+
+        let contact = Contact {
+            contact_id: invite.contact_id.clone(),
+            transport: pending.transport.clone(),
+            transport_id: pending.transport_id.clone(),
+            display_name: invite.display_name.clone(),
+            tier,
+            legacy_reach: Vec::new(),
+            welcomed: false,
+        };
+        // Rebind-safe: replace any bound row with the same contact_id OR the
+        // same transport identity.
+        reg.bound.retain(|c| {
+            c.contact_id != contact.contact_id
+                && !(c.transport == contact.transport && c.transport_id == contact.transport_id)
+        });
+        reg.bound.push(contact.clone());
+        reg.invites
+            .retain(|i| !i.bind_code.eq_ignore_ascii_case(&req.bind_code));
+        reg.pending
+            .retain(|p| !p.bind_code.eq_ignore_ascii_case(&req.bind_code));
+        let now = crate::relay::unix_secs();
+        reg.apply_grants(&contact.contact_id, &grants);
+        for d in reg
+            .channels
+            .iter_mut()
+            .filter(|d| d.member(&contact.contact_id).is_some())
+        {
+            d.updated_at = now;
+        }
+        Ok(contact)
+    });
+
+    match approved {
+        Ok(contact) => {
+            let snapshot = state.registry.snapshot();
+            emit_contact_bind_audit(&state, &contact, "bound").await;
+            state.push_activity(
+                "bound",
+                &contact.display_name,
+                &format!(
+                    "{} · {} channel(s)",
+                    contact.tier.as_str(),
+                    snapshot.speak_channels(&contact.contact_id).len()
+                ),
+                state.audit_on_chain(),
+            );
+            info!(contact_id = %contact.contact_id, tier = contact.tier.as_str(), "contact BOUND (master approve)");
+            // The member's half of the ceremony: the claim ack promised "等待管理员
+            // 确认后即可使用" — say so in the chat now, with whom they can talk to.
+            // Best-effort through the stored context token (the same path the
+            // delayed agent replies use); a failed send is a warn — the bind stands.
+            let notice = bound_notice(&contact, &snapshot);
+            match crate::outbound::deliver(&state, &contact.transport_id, &notice).await {
+                Ok(()) => {
+                    state.mark_welcomed(&contact.contact_id);
+                    info!(contact_id = %contact.contact_id, "bound notice delivered to the member")
+                }
+                Err(e) => {
+                    warn!(contact_id = %contact.contact_id, error = %e, "bound notice NOT delivered now — it goes out with the member's next message (the bind stands)")
+                }
+            }
+            let resp = GatewayApproveResponse {
+                ok: true,
+                contact: snapshot.summary(&contact),
+            };
+            (StatusCode::OK, Json(resp)).into_response()
+        }
+        Err(e) => {
+            let msg = e.to_string();
+            let (code, reason) = match msg.as_str() {
+                "bind_code_unknown" => (StatusCode::NOT_FOUND, "bind_code_unknown"),
+                "bind_not_claimed" => (StatusCode::CONFLICT, "bind_not_claimed"),
+                m if m.starts_with("operator_grade_reach_denied") => (
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "operator_grade_reach_denied",
+                ),
+                _ => (StatusCode::INTERNAL_SERVER_ERROR, "registry_write_failed"),
+            };
+            (
+                code,
+                Json(json!({"ok": false, "reason": reason, "detail": msg})),
+            )
+                .into_response()
+        }
+    }
+}
+
+/// `POST /v1/gateway/admin/bind/reject` — the master WITHDRAWS an invite before
+/// it binds (the remove half of the D5 gate). Works on BOTH row kinds: an open
+/// (unclaimed) invite — the code simply dies — and a claimed pending bind — the
+/// claimant is dropped and gets unknown-sender silence from then on. Idempotent:
+/// an already-gone code returns `removed: false`.
+pub(crate) async fn bind_reject(
+    State(state): State<SharedWeixinGatewayState>,
+    headers: HeaderMap,
+    Json(req): Json<GatewayBindRejectRequest>,
+) -> impl IntoResponse {
+    if let Err(resp) = admin_gate(&state, &headers) {
+        return resp;
+    }
+    let code = req.bind_code.trim().to_string();
+    let removed: anyhow::Result<(bool, Option<Contact>)> = state.registry.mutate(|reg| {
+        // A claimed pending carries the transport identity — capture it so the
+        // withdrawal of a CLAIMED bind leaves an audit row like approve does.
+        let rejected_contact = reg
+            .pending
+            .iter()
+            .find(|p| p.bind_code.eq_ignore_ascii_case(&code))
+            .and_then(|p| {
+                reg.invites
+                    .iter()
+                    .find(|i| i.bind_code.eq_ignore_ascii_case(&code))
+                    .map(|i| Contact {
+                        contact_id: i.contact_id.clone(),
+                        transport: p.transport.clone(),
+                        transport_id: p.transport_id.clone(),
+                        display_name: i.display_name.clone(),
+                        tier: i.tier,
+                        legacy_reach: Vec::new(),
+                        welcomed: false,
+                    })
+            });
+        let before = reg.invites.len() + reg.pending.len();
+        reg.invites
+            .retain(|i| !i.bind_code.eq_ignore_ascii_case(&code));
+        reg.pending
+            .retain(|p| !p.bind_code.eq_ignore_ascii_case(&code));
+        Ok((
+            before != reg.invites.len() + reg.pending.len(),
+            rejected_contact,
+        ))
+    });
+    match removed {
+        Ok((removed, rejected_contact)) => {
+            if let Some(contact) = rejected_contact.as_ref() {
+                emit_contact_bind_audit(&state, contact, "rejected").await;
+            }
+            if removed {
+                let name = rejected_contact
+                    .as_ref()
+                    .map(|c| c.display_name.clone())
+                    .unwrap_or_else(|| format!("code {code}"));
+                state.push_activity(
+                    "rejected",
+                    &name,
+                    if rejected_contact.is_some() {
+                        "claimed invite withdrawn"
+                    } else {
+                        "open invite withdrawn"
+                    },
+                    rejected_contact.is_some() && state.audit_on_chain(),
+                );
+                info!(
+                    claimed = rejected_contact.is_some(),
+                    "bind invite WITHDRAWN (master reject)"
+                );
+            }
+            (
+                StatusCode::OK,
+                Json(json!({"ok": true, "removed": removed})),
+            )
+                .into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"ok": false, "reason": "registry_write_failed", "detail": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+/// `GET /v1/gateway/admin/contacts` — the typed contacts view (the #410
+/// endpoint's admin-path twin; same D13-safe payload).
+pub(crate) async fn admin_contacts(
+    State(state): State<SharedWeixinGatewayState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(resp) = admin_gate(&state, &headers) {
+        return resp;
+    }
+    let reg = state.registry.snapshot();
+    let body = GatewayContactsResponse {
+        ok: true,
+        channels: reg.channels.clone(),
+        contacts: reg
+            .bound
+            .iter()
+            .map(|c| {
+                let mut s: agentkeys_protocol::ContactSummary = reg.summary(c);
+                // An owner bound before the per-member model has no bot under their
+                // own id — the legacy owner bot (`self-owner`) still serves them.
+                s.connected = state.bot_for_contact(&c.contact_id).is_some()
+                    || (c.tier == agentkeys_protocol::ContactTier::Owner
+                        && state
+                            .bot_for_contact(crate::bots::OWNER_CONTACT_ID)
+                            .is_some());
+                s
+            })
+            .collect(),
+    };
+    (StatusCode::OK, Json(body)).into_response()
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct MonitorQuery {
+    #[serde(default)]
+    pub after: u64,
+}
+
+/// `GET /v1/gateway/admin/monitor?after=<cursor>` — the operator's LIVE message
+/// monitor (#1): recent inbound turns + their L3 decision. Poll with the returned
+/// `cursor`. Ephemeral (in-memory ring; D13-safe — display_name, never openid).
+pub(crate) async fn monitor(
+    State(state): State<SharedWeixinGatewayState>,
+    headers: HeaderMap,
+    Query(q): Query<MonitorQuery>,
+) -> impl IntoResponse {
+    if let Err(resp) = admin_gate(&state, &headers) {
+        return resp;
+    }
+    let (cursor, events) = state.monitor_since(q.after);
+    (
+        StatusCode::OK,
+        Json(GatewayMonitorResponse {
+            ok: true,
+            cursor,
+            events,
+        }),
+    )
+        .into_response()
+}
+
+/// #722 / household channels — `GET /v1/gateway/admin/router`: the router as
+/// the decision model sees it — settings, the models the household may switch
+/// between (each with its server as the model gate reports it), the guidance
+/// each question carries, the options per bound contact (their channels,
+/// rendered from the channel documents alone) — and the last turns that
+/// consulted a model, with the compared answers.
+pub(crate) async fn router_view(
+    State(state): State<SharedWeixinGatewayState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(resp) = admin_gate(&state, &headers) {
+        return resp;
+    }
+    let cfg = &state.config.router;
+    let registry = state.registry.snapshot();
+    let active = crate::jev::active_models(cfg, registry.router.as_ref());
+    let kind_name = |k: &agentkeys_protocol::ChannelEventKind| {
+        serde_json::to_value(k)
+            .ok()
+            .and_then(|v| v.as_str().map(str::to_string))
+            .unwrap_or_default()
+    };
+    let contacts = registry
+        .bound
+        .iter()
+        .map(|c| {
+            let options = crate::jev::channel_options(&registry, &c.contact_id);
+            let last = state
+                .device
+                .last_channel(&c.transport, &c.transport_id)
+                .filter(|l| options.iter().any(|o| &o.id == l));
+            RouterContactView {
+                contact: c.display_name.clone(),
+                tier: c.tier.as_str().to_string(),
+                request: serde_json::to_value(crate::jev::build_request(
+                    &active.model,
+                    crate::jev::PREVIEW_MESSAGE,
+                    &c.display_name,
+                    c.tier.as_str(),
+                    last.as_deref(),
+                    &options,
+                ))
+                .unwrap_or(serde_json::Value::Null),
+                options: options
+                    .into_iter()
+                    .map(|o| RouterOptionView {
+                        channel_id: o.id,
+                        name: o.name,
+                        line: o.line,
+                        apps: o
+                            .apps
+                            .iter()
+                            .map(|a| agentkeys_protocol::RouterAppView {
+                                alias: a.alias.clone(),
+                                description: a.description.clone(),
+                                takes: a.takes.iter().map(kind_name).collect(),
+                            })
+                            .collect(),
+                        members: o.members,
+                        operator_of: o.operator_of,
+                        updated_at: o.updated_at,
+                    })
+                    .collect(),
+            }
+        })
+        .collect();
+    let servers = match state.jev.as_ref() {
+        Some(client) => client.decision_servers().await,
+        None => Err("this contact gate routes without a model (no model gate configured)".into()),
+    };
+    let models = cfg
+        .models
+        .iter()
+        .filter_map(|m| {
+            let provider = agentkeys_protocol::DecisionProvider::of_model(m)?;
+            let server = match &servers {
+                Ok(report) => report
+                    .providers
+                    .get(provider.id())
+                    .cloned()
+                    .unwrap_or_else(|| agentkeys_protocol::DecisionServerReport {
+                        error: Some(format!(
+                            "the model gate does not report {} (an older gate?)",
+                            provider.label()
+                        )),
+                        ..Default::default()
+                    }),
+                Err(e) => agentkeys_protocol::DecisionServerReport {
+                    error: Some(e.clone()),
+                    ..Default::default()
+                },
+            };
+            Some(RouterModelView {
+                model: m.clone(),
+                provider,
+                active: *m == active.model,
+                stack_default: *m == cfg.default_model,
+                server,
+            })
+        })
+        .collect();
+    let notice = active.stale_choice.as_ref().map(|m| {
+        format!(
+            "The household chose {m}, which this contact gate no longer offers — {} routes until \
+             another offered model is chosen.",
+            active.model
+        )
+    });
+    (
+        StatusCode::OK,
+        Json(GatewayRouterView {
+            ok: true,
+            engine: if state.jev.is_some() {
+                "jev"
+            } else {
+                "deterministic"
+            }
+            .into(),
+            model: active.model.clone(),
+            default_model: cfg.default_model.clone(),
+            compare: !active.compare.is_empty(),
+            models,
+            chosen_at: registry
+                .router
+                .as_ref()
+                .map(|r| r.updated_at)
+                .filter(|t| *t > 0),
+            notice,
+            gate_url: cfg.gate_url.clone(),
+            threshold: cfg.threshold,
+            continue_threshold: cfg.continue_threshold,
+            ask_ttl_secs: cfg.ask_ttl_secs,
+            describe_photos: cfg.describe_photos,
+            describe_model: cfg.describe_model.clone(),
+            describe_prompt: crate::jev::DESCRIBE_PROMPT.to_string(),
+            guidance: crate::jev::guidance(),
+            contacts,
+            recent: state.router_log(),
+        }),
+    )
+        .into_response()
+}
+
+/// `POST /v1/gateway/admin/router/settings` — the household picks which
+/// offered decision model routes, and whether every other one answers each
+/// turn too (compare mode). Stored in the registry — household policy, synced
+/// to the master's Config doc with it — and live from the next turn. Every
+/// change lands in the activity trail.
+pub(crate) async fn router_settings(
+    State(state): State<SharedWeixinGatewayState>,
+    headers: HeaderMap,
+    Json(req): Json<GatewayRouterSettingsRequest>,
+) -> impl IntoResponse {
+    if let Err(resp) = admin_gate(&state, &headers) {
+        return resp;
+    }
+    let cfg = &state.config.router;
+    let model = req.model.as_deref().map(str::trim);
+    if let Some(m) = model {
+        if !cfg.offers(m) {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "ok": false,
+                    "reason": "model_not_offered",
+                    "detail": format!(
+                        "this contact gate offers {} (AGENTKEYS_WEIXIN_ROUTER_MODELS)",
+                        cfg.models.join(", ")
+                    ),
+                })),
+            )
+                .into_response();
+        }
+    }
+    if req.compare == Some(true) && cfg.models.len() < 2 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "ok": false,
+                "reason": "nothing_to_compare",
+                "detail": "this contact gate offers one decision model — list another in \
+                           AGENTKEYS_WEIXIN_ROUTER_MODELS to compare",
+            })),
+        )
+            .into_response();
+    }
+    let before = crate::jev::active_models(cfg, state.registry.snapshot().router.as_ref());
+    let result = state.registry.mutate(|reg| {
+        let mut next = reg.router.clone().unwrap_or_default();
+        if let Some(m) = model {
+            next.model = Some(m.to_string());
+        }
+        if let Some(c) = req.compare {
+            next.compare = c;
+        }
+        let changed = reg.router.as_ref() != Some(&next)
+            && (reg.router.is_some() || next != RouterSettings::default());
+        if changed {
+            next.updated_at = crate::relay::unix_secs();
+            reg.router = Some(next);
+        }
+        Ok(changed)
+    });
+    let changed = match result {
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"ok": false, "reason": e.to_string()})),
+            )
+                .into_response()
+        }
+    };
+    let after = crate::jev::active_models(cfg, state.registry.snapshot().router.as_ref());
+    let compare = !after.compare.is_empty();
+    if changed {
+        let switched = if before.model == after.model {
+            after.model.clone()
+        } else {
+            format!("{} → {}", before.model, after.model)
+        };
+        let detail = format!(
+            "{switched} · compare {}",
+            if compare { "on" } else { "off" }
+        );
+        info!(%detail, "router decision model set by operator");
+        state.push_activity("router_model", "—", &detail, false);
+    }
+    (
+        StatusCode::OK,
+        Json(GatewayRouterSettingsResponse {
+            ok: true,
+            model: after.model,
+            compare,
+            changed,
+        }),
+    )
+        .into_response()
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct HistoryQuery {
+    /// Page older than this `ts_ms` (exclusive). Absent = newest page.
+    #[serde(default)]
+    pub before: Option<u64>,
+    /// Page size (default 50, capped at 200).
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+/// `GET /v1/gateway/admin/history?before=<ts_ms>&limit=<n>` — the owner's DURABLE
+/// message history (#419): every inbound turn from the append-only log, newest
+/// first, backward-paginated. Survives restarts (unlike `monitor`). D13-safe —
+/// the same display_name-only event shape.
+pub(crate) async fn history(
+    State(state): State<SharedWeixinGatewayState>,
+    headers: HeaderMap,
+    Query(q): Query<HistoryQuery>,
+) -> impl IntoResponse {
+    if let Err(resp) = admin_gate(&state, &headers) {
+        return resp;
+    }
+    let limit = q.limit.unwrap_or(50).clamp(1, 200);
+    let events = state.history(limit, q.before);
+    let next_before_ts = events.last().map(|e| e.ts_ms);
+    (
+        StatusCode::OK,
+        Json(GatewayHistoryResponse {
+            ok: true,
+            events,
+            next_before_ts,
+        }),
+    )
+        .into_response()
+}
+
+/// `GET /v1/gateway/admin/activity?before=<ts_ms>&limit=<n>` — the DURABLE
+/// control-action audit trail (invite / claim / bound / rejected / revoked /
+/// connect), newest-first. Survives daemon AND worker restarts (unlike the
+/// daemon's ephemeral master-audit buffer). D13-safe (display_name, never openid).
+pub(crate) async fn activity(
+    State(state): State<SharedWeixinGatewayState>,
+    headers: HeaderMap,
+    Query(q): Query<HistoryQuery>,
+) -> impl IntoResponse {
+    if let Err(resp) = admin_gate(&state, &headers) {
+        return resp;
+    }
+    let limit = q.limit.unwrap_or(50).clamp(1, 200);
+    let events = state.activity(limit, q.before);
+    let next_before_ts = events.last().map(|e| e.ts_ms);
+    (
+        StatusCode::OK,
+        Json(GatewayActivityResponse {
+            ok: true,
+            events,
+            next_before_ts,
+        }),
+    )
+        .into_response()
+}
+
+/// `POST /v1/gateway/admin/contacts/update` — operator edits a bound
+/// contact's tier and rows (#3). Unchanged fields stay; `channels` REPLACES
+/// the member's rows across every document; a tier that may not speak where
+/// an operator-grade app is bound is rejected (same guard as approve). 404 if
+/// not bound.
+pub(crate) async fn contacts_update(
+    State(state): State<SharedWeixinGatewayState>,
+    headers: HeaderMap,
+    Json(req): Json<GatewayContactUpdateRequest>,
+) -> impl IntoResponse {
+    if let Err(resp) = admin_gate(&state, &headers) {
+        return resp;
+    }
+    let updated: anyhow::Result<Contact> = state.registry.mutate(|reg| {
+        let c = reg
+            .bound
+            .iter()
+            .find(|c| c.contact_id == req.contact_id)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("contact_unknown"))?;
+        // Validate the RESULTING policy BEFORE mutating, so a rejected edit
+        // leaves the in-memory registry untouched (mutate only persists on Ok).
+        let new_tier = req.tier.unwrap_or(c.tier);
+        let grants = req
+            .channels
+            .clone()
+            .unwrap_or_else(|| reg.grants_of(&c.contact_id));
+        if let Some(bad) = operator_grade_grant_in(reg, &state.config, new_tier, &grants) {
+            anyhow::bail!("operator_grade_reach_denied:{bad}");
+        }
+        let now = crate::relay::unix_secs();
+        if req.channels.is_some() {
+            let before = reg.grants_of(&c.contact_id);
+            reg.apply_grants(&c.contact_id, &grants);
+            let after = reg.grants_of(&c.contact_id);
+            for d in reg.channels.iter_mut() {
+                let was = before
+                    .iter()
+                    .find(|g| g.channel_id == d.id)
+                    .map(|g| (g.speak, g.read));
+                let is = after
+                    .iter()
+                    .find(|g| g.channel_id == d.id)
+                    .map(|g| (g.speak, g.read));
+                if was != is {
+                    d.updated_at = now;
+                }
+            }
+        }
+        let c = reg
+            .bound
+            .iter_mut()
+            .find(|c| c.contact_id == req.contact_id)
+            .expect("found above");
+        c.tier = new_tier;
+        Ok(c.clone())
+    });
+    match updated {
+        Ok(c) => {
+            let summary = state.registry.snapshot().summary(&c);
+            info!(contact = %c.contact_id, "contact routing policy updated by operator");
+            (
+                StatusCode::OK,
+                Json(json!({"ok": true, "contact": summary})),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            let reason = e.to_string();
+            let code = if reason == "contact_unknown" {
+                StatusCode::NOT_FOUND
+            } else {
+                StatusCode::BAD_REQUEST
+            };
+            (code, Json(json!({"ok": false, "reason": reason}))).into_response()
+        }
+    }
+}
+
+/// The operator-grade alias a grant would let a non-owner tier speak to
+/// (`None` = the grants are fine). Operator-grade data needs operator-grade
+/// auth; a tier below owner may not even speak where such an app is bound.
+fn operator_grade_grant_in(
+    reg: &agentkeys_protocol::ContactRegistry,
+    config: &crate::config::WeixinGatewayConfig,
+    tier: agentkeys_protocol::ContactTier,
+    grants: &[agentkeys_protocol::ChannelGrant],
+) -> Option<String> {
+    if tier.may_hold_operator_grade_reach() {
+        return None;
+    }
+    grants
+        .iter()
+        .filter(|g| g.speak)
+        .filter_map(|g| reg.channel(&g.channel_id))
+        .flat_map(|d| d.apps.iter())
+        .find(|a| config.operator_grade_aliases.contains(&a.alias))
+        .map(|a| a.alias.clone())
+}
+
+fn operator_grade_grant(
+    state: &SharedWeixinGatewayState,
+    tier: agentkeys_protocol::ContactTier,
+    grants: &[agentkeys_protocol::ChannelGrant],
+) -> Option<String> {
+    operator_grade_grant_in(&state.registry.snapshot(), &state.config, tier, grants)
+}
+
+/// `POST /v1/gateway/admin/contacts/revoke` — operator UNBINDS a contact (#3):
+/// they can no longer reach any agent. Idempotent — an unknown id is `ok` with
+/// `removed:false`.
+pub(crate) async fn contacts_revoke(
+    State(state): State<SharedWeixinGatewayState>,
+    headers: HeaderMap,
+    Json(req): Json<GatewayContactRevokeRequest>,
+) -> impl IntoResponse {
+    if let Err(resp) = admin_gate(&state, &headers) {
+        return resp;
+    }
+    let removed: anyhow::Result<Option<Contact>> = state.registry.mutate(|reg| {
+        let found = reg
+            .bound
+            .iter()
+            .find(|c| c.contact_id == req.contact_id)
+            .cloned();
+        reg.bound.retain(|c| c.contact_id != req.contact_id);
+        let now = crate::relay::unix_secs();
+        for d in reg.channels.iter_mut() {
+            if d.remove_member(&req.contact_id) {
+                d.updated_at = now;
+            }
+        }
+        Ok(found)
+    });
+    match removed {
+        Ok(found) => {
+            let removed = found.is_some();
+            if let Some(contact) = found.as_ref() {
+                if state.remove_member_bot(&req.contact_id).is_some() {
+                    info!(contact = %req.contact_id, "member bot token dropped with the revoke");
+                }
+                emit_contact_bind_audit(&state, contact, "revoked").await;
+                state.push_activity(
+                    "revoked",
+                    &contact.display_name,
+                    &format!("{} · unbound", contact.tier.as_str()),
+                    state.audit_on_chain(),
+                );
+                info!(contact = %req.contact_id, "contact revoked (unbound) by operator");
+            }
+            (
+                StatusCode::OK,
+                Json(json!({"ok": true, "removed": removed})),
+            )
+                .into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"ok": false, "reason": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+/// `POST /v1/gateway/admin/contacts/welcome` — (re)send a bound contact's
+/// acknowledgement. Delivered NOW when the contact's own bot already holds a
+/// reply token for them (`sent:true`); otherwise the row's `welcomed` flag is
+/// cleared so the relay sends it with their next message (`sent:false`, the
+/// `detail` names why). Never a token-less or another bot's send (`deliver`
+/// refuses those). Unknown id → 404 `contact_unknown`.
+pub(crate) async fn contacts_welcome(
+    State(state): State<SharedWeixinGatewayState>,
+    headers: HeaderMap,
+    Json(req): Json<agentkeys_protocol::GatewayContactWelcomeRequest>,
+) -> impl IntoResponse {
+    if let Err(resp) = admin_gate(&state, &headers) {
+        return resp;
+    }
+    let contact = state
+        .registry
+        .snapshot()
+        .bound
+        .iter()
+        .find(|c| c.contact_id == req.contact_id)
+        .cloned();
+    let Some(contact) = contact else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({"ok": false, "reason": "contact_unknown"})),
+        )
+            .into_response();
+    };
+    let notice = bound_notice(&contact, &state.registry.snapshot());
+    let resp = match crate::outbound::deliver(&state, &contact.transport_id, &notice).await {
+        Ok(()) => {
+            state.set_welcomed(&contact.contact_id, true);
+            state.push_activity(
+                "welcomed",
+                &contact.display_name,
+                "acknowledgement re-sent to their chat",
+                false,
+            );
+            info!(contact = %contact.contact_id, "acknowledgement re-sent by the operator");
+            agentkeys_protocol::GatewayContactWelcomeResponse {
+                ok: true,
+                sent: true,
+                detail: None,
+            }
+        }
+        Err(e) => {
+            state.set_welcomed(&contact.contact_id, false);
+            state.push_activity(
+                "welcome_armed",
+                &contact.display_name,
+                "acknowledgement goes out with their next message",
+                false,
+            );
+            info!(contact = %contact.contact_id, error = %e, "acknowledgement ARMED for the contact's next message");
+            agentkeys_protocol::GatewayContactWelcomeResponse {
+                ok: true,
+                sent: false,
+                detail: Some(e.to_string()),
+            }
+        }
+    };
+    (StatusCode::OK, Json(resp)).into_response()
+}
+
+// ── registry export / import (#424 §2 — durable Config-class copy) ───────────
+
+/// `GET /v1/gateway/admin/registry/export` — the FULL contact registry
+/// snapshot (bound + invites + pending, openids included). This is the durable-
+/// backup surface the DAEMON write-throughs into the master-only Config-class
+/// doc after every contact mutation (the doc is client-encrypted under the
+/// master's signer-derived KEK, so openids-at-rest are stronger there than in
+/// this host's `0600` file). D13 governs the *contacts view*, not the master's
+/// own registry copy — this stays admin-bearer-gated like every write.
+pub(crate) async fn registry_export(
+    State(state): State<SharedWeixinGatewayState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(resp) = admin_gate(&state, &headers) {
+        return resp;
+    }
+    (StatusCode::OK, Json(state.registry.snapshot())).into_response()
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct RegistryImportRequest {
+    pub registry: agentkeys_protocol::ContactRegistry,
+    #[serde(default)]
+    pub force: bool,
+}
+
+/// `POST /v1/gateway/admin/registry/import` — replace this gateway's registry
+/// with a durable copy (the daemon's host-rebuild restore, #424 §2). Refuses a
+/// NON-empty local registry unless `force` — a live registry is never silently
+/// clobbered by a stale backup; the write-through direction heals drift instead.
+pub(crate) async fn registry_import(
+    State(state): State<SharedWeixinGatewayState>,
+    headers: HeaderMap,
+    Json(req): Json<RegistryImportRequest>,
+) -> impl IntoResponse {
+    if let Err(resp) = admin_gate(&state, &headers) {
+        return resp;
+    }
+    let mut incoming = req.registry;
+    incoming.migrate_legacy(crate::relay::unix_secs());
+    let (bound, invites, pending) = (
+        incoming.bound.len(),
+        incoming.invites.len(),
+        incoming.pending.len(),
+    );
+    match state.registry.mutate(|reg| {
+        if !req.force
+            && (!reg.bound.is_empty()
+                || !reg.invites.is_empty()
+                || !reg.pending.is_empty()
+                || !reg.apps.is_empty()
+                || !reg.channels.is_empty()
+                || reg.router.is_some())
+        {
+            anyhow::bail!("registry_not_empty");
+        }
+        *reg = incoming;
+        Ok(())
+    }) {
+        Ok(()) => {
+            info!(
+                bound,
+                invites,
+                pending,
+                forced = req.force,
+                "contact registry imported (restore)"
+            );
+            state.push_activity(
+                "registry_restore",
+                "-",
+                &format!(
+                    "bound={bound} invites={invites} pending={pending} forced={}",
+                    req.force
+                ),
+                false,
+            );
+            (
+                StatusCode::OK,
+                Json(json!({"ok": true, "bound": bound, "invites": invites, "pending": pending})),
+            )
+                .into_response()
+        }
+        Err(e) => (
+            if e.to_string() == "registry_not_empty" {
+                StatusCode::CONFLICT
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            },
+            Json(json!({"ok": false, "reason": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+// ── claim (called by the RELAY on an unknown sender echoing a code) ──────────
+
+/// Try to claim an open invite with an unknown sender's message text. Returns
+/// the ack reply on success (`None` = not a bind attempt → stay silent, §9
+/// threat 1). The code may be bare (`123456`) or prefixed (`绑定 123456`).
+pub(crate) fn try_claim_bind(
+    state: &crate::state::WeixinGatewayState,
+    transport: &str,
+    transport_id: &str,
+    text: &str,
+) -> Option<String> {
+    let token = text
+        .trim()
+        .trim_start_matches("绑定")
+        .trim_start_matches("bind")
+        .trim_start_matches("BIND")
+        .trim();
+    if token.is_empty() {
+        return None;
+    }
+    let snapshot = state.registry.snapshot();
+    let invite = snapshot
+        .invites
+        .iter()
+        .find(|i| i.bind_code.eq_ignore_ascii_case(token))?
+        .clone();
+
+    let claim = state.registry.mutate(|reg| {
+        // Latest claim wins (a mistyped scan from the wrong phone is fixed by
+        // re-sending from the right one before the master approves).
+        reg.pending.retain(|p| p.bind_code != invite.bind_code);
+        reg.pending.push(PendingBind {
+            transport: transport.to_string(),
+            transport_id: transport_id.to_string(),
+            bind_code: invite.bind_code.clone(),
+            proposal: Some(TierProposal {
+                tier: invite.tier,
+                channels: invite.channels.clone(),
+                rationale: format!("operator invite for {}", invite.display_name),
+            }),
+        });
+        Ok(())
+    });
+    match claim {
+        Ok(()) => {
+            info!(contact_id = %invite.contact_id, "bind code CLAIMED — awaiting master approve");
+            state.push_activity(
+                "claim",
+                &invite.display_name,
+                "sent the 6-digit code",
+                false,
+            );
+            Some(format!(
+                "✅ 已收到绑定码（{}）。等待管理员在家长控制台确认后即可使用。",
+                invite.display_name
+            ))
+        }
+        Err(e) => {
+            warn!(error = %e, "bind claim registry write failed");
+            None
+        }
+    }
+}
+
+// ── helpers ───────────────────────────────────────────────────────────────────
+
+fn now_nanos() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0)
+}
+
+/// A plain 6-digit one-time code the contact types into WeChat (#419). Not a
+/// lone security boundary — one-time, replaced on re-invite, and the master's
+/// approve gates the actual bind.
+fn mint_bind_code(salt: u64) -> String {
+    use sha3::{Digest, Keccak256};
+    let mut h = Keccak256::new();
+    h.update(now_nanos().to_le_bytes());
+    h.update(std::process::id().to_le_bytes());
+    h.update(salt.to_le_bytes());
+    let digest = h.finalize();
+    // A plain 6-digit number (000000..=999999) the contact simply types into
+    // WeChat (the #419 flow redesign — was an `AK-` base32 string, which was
+    // awkward to relay). Not a lone security boundary: one-time, replaced on
+    // re-invite, expiring, and the master's approve still gates the bind — so an
+    // accidental 6-digit collision from an unknown sender lands in `awaiting
+    // approve`, never auto-binds.
+    let n = u32::from_le_bytes([digest[0], digest[1], digest[2], digest[3]]) % 1_000_000;
+    format!("{n:06}")
+}
+
+async fn emit_contact_bind_audit(
+    state: &crate::state::WeixinGatewayState,
+    contact: &Contact,
+    outcome: &str,
+) {
+    let Some(audit) = state.audit.as_ref() else {
+        return;
+    };
+    let Some(op_omni) = crate::relay::decode_omni_32(&state.effective_operator_omni()) else {
+        warn!("operator omni not 32-byte hex — skipping contact-bind audit");
+        return;
+    };
+    let body = ContactBindBody {
+        transport: contact.transport.clone(),
+        contact_id: contact.contact_id.clone(),
+        outcome: outcome.to_string(),
+        tier: contact.tier.as_str().to_string(),
+        reach_count: state
+            .registry
+            .snapshot()
+            .speak_channels(&contact.contact_id)
+            .len() as u32,
+    };
+    match envelope_for(
+        op_omni,
+        op_omni,
+        AuditOpKind::ContactBind,
+        body,
+        AuditResult::Success,
+        None,
+        None,
+    ) {
+        Ok(env) => {
+            if let Err(e) = audit.append(&env).await {
+                warn!(error = %e, "contact-bind audit append failed (best-effort)");
+            }
+        }
+        Err(e) => warn!(error = %e, "contact-bind envelope build failed"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bind_codes_are_six_digits_and_vary_by_salt() {
+        let a = mint_bind_code(0);
+        let b = mint_bind_code(1);
+        for code in [&a, &b] {
+            // A plain 6-digit number the contact types into WeChat (#419).
+            assert_eq!(code.len(), 6, "{code}");
+            assert!(code.chars().all(|c| c.is_ascii_digit()), "{code}");
+        }
+        assert_ne!(a, b, "salt must vary the code");
+    }
+
+    #[test]
+    fn ct_eq_matches_only_equal_strings() {
+        assert!(ct_eq("secret", "secret"));
+        assert!(!ct_eq("secret", "secreT"));
+        assert!(!ct_eq("secret", "secre"));
+    }
+}
+
+/// What the member sees in the chat once the master approves — the other half
+/// of the claim ack: their channels and the apps bound to each; no channel at
+/// all says so instead of implying any.
+pub(crate) fn bound_notice(
+    c: &agentkeys_protocol::Contact,
+    registry: &agentkeys_protocol::ContactRegistry,
+) -> String {
+    crate::relay::bound_notice(c, registry)
+}
+
+#[cfg(test)]
+mod bound_notice_tests {
+    use super::bound_notice;
+    use agentkeys_protocol::{ChannelApp, Contact, ContactRegistry, ContactTier};
+
+    fn household(channels: &[(&str, &str, &[&str])]) -> (Contact, ContactRegistry) {
+        let c = Contact {
+            contact_id: "grandma-1".into(),
+            transport: "weixin".into(),
+            transport_id: "wxid-x".into(),
+            display_name: "奶奶".into(),
+            tier: ContactTier::Elder,
+            legacy_reach: vec![],
+            welcomed: true,
+        };
+        let mut reg = ContactRegistry::default();
+        reg.bound.push(c.clone());
+        for (id, name, apps) in channels {
+            let d = reg.channel_or_new(id);
+            d.name = name.to_string();
+            for a in *apps {
+                d.upsert_app(ChannelApp {
+                    alias: a.to_string(),
+                    ..Default::default()
+                });
+            }
+            d.set_member("grandma-1", true, true);
+        }
+        (c, reg)
+    }
+
+    #[test]
+    fn bound_notice_names_the_channels_or_their_absence() {
+        let (c, reg) = household(&[
+            ("family-chat", "家庭群", &["chef"]),
+            ("stories", "故事", &["storyteller"]),
+        ]);
+        let n = bound_notice(&c, &reg);
+        assert!(
+            n.contains("绑定成功")
+                && n.contains("奶奶（长辈）")
+                && n.contains("家庭群（chef）、故事（storyteller）")
+                && n.contains("/chef 你好"),
+            "{n}"
+        );
+        let (c, reg) = household(&[]);
+        let e = bound_notice(&c, &reg);
+        assert!(
+            e.contains("绑定成功") && e.contains("还没有") && !e.contains('/'),
+            "{e}"
+        );
+    }
+}
+
+/// The scan IS the bind (2026-09-11, per-member bots): the invite carried the
+/// master's intent (name, tier, reach), the confirmed login proves the member
+/// holds the WeChat that scanned — so the contact is bound here, its bot token
+/// custodied under its contact id, the invite consumed. The transport id is the
+/// scan's `ilink_user_id`; the first inbound on the member's bot re-learns it
+/// if the transport spells it differently (`bots::learn_transport_id`).
+/// Bind a contact by the member's OWN scan. Returns the bound contact plus the
+/// token-persist failure, if any (the bot is live regardless — the caller says so).
+async fn bind_member_by_scan(
+    state: &SharedWeixinGatewayState,
+    requested_id: &str,
+    outcome: &LoginOutcome,
+) -> anyhow::Result<(Contact, Option<String>)> {
+    let transport_id = if outcome.scanned_by.is_empty() {
+        format!("bot:{}", outcome.bot_id)
+    } else {
+        outcome.scanned_by.clone()
+    };
+    // `self-owner` is the console's name for the owner: when the owner is already
+    // bound under another id (the pre-scan code ceremony), the scan RE-binds that
+    // row — their own phone becomes their bot — instead of failing invite_unknown.
+    let contact_id: String = {
+        let reg = state.registry.snapshot();
+        let known = reg.invites.iter().any(|i| i.contact_id == requested_id)
+            || reg.bound.iter().any(|c| c.contact_id == requested_id);
+        if !known && requested_id == crate::bots::OWNER_CONTACT_ID {
+            reg.bound
+                .iter()
+                .find(|c| c.tier == agentkeys_protocol::ContactTier::Owner)
+                .map(|c| c.contact_id.clone())
+                .unwrap_or_else(|| requested_id.to_string())
+        } else {
+            requested_id.to_string()
+        }
+    };
+    let contact_id = contact_id.as_str();
+    let contact = state.registry.mutate(|reg| {
+        let invite = reg
+            .invites
+            .iter()
+            .find(|i| i.contact_id == contact_id)
+            .cloned();
+        let existing = reg
+            .bound
+            .iter()
+            .find(|c| c.contact_id == contact_id)
+            .cloned();
+        let (display_name, tier, grants) = match (&invite, &existing) {
+            (Some(i), _) => (i.display_name.clone(), i.tier, Some(i.channels.clone())),
+            // A re-bind by scan keeps the rows the member already has.
+            (None, Some(c)) => (c.display_name.clone(), c.tier, None),
+            (None, None) => anyhow::bail!("invite_unknown"),
+        };
+        let contact = Contact {
+            contact_id: contact_id.to_string(),
+            transport: "weixin".into(),
+            transport_id: transport_id.clone(),
+            display_name,
+            tier,
+            legacy_reach: Vec::new(),
+            welcomed: false,
+        };
+        reg.bound.retain(|c| {
+            c.contact_id != contact_id
+                && !(c.transport == "weixin" && c.transport_id == transport_id)
+        });
+        reg.bound.push(contact.clone());
+        reg.invites.retain(|i| i.contact_id != contact_id);
+        reg.pending.retain(|p| p.transport_id != transport_id);
+        if let Some(grants) = grants {
+            let now = crate::relay::unix_secs();
+            reg.apply_grants(contact_id, &grants);
+            for d in reg
+                .channels
+                .iter_mut()
+                .filter(|d| d.member(contact_id).is_some())
+            {
+                d.updated_at = now;
+            }
+        }
+        Ok(contact)
+    })?;
+    let persist_err = state
+        .set_member_bot(
+            contact_id,
+            crate::bots::MemberBot {
+                token: outcome.bot_token.clone(),
+                base_url: outcome.base_url.clone(),
+                bot_id: outcome.bot_id.clone(),
+                user_id: outcome.scanned_by.clone(),
+                connected_at_secs: crate::relay::unix_secs(),
+            },
+        )
+        .err()
+        .map(|e| e.to_string());
+    if let Some(e) = persist_err.as_deref() {
+        state.push_activity(
+            "bot_token_not_saved",
+            &contact.display_name,
+            &format!("her bot is live but its token was NOT saved — it drops at the next gate restart: {e}"),
+            false,
+        );
+    }
+    emit_contact_bind_audit(state, &contact, "bound").await;
+    let snapshot = state.registry.snapshot();
+    state.push_activity(
+        "bound",
+        &contact.display_name,
+        &format!(
+            "{} · {} channel(s) · by scan",
+            contact.tier.as_str(),
+            snapshot.speak_channels(&contact.contact_id).len()
+        ),
+        state.audit_on_chain(),
+    );
+    // The acknowledgement: try now — it lands only when THIS bot already holds
+    // a reply token for the member (a re-login of the same bot); a fresh bot has
+    // none, `deliver` refuses (never a token-less or another bot's token), and
+    // the relay sends it with the member's first message (`RelayOutcome::welcome`).
+    let notice = bound_notice(&contact, &snapshot);
+    match crate::outbound::deliver(state, &contact.transport_id, &notice).await {
+        Ok(()) => {
+            state.mark_welcomed(contact_id);
+            info!(contact_id, "bound notice delivered right after the scan");
+        }
+        Err(e) => {
+            info!(contact_id, error = %e, "bound notice not deliverable yet — it goes out with the member's first message");
+        }
+    }
+    Ok((contact, persist_err))
+}
+
+/// `GET /v1/gateway/admin/channels` — every channel document on this gate.
+pub(crate) async fn channels_list(
+    State(state): State<SharedWeixinGatewayState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(resp) = admin_gate(&state, &headers) {
+        return resp;
+    }
+    let reg = state.registry.snapshot();
+    (
+        StatusCode::OK,
+        Json(agentkeys_protocol::GatewayChannelsResponse {
+            ok: true,
+            channels: reg.channels,
+        }),
+    )
+        .into_response()
+}
+
+/// `POST /v1/gateway/admin/channels/update` — one write to a channel
+/// document (the console at install / rebind / uninstall, the Channels page,
+/// the plain-delegate action): create it, change its words or marks, insert
+/// or drop an app's row, set or drop a member's row, or delete it. Every
+/// write stamps `updated_at`; a write that changes nothing answers
+/// `changed:false`.
+pub(crate) async fn channels_update(
+    State(state): State<SharedWeixinGatewayState>,
+    headers: HeaderMap,
+    Json(req): Json<agentkeys_protocol::GatewayChannelUpdateRequest>,
+) -> impl IntoResponse {
+    if let Err(resp) = admin_gate(&state, &headers) {
+        return resp;
+    }
+    let id = req.channel_id.trim().to_string();
+    if id.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"ok": false, "reason": "channel_id_empty"})),
+        )
+            .into_response();
+    }
+    if req.remove {
+        let result = state.registry.mutate(|reg| Ok(reg.remove_channel(&id)));
+        return match result {
+            Ok(changed) => {
+                info!(channel = %id, changed, "channel document removed by operator");
+                (
+                    StatusCode::OK,
+                    Json(
+                        json!({"ok": true, "channel_id": id, "changed": changed, "removed": true}),
+                    ),
+                )
+                    .into_response()
+            }
+            Err(e) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"ok": false, "reason": e.to_string()})),
+            )
+                .into_response(),
+        };
+    }
+    let now = crate::relay::unix_secs();
+    let result: anyhow::Result<(bool, agentkeys_protocol::ChannelDoc)> =
+        state.registry.mutate(|reg| {
+            let mut changed = !reg.channels.iter().any(|d| d.id == id);
+            if let Some(true) = req.household_default {
+                for d in reg.channels.iter_mut().filter(|d| d.id != id) {
+                    if d.household_default {
+                        d.household_default = false;
+                        d.updated_at = now;
+                        changed = true;
+                    }
+                }
+            }
+            let doc = reg.channel_or_new(&id);
+            if let Some(name) = req.name.as_deref().map(str::trim) {
+                if !name.is_empty() && doc.name != name {
+                    doc.name = name.to_string();
+                    changed = true;
+                }
+            }
+            if let Some(purpose) = req.purpose.as_deref().map(str::trim) {
+                if doc.purpose != purpose {
+                    doc.purpose = purpose.to_string();
+                    changed = true;
+                }
+            }
+            if let Some(op) = req.operator_of.as_deref().map(str::trim) {
+                let next = (!op.is_empty()).then(|| op.to_lowercase());
+                if doc.operator_of != next {
+                    doc.operator_of = next;
+                    changed = true;
+                }
+            }
+            if let Some(hd) = req.household_default {
+                if doc.household_default != hd {
+                    doc.household_default = hd;
+                    changed = true;
+                }
+            }
+            if let Some(app) = req.app.clone() {
+                if app.alias.trim().is_empty() {
+                    anyhow::bail!("app_alias_empty");
+                }
+                changed |= doc.upsert_app(app);
+            }
+            if let Some(alias) = req.remove_app.as_deref() {
+                changed |= doc.remove_app(alias);
+            }
+            if let Some(default_app) = req.default_app.as_deref().map(str::trim) {
+                let next = (!default_app.is_empty()).then(|| default_app.to_lowercase());
+                if let Some(a) = next.as_deref() {
+                    if doc.app(a).is_none() {
+                        anyhow::bail!("default_app_not_on_channel:{a}");
+                    }
+                }
+                if doc.default_app != next {
+                    doc.default_app = next;
+                    changed = true;
+                }
+            }
+            if let Some(m) = req.member.as_ref() {
+                if m.contact_id.trim().is_empty() {
+                    anyhow::bail!("member_contact_id_empty");
+                }
+                changed |= doc.set_member(m.contact_id.trim(), m.speak, m.read);
+            }
+            if changed {
+                doc.updated_at = now;
+            }
+            Ok((changed, doc.clone()))
+        });
+    match result {
+        Ok((changed, doc)) => {
+            info!(channel = %id, changed, apps = doc.apps.len(), members = doc.members.len(), "channel document written by operator");
+            (
+                StatusCode::OK,
+                Json(json!({"ok": true, "channel_id": id, "changed": changed, "channel": doc})),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            let reason = e.to_string();
+            let code = if reason.starts_with("registry") {
+                StatusCode::INTERNAL_SERVER_ERROR
+            } else {
+                StatusCode::BAD_REQUEST
+            };
+            (code, Json(json!({"ok": false, "reason": reason}))).into_response()
+        }
+    }
+}

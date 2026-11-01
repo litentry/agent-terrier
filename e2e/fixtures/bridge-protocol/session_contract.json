@@ -1,0 +1,27 @@
+{
+  "thread_chat_session": {
+    "window": "thread",
+    "scope": "ch-family-weixin",
+    "party": "contact-grandma",
+    "idle_minutes": 30,
+    "context": "Earlier in this thread (restored from the feed):\n[them 18:02] What's for dinner?"
+  },
+  "event_chat_session": {
+    "window": "event",
+    "scope": "ch-kitchen-screen",
+    "context": "The card on the screen when this was tapped:\n{\"card\":1,\"title\":\"Dinner plan\"}"
+  },
+  "schedule_chat_session": {
+    "window": "none",
+    "scope": "schedule:morning-plan"
+  },
+  "app_reset": {
+    "scope": "app"
+  },
+  "thread_reset": {
+    "scope": "thread",
+    "channel": "ch-family-weixin",
+    "party": "contact-grandma"
+  },
+  "reset_marker_body": "{\"session_reset\":\"app\"}"
+}

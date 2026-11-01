@@ -1,0 +1,110 @@
+[package]
+license.workspace = true
+name = "agentkeys-daemon"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "agentkeys-daemon"
+path = "src/main.rs"
+
+[dependencies]
+zeroize = { workspace = true }
+agentkeys-protocol = { workspace = true }
+agentkeys-web-core = { workspace = true }
+agentkeys-types = { workspace = true }
+agentkeys-core = { workspace = true }
+agentkeys-cli = { path = "../agentkeys-cli" } # K11 webauthn helpers (companion mode)
+# W3 real-memory + #201 config: the ONE shared broker/worker client (issue #203)
+# — cap-mint (incl. the config-store/fetch endpoints) + the worker body types, so
+# the daemon's cap-mint + worker bodies can't drift from the agent path.
+agentkeys-backend-client = { workspace = true }
+# #566 — the distribution mirror: gate-authorized canonical lines → the
+# in-sandbox OpenViking engine Hermes consumes natively (memory_mirror.rs).
+agentkeys-memory-openviking = { workspace = true }
+agentkeys-catalog = { path = "../agentkeys-catalog" } # #207 shared category catalog (deterministic tier-0 for cred-categorize + auto-distribute)
+hex = "0.4"
+sha2 = "0.10" # ui-bridge master-memory content-hash dedup (§2 plant)
+sha3 = "0.10" # keccak256 for the #153 audit-decode endpoint (selectors, omni/tx hashes)
+ciborium = "0.2" # build AuditEnvelope op_body (ciborium::Value) for #153 decode
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+# B2 (#203 parity ladder, rung 3 / #215 re-land): generate the Api* wire types as
+# TypeScript so the parent-control frontend imports them instead of hand-mirroring
+# (a drift then becomes a compile error, not a silent runtime break). The
+# `#[ts(export)]` tests write apps/parent-control/lib/generated/ under
+# `cargo test`; a CI git-diff gate fails on drift.
+ts-rs = { version = "10", features = ["no-serde-warnings"] }
+anyhow = { workspace = true }
+clap = { version = "4", features = ["derive", "env"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+rand = "0.8"
+base64 = "0.22"
+reqwest = { version = "0.12", features = ["json"] }
+# Parse `Retry-After` HTTP-date form (RFC 7231) for the §10.2 pairing poll
+# backoff; tiny, zero-dep, the same parser hyper uses internally.
+httpdate = "1"
+# #669 — the R4 scheduler's local wall-clock fields for cron matching (the
+# household tz offset shifts a UTC instant); the broker's sweeper uses the same
+# crate for the same reason.
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+# Advisory file lock to serialize same-device `--request-pairing` (no unsafe;
+# flock on unix / LockFileEx on windows; released when the File is dropped).
+fs2 = "0.4"
+# v2 stage-1 localhost proxy (US-008). axum + tower + hyper power the
+# `agentkeys-daemon proxy` subcommand (arch.md §6 + §15.1). The proxy
+# binds to a unix socket (and optionally TCP 127.0.0.1:9090 when
+# AGENTKEYS_DAEMON_TCP=1) and serves cap-token mint + cache requests.
+axum = { version = "0.7", features = ["json"] }
+pdf-extract = "0.12" # curated-resource upload: the text an app reads out of a PDF
+tower = { version = "0.4", features = ["util"] }
+tower-http = { version = "0.5", features = ["cors"] }
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["server", "tokio"] }
+tower-service = "0.3"
+# v2 stage-1 K11 WebAuthn enrollment surface for the parent-control web
+# UI. webauthn-rs is the standard Rust server-side WebAuthn library; the
+# daemon's ui-bridge mode uses it to construct registration challenges +
+# verify attestations from the browser's navigator.credentials.create().
+# See src/ui_bridge.rs.
+webauthn-rs = "0.5"
+url = "2"
+# Render the §10.2 pairing deep-link as a scannable QR in the daemon log/terminal
+# (the owner scans it / reads the code to claim from the master). Pure-Rust, cross-compiles.
+qrcode = { version = "0.14", default-features = false }
+# SSE audit-feed broadcast (PR-C) — futures-util drives the axum
+# Sse stream; tokio-stream wraps the broadcast::Receiver as a Stream.
+futures-util = { version = "0.3", default-features = false }
+tokio-stream = { version = "0.1", features = ["sync"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+agentkeys-mock-server = { path = "../agentkeys-mock-server" }
+rusqlite = { version = "0.31", features = ["bundled"] }
+# axum + tower already in runtime deps above; tests inherit them.
+http-body-util = "0.1"
+tokio = { workspace = true }
+base64 = "0.22"
+libc = "0.2"
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+rand = "0.8"
+reqwest = { version = "0.12", features = ["json"] }
+serde_json = { workspace = true }
+# issue #220 — tempdir-scoped master-session persistence tests (never touch $HOME).
+tempfile = "3"
+
+# #597 — the zigbuild native cross-compile (e2e/sandbox-build-push.sh fast path)
+# links the tree's openssl-sys/native-tls for x86_64-linux via a VENDORED
+# OpenSSL build (feature unification flips the shared openssl-sys). OFF for
+# every native build — broker/daemon deployments are byte-unchanged.
+[features]
+vendored-openssl = ["dep:openssl", "openssl/vendored"]
+
+[dependencies.openssl]
+version = "0.10"
+optional = true

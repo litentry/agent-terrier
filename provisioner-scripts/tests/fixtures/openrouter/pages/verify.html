@@ -1,0 +1,16 @@
+<!DOCTYPE html>
+<html>
+<head><title>Verify Email</title></head>
+<body>
+  <form id="verify-form">
+    <input name="otp" type="text" placeholder="Enter verification code" />
+    <button type="submit">Verify</button>
+  </form>
+  <script>
+    document.getElementById('verify-form').addEventListener('submit', function(e) {
+      e.preventDefault();
+      window.location.href = '/dashboard';
+    });
+  </script>
+</body>
+</html>

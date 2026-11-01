@@ -1,0 +1,460 @@
+//! Gateway HTTP surface — the WeChat callback + the D13 history refusal.
+//!
+//! - `GET  /wechat/callback`  — the 公众号 echo verification (returns `echostr`
+//!   iff the signature checks out).
+//! - `POST /wechat/callback`  — the inbound relay: verify → resolve contact →
+//!   L3 → route → build the worker-stamped `ChannelEvent` (producer = contact) →
+//!   audit. Accepts WeChat XML (real) or JSON `{from,text}` (the mock e2e).
+//! - `GET  /v1/gateway/history` — ALWAYS 403 `contact_history_denied` (D13:
+//!   contacts have zero feed-history visibility — the refusal is explicit, not a
+//!   confusing 404).
+//! - `GET  /healthz`.
+
+use axum::{
+    extract::{Query, State},
+    http::{HeaderMap, StatusCode},
+    response::IntoResponse,
+    routing::{get, post},
+    Json, Router,
+};
+use serde::{Deserialize, Serialize};
+use serde_json::json;
+
+use crate::admin;
+use crate::relay;
+use crate::signature;
+use crate::state::SharedWeixinGatewayState;
+
+pub fn build_router(state: SharedWeixinGatewayState) -> Router {
+    Router::new()
+        .route("/healthz", get(healthz))
+        .route(
+            agentkeys_protocol::hosted_gateway::GATEWAY_CONSOLE_ROUTE,
+            post(crate::hosted_gateway::console),
+        )
+        .route(
+            "/wechat/callback",
+            get(callback_verify).post(callback_relay),
+        )
+        // #444 — the telegram MOCK driver (TEST-ONLY, allow_unsigned-gated):
+        // the e2e's PEP-assertion surface for the long-poll transport, which
+        // has no real inbound endpoint to drive.
+        .route("/telegram/mock-inbound", post(telegram_mock_inbound))
+        .route("/v1/gateway/history", get(history_denied))
+        .route("/v1/gateway/contacts", get(list_contacts))
+        // #418 — the operator admin surface (parent-control via the daemon
+        // proxy). Every route is admin-bearer-gated inside `admin`.
+        .route("/v1/gateway/admin/status", get(admin::admin_status))
+        .route("/v1/gateway/admin/login/start", post(admin::login_start))
+        .route("/v1/gateway/admin/login/status", get(admin::login_status))
+        .route("/v1/gateway/admin/login/verify", post(admin::login_verify))
+        .route(
+            "/v1/gateway/admin/login/disconnect",
+            post(admin::login_disconnect),
+        )
+        .route("/v1/gateway/admin/bind/invite", post(admin::bind_invite))
+        .route("/v1/gateway/admin/bind/pending", get(admin::bind_pending))
+        .route("/v1/gateway/admin/bind/approve", post(admin::bind_approve))
+        .route("/v1/gateway/admin/bind/reject", post(admin::bind_reject))
+        .route("/v1/gateway/admin/contacts", get(admin::admin_contacts))
+        .route("/v1/gateway/admin/monitor", get(admin::monitor))
+        .route("/v1/gateway/admin/router", get(admin::router_view))
+        // The household picks the decision model that routes (Kev / Jev) and
+        // turns compare mode on or off — stored in the registry, live.
+        .route(
+            "/v1/gateway/admin/router/settings",
+            post(admin::router_settings),
+        )
+        .route("/v1/gateway/admin/history", get(admin::history))
+        .route("/v1/gateway/admin/activity", get(admin::activity))
+        .route(
+            "/v1/gateway/admin/contacts/update",
+            post(admin::contacts_update),
+        )
+        // Household channels — the channel documents the router reads: the
+        // console writes them at install / rebind / uninstall and from the
+        // Channels page; every write is live.
+        .route("/v1/gateway/admin/channels", get(admin::channels_list))
+        .route(
+            "/v1/gateway/admin/channels/update",
+            post(admin::channels_update),
+        )
+        .route(
+            "/v1/gateway/admin/contacts/revoke",
+            post(admin::contacts_revoke),
+        )
+        .route(
+            "/v1/gateway/admin/contacts/welcome",
+            post(admin::contacts_welcome),
+        )
+        // #424 §2 — the durable-copy surface: the daemon exports the FULL
+        // registry into the master-only Config-class doc after every mutation,
+        // and imports it back onto an EMPTY (rebuilt) gateway host.
+        .route(
+            "/v1/gateway/admin/registry/export",
+            get(admin::registry_export),
+        )
+        .route(
+            "/v1/gateway/admin/registry/import",
+            post(admin::registry_import),
+        )
+        // #667 — the gateway's OWN device actor: the daemon drives the §10.2
+        // enrollment through these (pairing-request → the master's claim +
+        // ONE Touch ID → pairing-complete).
+        .route("/v1/gateway/admin/device/status", get(admin::device_status))
+        .route(
+            "/v1/gateway/admin/device/pairing-request",
+            post(admin::device_pairing_request),
+        )
+        .route(
+            "/v1/gateway/admin/device/pairing-complete",
+            post(admin::device_pairing_complete),
+        )
+        .with_state(state)
+}
+
+#[derive(Debug, Serialize)]
+pub struct HealthBody {
+    pub ok: bool,
+    pub transport: &'static str,
+    pub bound_contacts: usize,
+    pub outbound_enabled: bool,
+    /// iLink only: millis of the last successful long-poll (`null` = never /
+    /// OA) — a stale-token stall shows up here without log access.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ilink_last_ok_ms: Option<u64>,
+    /// Telegram only (#444): millis of the last successful `getUpdates` —
+    /// the same stall signal (bad token / 409 conflict) for stack ②.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub telegram_last_ok_ms: Option<u64>,
+    /// #722 — which tier routes plain text: `jev` (the model, via the gate)
+    /// or `deterministic` (whole-word alias only), + the asks awaiting a reply.
+    pub router_engine: &'static str,
+    pub pending_asks: usize,
+    /// #667 — the gateway's own device actor is enrolled (the feed hop can
+    /// mint caps as it).
+    pub device_enrolled: bool,
+    /// #667 — an allowed turn will LAND on the app's feed (device enrolled +
+    /// channel worker configured); false = decision-only.
+    pub feed_hop: bool,
+    pub version: &'static str,
+}
+
+async fn healthz(State(state): State<SharedWeixinGatewayState>) -> Json<HealthBody> {
+    Json(HealthBody {
+        ok: true,
+        transport: state.config.transport.as_str(),
+        bound_contacts: state.registry.snapshot().bound.len(),
+        outbound_enabled: state.outbound_enabled(),
+        ilink_last_ok_ms: state.ilink_last_ok_ms(),
+        telegram_last_ok_ms: state.telegram_last_ok_ms(),
+        router_engine: state.config.router.engine_label(),
+        pending_asks: state.pending_ask_count(),
+        device_enrolled: state.device.enrolled(),
+        feed_hop: state.device.hop_blocker().is_none(),
+        version: env!("CARGO_PKG_VERSION"),
+    })
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CallbackQuery {
+    #[serde(default)]
+    pub signature: String,
+    #[serde(default)]
+    pub timestamp: String,
+    #[serde(default)]
+    pub nonce: String,
+    #[serde(default)]
+    pub echostr: String,
+}
+
+/// `GET /wechat/callback` — the one-time 公众号 server-config echo verification.
+async fn callback_verify(
+    State(state): State<SharedWeixinGatewayState>,
+    Query(q): Query<CallbackQuery>,
+) -> impl IntoResponse {
+    if state.config.allow_unsigned
+        || signature::verify(
+            &state.config.weixin_token,
+            &q.signature,
+            &q.timestamp,
+            &q.nonce,
+        )
+    {
+        (StatusCode::OK, q.echostr).into_response()
+    } else {
+        (StatusCode::FORBIDDEN, "signature check failed").into_response()
+    }
+}
+
+/// D13: contacts have ZERO feed-history visibility. The refusal is an explicit
+/// 403 (not a 404) so an operator/auditor can see the invariant is enforced, not
+/// merely absent.
+async fn history_denied() -> impl IntoResponse {
+    (
+        StatusCode::FORBIDDEN,
+        Json(json!({
+            "ok": false,
+            "reason": "contact_history_denied",
+            "detail": "contacts have no feed-history visibility (D13); ask an agent, which \
+                       answers from its own memory. All history lives in parent-control only."
+        })),
+    )
+}
+
+/// `GET /v1/gateway/contacts` — the OPERATOR's parent-control read surface (#410).
+/// Admin-bearer-gated (never open — 503 when no admin token is configured, 401 on
+/// a bad bearer). Returns the D13-SAFE contact view — `(contact_id, display_name,
+/// tier, reach)` only, **no openid, no history** — the routing policy the operator
+/// manages, never the third-party PII. Per-contact audit is the operator querying
+/// the audit worker for this contact's `GatewayRelay` rows (already emitted); the
+/// gateway exposes no history endpoint (that IS the D13 invariant).
+async fn list_contacts(
+    State(state): State<SharedWeixinGatewayState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(resp) = admin::admin_gate(&state, &headers) {
+        return resp;
+    }
+    let registry = state.registry.snapshot();
+    let contacts: Vec<agentkeys_protocol::ContactSummary> =
+        registry.bound.iter().map(|c| registry.summary(c)).collect();
+    (
+        StatusCode::OK,
+        Json(json!({ "ok": true, "contacts": contacts, "channels": registry.channels })),
+    )
+        .into_response()
+}
+
+/// `POST /wechat/callback` — the inbound relay.
+async fn callback_relay(
+    State(state): State<SharedWeixinGatewayState>,
+    Query(q): Query<CallbackQuery>,
+    headers: HeaderMap,
+    body: String,
+) -> impl IntoResponse {
+    // 1. Transport authenticity (unless the test bypass is on).
+    if !state.config.allow_unsigned
+        && !signature::verify(
+            &state.config.weixin_token,
+            &q.signature,
+            &q.timestamp,
+            &q.nonce,
+        )
+    {
+        return (StatusCode::FORBIDDEN, "signature check failed").into_response();
+    }
+
+    // 2. Parse the inbound — WeChat XML (real) or JSON {from,text} (mock e2e).
+    let is_json = headers
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(|c| c.contains("application/json"))
+        .unwrap_or(false)
+        || body.trim_start().starts_with('{');
+    let (openid, text, media) = if is_json {
+        match serde_json::from_str::<serde_json::Value>(&body) {
+            Ok(v) => (
+                v.get("from")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+                v.get("text")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+                mock_media(&v),
+            ),
+            Err(_) => return (StatusCode::BAD_REQUEST, "bad json").into_response(),
+        }
+    } else {
+        (
+            extract_xml_tag(&body, "FromUserName").unwrap_or_default(),
+            extract_xml_tag(&body, "Content").unwrap_or_default(),
+            None,
+        )
+    };
+
+    // 3-5. The shared relay core (L3 → feed hop → audit) — the SAME path the
+    //      iLink loop drives (`relay::process_turn`).
+    let outcome = relay::process_turn(&state, "weixin", &openid, &text, media).await;
+
+    // 6. Reply. Real WeChat wants the plain "success" ack (the agent's reply
+    //    comes back async via the outbound send path, which needs the app-secret
+    //    — the live proof). The mock e2e reads the JSON decision.
+    if is_json {
+        // The mock driver IS the delivery surface: a welcome returned here counts
+        // as sent. (The real OA webhook can only answer "success" — it has no
+        // send path, so a real OA member is welcomed by no one yet.)
+        if outcome.welcome.is_some() {
+            state.mark_welcomed(&outcome.contact_id);
+        }
+        // The zh reply the iLink loop would send — surfaced so the mock e2e can
+        // assert the #722 ask text and the receipts.
+        let reply = outcome.claim_ack.clone().or_else(|| {
+            outcome.reply_text(
+                false,
+                outcome
+                    .decision
+                    .channel_id
+                    .as_deref()
+                    .and_then(|ch| state.app_stage_hint(ch, relay::unix_secs() * 1000)),
+            )
+        });
+        (
+            StatusCode::OK,
+            Json(json!({
+                "ok": outcome.decision.allowed,
+                "decision": outcome.decision,
+                "contact_id": outcome.contact_id,
+                "tier": outcome.tier,
+                "routed_event": outcome.event,
+                "reply": reply,
+                "ask_candidates": outcome.ask_candidates,
+                "ask_labels": outcome.ask_labels,
+                "router": outcome.router,
+                "welcome": outcome.welcome,
+                "feed": outcome.feed,
+                "feed_error": outcome.feed_error,
+            })),
+        )
+            .into_response()
+    } else {
+        (StatusCode::OK, "success").into_response()
+    }
+}
+
+/// `POST /telegram/mock-inbound` (#444) — the mock e2e's PEP-assertion surface
+/// for the telegram transport. The REAL inbound is a long poll (nothing to
+/// POST at), so the regression gate drives the SAME relay core through this
+/// route instead: JSON `{from,text}` → `process_inbound_for("telegram")` →
+/// the decision + the EN reply the loop would have sent (`reply: null` proves
+/// the unknown-sender SILENT drop). TEST-ONLY: 403 unless the gateway runs
+/// with `AGENTKEYS_WEIXIN_ALLOW_UNSIGNED=1` (the same flag that unsigns the
+/// weixin mock callback — one test-posture switch, not two).
+async fn telegram_mock_inbound(
+    State(state): State<SharedWeixinGatewayState>,
+    body: String,
+) -> impl IntoResponse {
+    if !state.config.allow_unsigned {
+        return (
+            StatusCode::FORBIDDEN,
+            "mock driver disabled (prod posture — set AGENTKEYS_WEIXIN_ALLOW_UNSIGNED=1 on a \
+             TEST contact gate only)",
+        )
+            .into_response();
+    }
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) else {
+        return (StatusCode::BAD_REQUEST, "bad json").into_response();
+    };
+    let from = v
+        .get("from")
+        .and_then(|x| x.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let text = v
+        .get("text")
+        .and_then(|x| x.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let media = mock_media(&v);
+    let outcome = relay::process_turn(&state, "telegram", &from, &text, media).await;
+    let reply = outcome.claim_ack.clone().or_else(|| {
+        outcome.reply_text(
+            true,
+            outcome
+                .decision
+                .channel_id
+                .as_deref()
+                .and_then(|ch| state.app_stage_hint(ch, relay::unix_secs() * 1000)),
+        )
+    });
+    // The mock driver IS the delivery surface: a welcome returned here counts as sent.
+    if outcome.welcome.is_some() {
+        state.mark_welcomed(&outcome.contact_id);
+    }
+    (
+        StatusCode::OK,
+        Json(json!({
+            "ok": outcome.decision.allowed,
+            "decision": outcome.decision,
+            "contact_id": outcome.contact_id,
+            "tier": outcome.tier,
+            "routed_event": outcome.event,
+            "reply": reply,
+            "ask_candidates": outcome.ask_candidates,
+            "router": outcome.router,
+            "welcome": outcome.welcome,
+            "feed": outcome.feed,
+            "feed_error": outcome.feed_error,
+        })),
+    )
+        .into_response()
+}
+
+/// #667 — the mock drivers' media leg: `image_b64` (+ optional `content_type`,
+/// default `image/jpeg`) or `audio_b64` (+ `content_type`, default `audio/ogg`)
+/// becomes the turn's media original, exactly like a real photo / voice clip.
+fn mock_media(v: &serde_json::Value) -> Option<relay::InboundMedia> {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    let ct = v
+        .get("content_type")
+        .and_then(|x| x.as_str())
+        .map(str::to_string);
+    if let Some(b64) = v.get("image_b64").and_then(|x| x.as_str()) {
+        let bytes = STANDARD.decode(b64).ok()?;
+        return Some(relay::InboundMedia {
+            kind: agentkeys_protocol::ChannelEventKind::Image,
+            content_type: ct.unwrap_or_else(|| "image/jpeg".to_string()),
+            bytes,
+        });
+    }
+    if let Some(b64) = v.get("audio_b64").and_then(|x| x.as_str()) {
+        let bytes = STANDARD.decode(b64).ok()?;
+        return Some(relay::InboundMedia {
+            kind: agentkeys_protocol::ChannelEventKind::AudioClip,
+            content_type: ct.unwrap_or_else(|| "audio/ogg".to_string()),
+            bytes,
+        });
+    }
+    None
+}
+
+// ── helpers ──────────────────────────────────────────────────────────────────
+
+/// Extract `<Tag><![CDATA[value]]></Tag>` or `<Tag>value</Tag>` from a WeChat XML
+/// message. Minimal (text messages only) — no XML dependency.
+fn extract_xml_tag(xml: &str, tag: &str) -> Option<String> {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let start = xml.find(&open)? + open.len();
+    let end = xml[start..].find(&close)? + start;
+    let inner = xml[start..end].trim();
+    let inner = inner
+        .strip_prefix("<![CDATA[")
+        .and_then(|s| s.strip_suffix("]]>"))
+        .unwrap_or(inner);
+    Some(inner.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extract_xml_tag_handles_cdata_and_plain() {
+        let xml = "<xml><FromUserName><![CDATA[openid-abc]]></FromUserName>\
+                   <Content><![CDATA[/chef 晚饭]]></Content></xml>";
+        assert_eq!(
+            extract_xml_tag(xml, "FromUserName").as_deref(),
+            Some("openid-abc")
+        );
+        assert_eq!(
+            extract_xml_tag(xml, "Content").as_deref(),
+            Some("/chef 晚饭")
+        );
+        let plain = "<xml><Content>hello</Content></xml>";
+        assert_eq!(extract_xml_tag(plain, "Content").as_deref(), Some("hello"));
+        assert!(extract_xml_tag(xml, "Missing").is_none());
+    }
+}

@@ -1,0 +1,9 @@
+{
+  "lib/forge-std": {
+    "tag": {
+      "name": "v1.16.1",
+      "rev": "620536fa5277db4e3fd46772d5cbc1ea0696fb43"
+    },
+    "archive_sha256": "7a2e8c45f91845b045018901e5ba11532fe0395d1758338c37b7ed972df7bd2e"
+  }
+}

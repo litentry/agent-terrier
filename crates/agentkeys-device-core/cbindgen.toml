@@ -1,0 +1,30 @@
+# cbindgen config for the device FFI header (issue #367 anti-drift).
+# The header is GENERATED from the Rust `extern "C"` signatures so the firmware's
+# C declarations cannot drift from the crate. Regenerate + check with:
+#   bash crates/agentkeys-device-core/gen-header.sh
+language = "C"
+include_guard = "AGENTKEYS_DEVICE_H"
+tab_width = 4
+style = "type"
+cpp_compat = true
+documentation = true
+documentation_style = "c99"
+
+header = """
+/* GENERATED from crates/agentkeys-device-core by cbindgen (issue #367) — DO NOT EDIT.
+ * Regenerate with crates/agentkeys-device-core/gen-header.sh.
+ * The secp256k1 / EIP-191 / keccak behind these calls is the SAME Rust the daemon
+ * and broker use, compiled for the device — there is no second implementation. */
+"""
+
+[parse]
+parse_deps = false
+
+[export]
+# Force-emit the result enum (no signature references it by name otherwise) and
+# drop the C-runtime imports rt.rs pulls in (allocator/panic backing, not API).
+include = ["Ak"]
+exclude = ["aligned_alloc", "free", "abort"]
+
+[enum]
+rename_variants = "QualifiedScreamingSnakeCase"

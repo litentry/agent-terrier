@@ -1,0 +1,1217 @@
+'use client';
+
+import { useEffect, useRef, useState } from 'react';
+import { txHash } from '@/lib/demoData';
+import { useClient } from '@/lib/ClientProvider';
+import { CoreBackend } from '@/lib/client/core';
+import { HostedBrowserEnrollment } from './HostedBrowserEnrollment';
+import type { AgentKeysClient, ConfigPreset, ReloginInfo } from '@/lib/client/types';
+import { credentialToFinishPayload, getAssertionOverHash, jsonToCreationOptions, webauthnAvailable } from '@/lib/webauthn';
+import type { AcceptAssertion } from '@/lib/webauthn';
+import { akLog } from '@/lib/debug';
+import type { CeremonyStep } from './types';
+import { getMaskEmail, maskEmail, setMaskEmail } from '@/lib/maskEmail';
+import {
+  ensureActiveStack,
+  getMasterCredId,
+  getMasterOmni,
+  setMasterCredId,
+  setMasterOmni,
+} from '@/lib/identityStore';
+
+const omniEq = (a: string, b: string) =>
+  a.trim().replace(/^0x/, '').toLowerCase() === b.trim().replace(/^0x/, '').toLowerCase();
+
+/** The on-chain register still owed after the Stage-2 K11 bind (#225 E7 /
+ *  #232): the "Register master" ceremony step signs `userOpHash` with the SAME
+ *  passkey (2nd Touch ID) and submits it — so the prompt fires at the step the
+ *  progress bar actually shows, not during "Bind passkey". */
+interface PendingMasterRegister {
+  userOpHash: string;
+  account?: string;
+  credentialId: string;
+}
+
+type EnrollOutcome =
+  | { mode: 'fallback' }
+  // Bound on chain, but this browser holds no usable passkey for that omni.
+  // DISTINCT from 'fallback': the backend is healthy and there is nothing to
+  // retry — only an operator-driven reset unblocks it. It had to become its own
+  // variant because the caller mapped every non-'real' outcome to 'demo', so the
+  // one state that REQUIRES an action rendered as "demo · no daemon" (a lie —
+  // the daemon was up), narrated a fake ceremony, and never asked for Touch ID.
+  | { mode: 'needs-reset'; omni?: string; reason: string }
+  | { mode: 'broker-not-ready'; reason: string }
+  // #501: the CHAIN could not be read (the #435 probe answered `error`). The
+  // daemon is healthy — only the chain is unreachable — so this must never
+  // render as "demo · no daemon" (a lie that narrated a fake-green ceremony to
+  // `setup` with no passkey and no master). Its own mode, its own panel, its
+  // own Retry: `fallback` conflated three unrelated things (no-WebAuthn and
+  // daemon-disconnected are BENIGN demos; a chain-probe error is a real
+  // failure that must stop).
+  | { mode: 'chain-unavailable'; reason: string }
+  | { mode: 'real'; register?: PendingMasterRegister; registerError?: string };
+
+async function tryRealEnroll(client: AgentKeysClient, email: string): Promise<EnrollOutcome> {
+  if (!webauthnAvailable()) return { mode: 'fallback' };
+
+  // #225 E7 idempotency: if the master is ALREADY bound on chain, do NOT mint a new
+  // passkey. `navigator.credentials.create()` always makes a BRAND-NEW credential,
+  // but `registerFirstMasterDevice` is first-master-only — so a re-onboard can't
+  // re-bind, and the new passkey + an overwritten `ak_master_cred_id` pointer make
+  // the accept sign with the WRONG key (the on-chain account stays on the original
+  // passkey → SIG_VALIDATION_FAILED). Reuse the already-bound passkey instead.
+  const existingCred = getMasterCredId();
+  const st = await client.getOnboardingState();
+  // #435 — the FRESH on-chain probe (operatorMasterWallet), not just the
+  // daemon's session-cached `chain` field: a bound omni on a FRESH daemon or
+  // browser must be detected BEFORE credentials.create mints a stranded key.
+  const probe = await client.getRegisterState();
+  if (probe.ok && probe.data.probe === 'error') {
+    // Fail-safe: we cannot verify bound-ness, so we must NOT mint blind. But
+    // this is NOT a demo — the daemon answered, the CHAIN did not (#501). Stop
+    // loudly with the chain's own reason instead of narrating green.
+    akLog('onboarding: chain probe FAILED — refusing to mint a passkey blind (fail-safe)', {
+      error: probe.data.probe_error,
+    });
+    return {
+      mode: 'chain-unavailable',
+      reason: probe.data.probe_error ?? 'the chain could not be read (RPC unreachable)',
+    };
+  }
+  const boundOnChain = probe.ok
+    ? probe.data.bound === true
+    : st.ok && st.data.chain === 'master-registered';
+  if (boundOnChain) {
+    // #242: the pointer must belong to THIS session's identity. A stored omni
+    // from a different identity means the pointer's passkey is NOT the one bound
+    // for this omni — reusing it would sign with the wrong key. (No stored omni
+    // = a pre-#242 pointer; the daemon's omni-keyed `chain` already vouches that
+    // the binding is this session's, so accept + backfill.)
+    // #435: the session omni may come from either source — the probe carries it
+    // even when the onboarding-state read failed.
+    const sessionOmni =
+      (st.ok ? st.data.omni : undefined) ?? (probe.ok ? probe.data.operator_omni : undefined);
+    const pointerOmni = getMasterOmni();
+    const pointerMatches = !pointerOmni || !sessionOmni || omniEq(pointerOmni, sessionOmni);
+    if (existingCred && pointerMatches) {
+      if (!pointerOmni && sessionOmni) {
+        setMasterOmni(sessionOmni);
+      }
+      akLog('onboarding: master already bound — REUSING passkey (no new create)', {
+        boundCredentialId: existingCred,
+        omni: sessionOmni,
+      });
+      return { mode: 'real' }; // already onboarded; the bound-passkey pointer is intact
+    }
+    // Bound on chain but no USABLE pointer (storage cleared / different browser /
+    // another identity's key): we can't safely re-enroll (first-master-only can't
+    // re-bind), so surface "reset master + re-onboard" rather than minting an
+    // unusable passkey. Returned as its OWN mode: as plain 'fallback' the caller
+    // collapsed it into 'demo' and narrated a fake ceremony instead.
+    if (existingCred && !pointerMatches) {
+      akLog('onboarding: passkey pointer belongs to a DIFFERENT identity — not reusing', {
+        pointerOmni,
+        sessionOmni,
+      });
+      return {
+        mode: 'needs-reset',
+        omni: sessionOmni,
+        reason:
+          `this browser holds a passkey pointer for a DIFFERENT identity (${pointerOmni ?? 'unknown'}), ` +
+          `so it cannot sign for this one`,
+      };
+    }
+    akLog('onboarding: master bound on chain but NO local passkey pointer — offer passkey sign-in (reset only as last resort)', {
+      omni: sessionOmni,
+    });
+    return {
+      mode: 'needs-reset',
+      omni: sessionOmni,
+      reason:
+        'this email already has a master bound on chain, but this browser profile holds no ' +
+        'passkey pointer for it (fresh profile, cleared storage, or a different stack of the same chain)',
+    };
+  }
+
+  const preflight = await client.registerPreflight();
+  if (preflight.ok && preflight.data.register_ready === false) {
+    akLog('onboarding: broker register path DOWN — not minting a passkey (would orphan)', {
+      detail: preflight.data.detail,
+    });
+    return {
+      mode: 'broker-not-ready',
+      reason:
+        preflight.data.detail ??
+        'the broker cannot register a master right now (its sponsored-register runtime is unavailable)',
+    };
+  }
+
+  const begin = await client.enrollK11Begin({ userName: email, userDisplayName: email });
+  if (!begin.ok) return { mode: 'fallback' }; // EmptyBackend → disconnected → narrated fallback
+  try {
+    // The macOS/Safari passkey dialog quotes user.name ("A passkey for '…'") and
+    // the saved Passwords.app entry uses these fields. When the privacy toggle is
+    // on, replace them with a generic label — display-only: WebAuthn registration
+    // never returns user.name to the daemon (it's absent from clientDataJSON + the
+    // attestation), so the real email sent at enroll/begin stays the identity
+    // anchor and the daemon's finish verification is unaffected. user.id (the
+    // stable handle) is left untouched.
+    const masked = getMaskEmail();
+    const label = (raw: string) => (masked ? 'AgentKeys master device' : raw);
+    const opts = jsonToCreationOptions({
+      rp: { id: begin.data.rpId, name: begin.data.rpName },
+      user: { id: begin.data.userId, name: label(begin.data.userName), displayName: label(begin.data.userDisplayName) },
+      challenge: begin.data.challenge,
+      pubKeyCredParams: begin.data.pubKeyCredParams,
+      timeout: begin.data.timeout,
+      authenticatorSelection: { userVerification: 'required', residentKey: 'preferred' },
+    });
+    const cred = (await navigator.credentials.create({ publicKey: opts })) as PublicKeyCredential | null;
+    if (!cred) return { mode: 'fallback' };
+    const payload = credentialToFinishPayload(cred);
+    akLog('onboarding: K11 passkey CREATED (generated)', {
+      generatedCredentialId: payload.credentialId,
+      rpId: begin.data.rpId,
+    });
+    const fin = await client.enrollK11Finish({
+      credentialId: payload.credentialId,
+      attestationObject: payload.attestationObject,
+      clientDataJSON: payload.clientDataJSON,
+      bindingNonce: begin.data.userId,
+    });
+    if (fin.ok) {
+      akLog('onboarding: master account assembled (to bind)', {
+        account: fin.data.registerAccount,
+        chain: fin.data.chain,
+        registerUserOpHash: fin.data.registerUserOpHash,
+        passkeyCredentialId: payload.credentialId,
+      });
+      // #225 E7: the master binds as a passkey **P256Account** (operatorMasterWallet
+      // = the smart account), not an EOA. K11-finish built + funded the account and
+      // returned the register userOpHash; a SECOND Touch ID signs it, then the
+      // daemon lands handleOps. The signing itself is the SEPARATE "Register
+      // master" ceremony step (#232) — handed off so the 2nd Touch ID fires when
+      // the progress bar says "register", not while it still shows "bind".
+      if (fin.data.chain === 'register-pending' && fin.data.registerUserOpHash) {
+        return {
+          mode: 'real',
+          register: {
+            userOpHash: fin.data.registerUserOpHash,
+            account: fin.data.registerAccount,
+            credentialId: payload.credentialId,
+          },
+        };
+      }
+      // If fin.data.chain === 'master-registered' here, the daemon found the master
+      // ALREADY bound (register build skipped) — we just minted a passkey we CANNOT
+      // bind, so we deliberately do NOT overwrite ak_master_cred_id with it.
+      //
+      // #278 D6: chain === 'none' WITH a chainError means the register actually FAILED
+      // (broker /v1/register/build error / paymaster), as opposed to a clean dev skip
+      // (chain 'none', no error). Surface it at the register step instead of proceeding
+      // silently — otherwise the master is never bound and it only shows up later as a
+      // confusing `device_not_active`.
+      if (fin.data.chain === 'none' && fin.data.chainError) {
+        akLog('onboarding: master register FAILED — NOT bound on chain', {
+          chainError: fin.data.chainError,
+        });
+        return { mode: 'real', registerError: fin.data.chainError };
+      }
+      return { mode: 'real' };
+    }
+    return { mode: 'fallback' };
+  } catch {
+    return { mode: 'fallback' };
+  }
+}
+
+// #232: how often the register step re-checks `GET /v1/onboarding/state`, and
+// the hard ceiling before the step gives up (handleOps lands in 10–30 s; the
+// cap only bounds a daemon that stops answering entirely).
+const REGISTER_POLL_INTERVAL_MS = 3000;
+const REGISTER_CONFIRM_TIMEOUT_MS = 120_000;
+
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+// #232: the "Register master P256Account" ceremony step — sign the register
+// userOpHash (2nd Touch ID) and land it on chain. A slow handleOps
+// (10–30 s) can outrun the browser's `await` (the HTTP response gets lost while
+// the tx still lands), so the in-flight submit RACES an onboarding-state poll:
+// whichever first proves `chain == "master-registered"` advances the ceremony.
+// The chain state — not the HTTP response — is the ground truth.
+async function submitMasterRegister(client: AgentKeysClient, reg: PendingMasterRegister): Promise<void> {
+  akLog('onboarding: signing REGISTER userOpHash (2nd Touch ID)', {
+    account: reg.account,
+    registerUserOpHash: reg.userOpHash,
+    signingCredentialId: reg.credentialId,
+  });
+
+  let assertion: AcceptAssertion;
+  try {
+    assertion = await getAssertionOverHash(reg.userOpHash, [reg.credentialId]);
+  } catch (e) {
+    // Touch ID cancelled/failed: nothing was signed, so nothing can land. The
+    // passkey is enrolled + the account deployed, but the master is NOT bound —
+    // do NOT persist the pointer. #501: THROW rather than return — a bare
+    // return let the runner advance to "setup" as if onboarded, with no master.
+    akLog('onboarding: register Touch ID threw — pointer NOT persisted', {
+      error: (e as Error)?.message,
+      account: reg.account,
+    });
+    throw new Error(
+      `the register was not signed (${(e as Error)?.message ?? 'Touch ID cancelled'}) — your master is NOT registered on chain`,
+    );
+  }
+
+  let settled = false;
+  const submit = (async () => {
+    try {
+      const sub = await client.registerMasterSubmit(assertion);
+      return sub.ok
+        ? {
+            via: 'submit' as const,
+            ok: true as const,
+            txHash: sub.data.txHash,
+            // #278 D6: "register-pending" is broadcast-but-unconfirmed — NOT a
+            // bound master. Carry it through so the handler keeps polling chain.
+            pending: sub.data.pending === true || sub.data.chain === 'register-pending',
+          }
+        : { via: 'submit' as const, ok: false as const, detail: sub.status.detail ?? 'submit failed' };
+    } catch (e) {
+      return { via: 'submit' as const, ok: false as const, detail: (e as Error)?.message ?? 'submit threw' };
+    }
+  })();
+  const statePoll = (async () => {
+    for (;;) {
+      await sleep(REGISTER_POLL_INTERVAL_MS);
+      if (settled) return { via: 'poll-stopped' as const };
+      const st = await client.getOnboardingState();
+      if (st.ok && st.data.chain === 'master-registered') return { via: 'state-poll' as const };
+    }
+  })();
+  const timeout = sleep(REGISTER_CONFIRM_TIMEOUT_MS).then(() => ({ via: 'timeout' as const }));
+
+  const first = await Promise.race([submit, statePoll, timeout]);
+
+  let registered = false;
+  let txHash: string | undefined;
+  let failDetail = '';
+  if (first.via === 'submit') {
+    if (first.ok) {
+      // Nest the ok-check so TS narrows `first` to the ok:false variant in the
+      // `else` (a compound `first.ok && first.pending` defeats that narrowing
+      // and widens first.detail to string | undefined — the CI tsc failure).
+      if (!first.pending) {
+        // Confirmed bound on chain (the daemon persisted registered_master).
+        registered = true;
+        txHash = first.txHash;
+      } else {
+        // #278 D6: the register was broadcast but its receipt is UNCONFIRMED —
+        // the daemon deliberately did NOT mark the master bound (a stored-but-
+        // unbound pointer is the wrong-passkey / empty-actor trap). The HTTP 200
+        // is NOT success here: keep racing the still-running chain poll against
+        // the confirm timeout; ground truth is chain == "master-registered".
+        akLog('onboarding: register broadcast but PENDING — polling chain for confirmation', {
+          account: reg.account,
+        });
+        const next = await Promise.race([statePoll, timeout]);
+        registered = next.via === 'state-poll';
+        if (!registered) {
+          failDetail = `register broadcast but unconfirmed within ${REGISTER_CONFIRM_TIMEOUT_MS / 1000} s`;
+        }
+      }
+    } else {
+      // The HTTP submit failed — but handleOps may still have landed (the
+      // response can be dropped after the tx went out). The chain state decides.
+      const st = await client.getOnboardingState();
+      registered = !!(st.ok && st.data.chain === 'master-registered');
+      failDetail = first.detail;
+    }
+  } else if (first.via === 'state-poll') {
+    registered = true; // the await lost the race but the register landed
+  } else {
+    // 'timeout' — or the defensive 'poll-stopped' arm that can't win the race.
+    failDetail = `no register confirmation within ${REGISTER_CONFIRM_TIMEOUT_MS / 1000} s`;
+  }
+  settled = true;
+
+  // Persist the auto-select pointer ONLY when the register actually BOUND the
+  // account (B2). A stored-but-unbound pointer is exactly the wrong-passkey
+  // trap: the accept would auto-select this key while the chain master is a
+  // different one → SIG_VALIDATION_FAILED.
+  if (registered) {
+    setMasterCredId(reg.credentialId);
+    // #242: key the pointer to the identity it was bound for (the live session
+    // omni), so a later different-email session can never auto-select this key.
+    const st = await client.getOnboardingState();
+    if (st.ok && st.data.omni) {
+      setMasterOmni(st.data.omni);
+    }
+    akLog('onboarding: master REGISTERED + signer persisted ✅', {
+      account: reg.account,
+      txHash,
+      confirmedVia: first.via,
+      boundCredentialId: reg.credentialId,
+    });
+  } else {
+    akLog('onboarding: register submit FAILED — pointer NOT persisted', {
+      detail: failDetail,
+      account: reg.account,
+    });
+    // #501: THROW. Returning normally here was the last silent path — the
+    // pointer was correctly withheld, but the ceremony sailed on to "setup"
+    // and the operator believed they had a master. The passkey minted in the
+    // previous step is now UNUSED (bound to nothing): say so, because the app
+    // cannot delete it (WebAuthn forbids a site deleting its own credential).
+    throw new Error(`the register did not land on chain — ${failDetail || 'no confirmation'}`);
+  }
+}
+
+// Shared progress-bar ceremony with a live step log + per-step tx hashes.
+export function CeremonyRunner({
+  steps,
+  onDone,
+  accent = '#1a1815',
+  stepMs = 750,
+}: {
+  steps: CeremonyStep[];
+  onDone: () => void;
+  accent?: string;
+  stepMs?: number;
+}) {
+  const [done, setDone] = useState(0);
+  // #501: the TERMINAL failure state. Without it the runner had only `done`, so
+  // a throwing step was logged to the console and the bar advanced anyway —
+  // straight through onDone() to "Set up your categories" with NO master bound
+  // (the silent wrong onboarding: every later call 403s device_not_active and
+  // the natural next move is the destructive reset). Every `throw` in a step
+  // action was decorative until this existed.
+  const [failed, setFailed] = useState<{ index: number; error: string } | null>(null);
+  const [txs, setTxs] = useState<Record<number, string>>({});
+
+  useEffect(() => {
+    // Terminal: never advance, never onDone. onDone is precisely what fakes the
+    // "you're onboarded" landing, so a failed ceremony must never reach it.
+    if (failed) return;
+    if (done >= steps.length) {
+      const t = setTimeout(onDone, 700);
+      return () => clearTimeout(t);
+    }
+    let cancelled = false;
+    const t = setTimeout(async () => {
+      const step = steps[done];
+      // Real async work for this step (e.g. the §9 Stage-2 WebAuthn Touch ID)
+      // runs WHILE the row shows "running"; the bar advances when it resolves.
+      if (step.action) {
+        try {
+          await step.action();
+        } catch (e) {
+          if (cancelled) return;
+          const error = (e as Error)?.message || 'step failed';
+          akLog(`onboarding: step "${step.label}" FAILED — ceremony STOPPED (not advancing)`, { error });
+          setFailed({ index: done, error });
+          return; // ← the whole point: no setDone, no onDone.
+        }
+      }
+      if (cancelled) return;
+      if (step.onchain) {
+        setTxs((prev) => ({ ...prev, [done]: txHash(step.label + done) }));
+      }
+      setDone((d) => d + 1);
+    }, stepMs);
+    return () => { cancelled = true; clearTimeout(t); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [done, failed]);
+
+  const pct = Math.round((done / steps.length) * 100);
+
+  return (
+    <div className="ceremony">
+      <div className="ceremony-bar-wrap">
+        <div className="ceremony-bar-track">
+          <div className="ceremony-bar-fill" style={{ width: `${pct}%`, background: failed ? '#b00' : accent }} />
+        </div>
+        <div className="ceremony-bar-meta">
+          <span style={failed ? { color: '#b00', fontWeight: 600 } : undefined}>
+            {failed ? 'stopped — nothing further was attempted' : done >= steps.length ? 'complete' : 'working…'}
+          </span>
+          <span className="mono">
+            {Math.min(done, steps.length)}/{steps.length} · {pct}%
+          </span>
+        </div>
+      </div>
+
+      <div className="ceremony-log">
+        {steps.map((s, i) => {
+          const isFailed = failed?.index === i;
+          const status = i < done ? 'done' : isFailed ? 'failed' : i === done ? 'running' : 'pending';
+          return (
+            <div key={i} className={`clog-row ${status}`}>
+              <span className="clog-mark" style={isFailed ? { color: '#b00' } : undefined}>
+                {status === 'done' ? '✓' : status === 'failed' ? '✗' : status === 'running' ? '▸' : '·'}
+              </span>
+              <div className="clog-body">
+                <div className="clog-label" style={isFailed ? { color: '#b00' } : undefined}>
+                  {s.label}
+                  {s.touchId && <span className="clog-touch">Touch ID · {s.touchId}</span>}
+                  {s.onchain && <span className="clog-chain">on-chain</span>}
+                </div>
+                <div className="clog-sub">{s.sub}</div>
+                {isFailed && (
+                  <div style={{ fontSize: 12, color: '#b00', marginTop: 4, lineHeight: 1.5 }}>
+                    <strong>Failed — onboarding stopped here.</strong>{' '}
+                    <span className="mono" style={{ fontSize: 11 }}>{failed.error}</span>
+                  </div>
+                )}
+                {txs[i] && <div className="clog-tx mono">tx {txs[i].slice(0, 22)}… · on-chain · confirmed</div>}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// Full-screen WebAuthn login → onboarding ceremony (workflow 1).
+export function OnboardingScreen({
+  onComplete,
+}: {
+  // `summary` lets the host (App) show the right post-onboarding toast: how many
+  // categories were authored, whether the taxonomy already existed (idempotent
+  // re-onboard), and whether it was a dev-only (no config worker) write.
+  onComplete: (summary?: { categories?: number; already?: boolean; dev?: boolean }) => void;
+}) {
+  const client = useClient();
+  const hosted = client instanceof CoreBackend;
+  // email → verify → ceremony (passkey) → setup (#207 1A: author the taxonomy)
+  // → onComplete. `setup` is the last onboarding step before connecting agents.
+  const [phase, setPhase] = useState<'email' | 'verify' | 'ceremony' | 'setup' | 'browser'>('email');
+  // 'blocked' = the enroll cannot proceed and retrying will not help (a master is
+  // bound on chain that this browser has no passkey for). Distinct from 'demo',
+  // which means "no backend, narrate it" — conflating them told the operator
+  // "no daemon" while the daemon was healthy.
+  const [enrollMode, setEnrollMode] = useState<
+    'real' | 'demo' | 'pending' | 'blocked' | 'broker-not-ready' | 'chain-unavailable' | 'register-failed'
+  >('pending');
+  // Bumped to re-mount CeremonyRunner from step 0 on a broker-not-ready retry
+  // (re-runs the preflight; mints a passkey only once the broker is ready).
+  const [ceremonyRunKey, setCeremonyRunKey] = useState(0);
+  const [blockedReason, setBlockedReason] = useState('');
+  const [email, setEmail] = useState('');
+  const [requestId, setRequestId] = useState('');
+  const [omni, setOmni] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState('');
+  const [maskEm, setMaskEm] = useState(true);
+  // #232: the on-chain register handed from the K11-bind step to the "Register
+  // master" step (a ref — the `stages` closures are rebuilt per render).
+  const pendingRegister = useRef<PendingMasterRegister | null>(null);
+  // #278 D6: set when the register BUILD failed at the daemon/broker, so the register
+  // step can surface it (throw) instead of silently no-op'ing.
+  const registerError = useRef<string | null>(null);
+  // #242: the one-Touch-ID re-login offer. Shown on the login screen when the
+  // daemon still knows who the master is (logout-surviving coords) AND this
+  // browser holds the matching passkey pointer.
+  const [relogin, setRelogin] = useState<ReloginInfo | null>(null);
+  const [reloginBusy, setReloginBusy] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      await ensureActiveStack(async () => {
+        const info = await client.getChainInfo();
+        return info.ok
+          ? {
+              chain: info.data.daemonChain ?? info.data.name,
+              brokerUrl: info.data.daemonBroker ?? null,
+            }
+          : { chain: null, brokerUrl: null };
+      });
+      const st = await client.getOnboardingState();
+      if (cancelled || !st.ok || !st.data.relogin) return;
+      if (client instanceof CoreBackend) { setRelogin(st.data.relogin); return; }
+      const cred = getMasterCredId();
+      if (!cred) return; // no local passkey pointer — nothing to auto-select
+      const pointerOmni = getMasterOmni();
+      if (pointerOmni && !omniEq(pointerOmni, st.data.relogin.omni)) return; // another identity's key
+      setRelogin(st.data.relogin);
+    })();
+    return () => { cancelled = true; };
+  }, [client]);
+
+  // #242: ONE Touch ID restores the session — reloginStart mints a chain-bound
+  // broker challenge, the BOUND passkey signs it, reloginFinish verifies on
+  // chain + restores the daemon session, and we route straight into the app.
+  const doRelogin = async () => {
+    if (reloginBusy) return;
+    setReloginBusy(true);
+    setNote('');
+    if (client instanceof CoreBackend) {
+      try {
+        const identity = await client.signInWithPasskey(relogin?.omni);
+        setMasterCredId(identity.credentialId);
+        setMasterOmni(identity.omni);
+        onComplete();
+      } catch (error) { setNote(String(error)); }
+      finally { setReloginBusy(false); }
+      return;
+    }
+    const start = await client.reloginStart();
+    if (!start.ok) {
+      setReloginBusy(false);
+      setNote(`Couldn't start the passkey sign-in — ${start.status.detail ?? 'daemon unreachable'}. Use email below.`);
+      return;
+    }
+    try {
+      // Pointer present ⇒ pin it (auto-select, no picker). Pointer ABSENT — the
+      // bound-on-chain-but-fresh-browser/-stack case that used to dead-end in
+      // "reset + re-onboard" — falls through to the DISCOVERABLE picker so the
+      // operator signs with the existing passkey instead of destroying the
+      // binding (reset unbinds on chain for EVERY stack sharing the chain).
+      const pointer = getMasterCredId() || null;
+      akLog('relogin: signing broker challenge with the bound passkey', {
+        account: start.data.account,
+        omni: start.data.omni,
+        requestedCredentialId: pointer ?? '(none — discoverable picker)',
+      });
+      let assertion = await getAssertionOverHash(start.data.challenge, pointer ? [pointer] : undefined);
+      let fin = await client.reloginFinish(start.data.challenge, assertion);
+      if (!fin.ok && pointer && assertion.credential_id === pointer) {
+        // The stored pointer no longer matches the on-chain binding (stale after
+        // a re-onboard elsewhere). ONE retry with the full picker — the chain-
+        // verified finish below then heals the pointer.
+        akLog('relogin: pinned pointer rejected — retrying with the discoverable picker', {
+          detail: fin.status.detail,
+        });
+        const restart = await client.reloginStart();
+        if (restart.ok) {
+          assertion = await getAssertionOverHash(restart.data.challenge, undefined);
+          fin = await client.reloginFinish(restart.data.challenge, assertion);
+        }
+      }
+      if (fin.ok) {
+        // Backfill the stack-scoped pointer: the broker just CHAIN-verified this
+        // credential for this omni, so it IS the bound master passkey. Heals both
+        // the missing-pointer and the stale-pointer case without any reset.
+        setMasterCredId(assertion.credential_id);
+        setMasterOmni(fin.data.omni ?? start.data.omni);
+        akLog('relogin: master session restored via passkey ✅', {
+          omni: fin.data.omni,
+          signingCredentialId: assertion.credential_id,
+        });
+        onComplete();
+        return;
+      }
+      setNote(
+        `Passkey sign-in failed — ${fin.status.detail ?? 'rejected'}. Use email below; only if the master passkey is deleted from every device, reset the master and re-onboard.`,
+      );
+    } catch (e) {
+      setNote(`Touch ID cancelled or failed — ${(e as Error)?.message ?? ''}. Use email below.`);
+    }
+    setReloginBusy(false);
+  };
+  useEffect(() => { setMaskEm(getMaskEmail()); }, []);
+  const emailValid = /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email.trim());
+
+  // #207 item 1A — the onboarding setup step: author the default taxonomy behind a
+  // visible progress ceremony (init does cap-mint → STS → config worker → S3, so
+  // it takes several seconds). `checking` runs the idempotency probe, `pick` shows
+  // the preset picker, `authoring` runs the progress bar.
+  const [setupStage, setSetupStage] = useState<'checking' | 'pick' | 'authoring'>('checking');
+  const [presets, setPresets] = useState<ConfigPreset[]>([]);
+  const [selectedPreset, setSelectedPreset] = useState('');
+  const [setupNote, setSetupNote] = useState('');
+  const initResult = useRef<{ ok: boolean; count: number; dev: boolean; note: string }>({
+    ok: false,
+    count: 0,
+    dev: false,
+    note: '',
+  });
+
+  // On entering 'setup': (1) IDEMPOTENCY — if a taxonomy ALREADY exists (a
+  // re-onboard), jump straight in without re-authoring (never clobber, never
+  // re-prompt). (2) else load the presets for the picker.
+  useEffect(() => {
+    if (phase !== 'setup') return;
+    let cancelled = false;
+    (async () => {
+      const existing = await client.listMemoryCategories();
+      if (cancelled) return;
+      if (existing.ok && existing.data.length > 0) {
+        onComplete({ categories: existing.data.length, already: true });
+        return;
+      }
+      const r = await client.listConfigPresets();
+      if (cancelled) return;
+      if (r.ok) {
+        setPresets(r.data.presets);
+        setSelectedPreset(r.data.defaultId);
+      } else {
+        setSetupNote(existing.ok ? (r.status.detail ?? 'Could not load category presets. Retry from the knowledge page.') : (existing.status.detail ?? 'Could not read your existing categories. No data was replaced.'));
+      }
+      setSetupStage('pick');
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [phase, client]);
+
+  const chosenPreset = presets.find((p) => p.id === selectedPreset) ?? presets[0];
+
+  // The init progress ceremony. The real author call fires as the slow step's
+  // `action` (the runner AWAITS it), so the bar reflects the true duration and
+  // we read the captured result in `authoringDone`.
+  const initStages: CeremonyStep[] = [
+    {
+      label: 'Read your profile',
+      sub: chosenPreset ? `${chosenPreset.label} · ${chosenPreset.categories.length} categories` : '',
+    },
+    {
+      label: 'Compile category taxonomy',
+      sub: 'merge into config/memory-taxonomy (idempotent — never clobbers existing)',
+    },
+    {
+      label: 'Encrypt + store to Config',
+      sub: 'cap-mint → STS → config worker → S3 · AES-256-GCM · master-only',
+      action: async () => {
+        const r = await client.initConfigDefault(selectedPreset);
+        if (r.ok) {
+          initResult.current = {
+            ok: true,
+            count: r.data.categories.length,
+            dev: r.data.taxonomyStatus === 'cached',
+            note: '',
+          };
+        } else {
+          const detail = r.status.detail ?? '';
+          const m = detail.match(/\{"error":"([^"]+)"\}/);
+          initResult.current = { ok: false, count: 0, dev: false, note: m ? m[1] : detail || 'init failed' };
+          throw new Error('init failed'); // narrated by the runner; handled in authoringDone
+        }
+      },
+    },
+    {
+      label: 'Index + audit',
+      sub: 'CredentialAudit.append(op=config.taxonomy) · tier-1 + anchor',
+      onchain: true,
+      fn: 'append(bytes32,bytes32,bytes32)',
+    },
+  ];
+
+  const startAuthoring = () => {
+    if (!selectedPreset) return;
+    setSetupNote('');
+    initResult.current = { ok: false, count: 0, dev: false, note: '' };
+    setSetupStage('authoring');
+  };
+
+  // The runner finished the animation — act on the REAL captured result: success
+  // jumps straight into the app (no extra button); failure returns to the picker
+  // with the actionable error.
+  const authoringDone = () => {
+    const res = initResult.current;
+    if (res.ok) {
+      onComplete({ categories: res.count, dev: res.dev });
+    } else {
+      setSetupStage('pick');
+      setSetupNote(`Couldn't author your categories — ${res.note}. Fix the config worker, then try again.`);
+    }
+  };
+
+  // First-run is the arch.md §9 master-bootstrap ceremony. Identity (the real
+  // email) comes FIRST; the WebAuthn Touch ID is Stage 2 (master binding),
+  // fired automatically MID-ceremony. There is no separate "register" step —
+  // the passkey binding is one stage of the running ceremony.
+  // Enter email → REAL broker magic link via the daemon. If the backend is
+  // disconnected (no daemon), fall back to the narrated demo so the offline UI
+  // still flows (enrollMode = 'demo').
+  const submitEmail = async () => {
+    if (!emailValid || busy) return;
+    setBusy(true);
+    setNote('');
+    const r = await client.startEmailVerify(email.trim());
+    if (r.ok) {
+      setBusy(false);
+      setRequestId(r.data.requestId);
+      setPhase('verify');
+      return;
+    }
+    // A failed email/start is NOT automatically "offline". The demo narration
+    // exists for a genuinely ABSENT backend; when the daemon is up, the
+    // failure is real (broker email_link unarmed, SES sender unverified, rate
+    // limit) and silently starting the ceremony would walk the operator past
+    // verification as if their email had been confirmed. Ask the daemon directly instead of inferring from the
+    // failed call: postJson reports an HTTP error and a dead socket with the
+    // same `unreachable` reason, so r.status cannot tell them apart.
+    if (hosted) {
+      setBusy(false);
+      setNote(r.status.detail ?? 'Sign-in failed. Please try again.');
+      return;
+    }
+    const conn = await client.status();
+    setBusy(false);
+    if (conn.kind === 'connected') {
+      setNote(
+        `Couldn't send the verification email — ${r.status.detail ?? 'the broker rejected the request'}. ` +
+          `Your email is NOT verified, so onboarding can't continue. Fix the backend and try again.`,
+      );
+      return;
+    }
+    setEnrollMode('demo');
+    setPhase('ceremony');
+  };
+
+  // While in 'verify', poll the broker until the operator clicks the magic link.
+  useEffect(() => {
+    if (phase !== 'verify' || !requestId) return;
+    let cancelled = false;
+    let polling = false;
+    let settled = false;
+    const tick = async () => {
+      if (polling || settled) return;
+      polling = true;
+      const r = await client.pollEmailVerify(requestId);
+      polling = false;
+      if (cancelled) return;
+      if (!r.ok) { setNote(r.status.detail ?? 'Unable to check sign-in. Please try again.'); settled = hosted; return; }
+      if (r.data.status === 'verified') {
+        settled = true;
+        setOmni(r.data.omniAccount ?? '');
+        if (hosted) setPhase('browser');
+        else setPhase('ceremony');
+      } else if (r.data.status.startsWith('failed')) {
+        setNote(`Email verification ${r.data.status} — start over with a fresh link.`);
+      }
+    };
+    void tick();
+    const id = setInterval(tick, 3000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [phase, requestId, client]);
+
+  // §9 Stages 0–4. The Stage-2 binding step carries the real WebAuthn action;
+  // the runner awaits it (real Touch ID via the daemon ui-bridge, narrated
+  // fallback offline).
+  const stages: CeremonyStep[] = [
+    { label: 'Generate device key (K10)', sub: 'secp256k1 keypair · generated locally · no network · sealed in the OS keychain' },
+    { label: 'Email verified ✓', sub: `${maskEmail(email, maskEm)} · broker issued the single-use binding_nonce` },
+    {
+      label: 'Bind passkey (K11)',
+      sub: 'WebAuthn create — makes your passkey in the Secure Enclave (bound to your verified email, not a demo identity). This is the FIRST of two Touch ID prompts.',
+      touchId: '1 of 2',
+      action: async () => {
+        const outcome = await tryRealEnroll(client, email.trim());
+        pendingRegister.current = outcome.mode === 'real' ? outcome.register ?? null : null;
+        registerError.current = outcome.mode === 'real' ? outcome.registerError ?? null : null;
+        // A blocked enroll is NOT a demo. Mapping it to 'demo' rendered the chip
+        // "demo · no daemon" over a perfectly healthy daemon, narrated the whole
+        // ceremony without ever calling WebAuthn (so no Touch ID, with no reason
+        // given), and dropped the operator at a config error several steps later.
+        if (outcome.mode === 'needs-reset') {
+          setEnrollMode('blocked');
+          setBlockedReason(outcome.reason);
+          setOmni(outcome.omni ?? '');
+          throw new Error(`master already bound — ${outcome.reason}`);
+        }
+        // Broker can't register yet — NO passkey was minted (the preflight
+        // caught it). Halt with a distinct state: not "already bound" (nothing
+        // is), just a broker not ready. Retry re-runs the whole ceremony.
+        if (outcome.mode === 'broker-not-ready') {
+          setEnrollMode('broker-not-ready');
+          setBlockedReason(outcome.reason);
+          throw new Error(`broker not ready to register — ${outcome.reason}`);
+        }
+        // #501: the chain is unreachable — the daemon is fine. NO passkey was
+        // minted (we refuse to mint blind), so nothing is stranded; stop and
+        // let the operator retry once the chain answers.
+        if (outcome.mode === 'chain-unavailable') {
+          setEnrollMode('chain-unavailable');
+          setBlockedReason(outcome.reason);
+          throw new Error(`chain unavailable — ${outcome.reason}`);
+        }
+        setEnrollMode(outcome.mode === 'real' ? 'real' : 'demo');
+      },
+    },
+    { label: 'Activate managed wallet → session', sub: 'the signer derives + attests your managed wallet (EIP-191) and mints your session (J1) — no wallet app, no MetaMask. No Touch ID here.' },
+    {
+      label: 'Register master P256Account on chain',
+      sub: 'the SAME passkey signs the register UserOp → handleOps binds operatorMasterWallet = your passkey smart account. This is the SECOND Touch ID prompt — expected, not an error. The on-chain confirm can take ~30 s.',
+      touchId: '2 of 2',
+      onchain: true,
+      fn: 'P256Account.registerFirstMasterDevice(...)',
+      // #232: the 2nd Touch ID fires HERE — at the step the bar shows — and the
+      // step tolerates slow handleOps (submit raced against the state poll).
+      // No-op when there's nothing to register (demo fallback / already bound).
+      action: async () => {
+        // #278 D6: the register BUILD failed at the daemon/broker — surface it HERE
+        // (the register step) instead of silently no-op'ing, so the operator sees the
+        // real cause and doesn't proceed against an unbound master.
+        if (registerError.current) {
+          const msg = registerError.current;
+          registerError.current = null;
+          throw new Error(`master register failed — ${msg}`);
+        }
+        const reg = pendingRegister.current;
+        if (!reg) return;
+        pendingRegister.current = null;
+        try {
+          await submitMasterRegister(client, reg);
+        } catch (e) {
+          // #501: a LATE failure — the passkey already exists (minted a step
+          // ago) but the master is NOT bound. Distinct from the pre-mint stops:
+          // there IS a stranded credential to tell the operator about, and only
+          // they can delete it. Re-throw so the runner stops on this step.
+          setEnrollMode('register-failed');
+          setBlockedReason((e as Error)?.message ?? 'the register did not land on chain');
+          throw e;
+        }
+      },
+    },
+  ];
+
+  return (
+    <div className="onboard">
+      <div className="onboard-card">
+        <div className="onboard-brand">
+          <div
+            style={{
+              width: 56, height: 56, border: '1px solid var(--rule)', display: 'grid',
+              placeItems: 'center', fontSize: 28, color: 'var(--ink)',
+            }}
+            aria-hidden
+          >
+            ◐
+          </div>
+          <div>
+            <div className="serif" style={{ fontSize: 30, fontStyle: 'italic', letterSpacing: '-0.02em', lineHeight: 1 }}>
+              agentKeys
+            </div>
+            <div style={{ fontSize: 11, color: 'var(--ink-dim)', letterSpacing: '0.1em', textTransform: 'uppercase', marginTop: 6 }}>
+              sovereign keys · for agents
+            </div>
+          </div>
+        </div>
+
+        <div className="hr-ascii" style={{ margin: '20px 0' }}>{'─'.repeat(220)}</div>
+
+        {phase === 'email' && (
+          <div className="onboard-login">
+            <h1 className="serif" style={{ fontSize: 22, fontStyle: 'italic', margin: '0 0 6px' }}>
+              {hosted || relogin ? 'Welcome back.' : 'Set up your master identity.'}
+            </h1>
+            {relogin && (
+              <>
+                <p style={{ fontSize: 12.5, color: 'var(--ink-dim)', marginBottom: 14, maxWidth: 400 }}>
+                  Your master identity{relogin.email ? <> (<strong>{maskEmail(relogin.email, maskEm)}</strong>)</> : ''} is
+                  still bound on chain. One Touch ID signs you back in — no email needed.
+                </p>
+                <button
+                  className="btn primary"
+                  style={{ width: '100%', justifyContent: 'center', padding: '12px', marginBottom: 8 }}
+                  disabled={reloginBusy}
+                  onClick={doRelogin}
+                >
+                  {reloginBusy ? '▸ confirming with Touch ID…' : '🔐 Sign back in with Touch ID'}
+                </button>
+                <div className="hr-ascii" style={{ margin: '14px 0', fontSize: 10.5, color: 'var(--ink-faint)', textAlign: 'center' }}>
+                  — or sign in with a different email —
+                </div>
+              </>
+            )}
+            <p style={{ fontSize: 12.5, color: 'var(--ink-dim)', marginBottom: 18, maxWidth: 400 }}>
+              Enter the email you&apos;ll use as your account. We send a one-time magic link there to verify it&apos;s
+              yours — your master identity is anchored to it. No password, no seed phrase.
+            </p>
+            {hosted && <p style={{ fontSize: 12.5 }}>Access is limited to approved email addresses. Sign in to continue to parent control with your existing identity.</p>}
+            <label
+              htmlFor="ak-email"
+              style={{ display: 'block', fontSize: 10.5, letterSpacing: '0.08em', textTransform: 'uppercase', color: 'var(--ink-faint)', marginBottom: 6 }}
+            >
+              email address
+            </label>
+            <input
+              id="ak-email"
+              type={maskEm ? 'password' : 'email'}
+              inputMode="email"
+              autoComplete="email"
+              autoFocus
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter') submitEmail(); }}
+              placeholder="you@example.com"
+              style={{
+                width: '100%', padding: '11px 12px', fontFamily: 'inherit', fontSize: 14,
+                border: '1px solid var(--rule)', background: 'var(--bg)', color: 'var(--ink)', marginBottom: 14,
+              }}
+            />
+            <button
+              type="button"
+              onClick={() => { const v = !maskEm; setMaskEm(v); setMaskEmail(v); }}
+              style={{ background: 'none', border: 'none', color: 'var(--ink-faint)', fontSize: 11, cursor: 'pointer', padding: '0 0 10px', textDecoration: 'underline' }}
+              title="Toggle email masking (for screen-sharing); persists"
+            >
+              {maskEm ? '🕶 email hidden — click to show' : '👁 email shown — click to hide'}
+            </button>
+            <button
+              className="btn primary"
+              style={{ width: '100%', justifyContent: 'center', padding: '12px' }}
+              disabled={!emailValid || busy}
+              onClick={submitEmail}
+            >
+              Continue →
+            </button>
+            {note && <div style={{ fontSize: 11.5, color: '#b00', marginTop: 12 }}>{note}</div>}
+            <div style={{ fontSize: 10.5, color: 'var(--ink-faint)', marginTop: 14, textAlign: 'center' }}>
+              {hosted ? 'Signing in does not create another account.' : 'first login creates O_master · HDKD root at /'}
+            </div>
+          </div>
+        )}
+
+        {phase === 'verify' && (
+          <div className="onboard-login">
+            <h1 className="serif" style={{ fontSize: 22, fontStyle: 'italic', margin: '0 0 6px' }}>Check your inbox.</h1>
+            <p style={{ fontSize: 12.5, color: 'var(--ink-dim)', marginBottom: 18, maxWidth: 400 }}>
+              We sent a one-time magic link to <strong>{maskEmail(email, maskEm)}</strong>. Click it to verify this address — this page
+              continues automatically once you do.
+            </p>
+            <div style={{ fontSize: 11, letterSpacing: '0.08em', textTransform: 'uppercase', color: 'var(--ink-faint)' }}>
+              ▸ waiting for the link to be clicked…
+            </div>
+            {note && <div style={{ fontSize: 11.5, color: '#b00', marginTop: 12 }}>{note}</div>}
+            <button
+              className="btn"
+              style={{ marginTop: 18, padding: '8px 14px' }}
+              onClick={() => { if (hosted) void client.logout(); setPhase('email'); setRequestId(''); setNote(''); }}
+            >
+              ← use a different email
+            </button>
+          </div>
+        )}
+
+        {phase === 'browser' && client instanceof CoreBackend && (
+          <HostedBrowserEnrollment brokerUrl={client.brokerUrl} omni={omni}
+            start={(request) => client.hostedSignerStart(request)}
+            publish={(request) => client.hostedSignerPublish(request)}
+            status={(request) => client.hostedSignerStatus(request)}
+            onReady={async (identity) => {
+              await client.activateHostedIdentity(identity);
+              setMasterCredId(identity.credentialId);
+              setMasterOmni(identity.omni);
+              setPhase('setup');
+            }} />
+        )}
+
+        {phase === 'ceremony' && (
+          <div>
+            <div style={{ fontSize: 11, letterSpacing: '0.1em', textTransform: 'uppercase', color: 'var(--ink-dim)', marginBottom: 14 }}>
+              Bringing up your trust core · {maskEmail(email, maskEm)}
+              {enrollMode === 'real' && <span className="chip ok" style={{ marginLeft: 8 }}>K11 bound · real WebAuthn</span>}
+              {enrollMode === 'demo' && <span className="chip" style={{ marginLeft: 8 }}>demo · no daemon</span>}
+              {enrollMode === 'blocked' && <span className="chip" style={{ marginLeft: 8, color: '#b00' }}>blocked · sign in or reset</span>}
+              {enrollMode === 'broker-not-ready' && <span className="chip" style={{ marginLeft: 8, color: '#b00' }}>broker not ready · retry</span>}
+              {enrollMode === 'chain-unavailable' && <span className="chip" style={{ marginLeft: 8, color: '#b00' }}>chain unreachable · retry</span>}
+              {enrollMode === 'register-failed' && <span className="chip" style={{ marginLeft: 8, color: '#b00' }}>not registered · action needed</span>}
+            </div>
+            {/* The ceremony phase renders no `note` (that lives in the email phase),
+                so a blocked enroll had NO on-screen explanation at all: the run just
+                narrated to the end without a Touch ID prompt. */}
+            {enrollMode === 'blocked' && (
+              <div style={{ fontSize: 12, color: '#b00', border: '1px solid #b00', borderRadius: 6, padding: 10, marginBottom: 14, lineHeight: 1.5 }}>
+                <strong>Can&apos;t bind a passkey — {blockedReason}.</strong>
+                <br />
+                A master is already bound on chain for this identity, so minting a NEW passkey has
+                nothing safe to sign. If the original passkey exists on <strong>this device</strong>{' '}
+                (enrolled in another browser profile, or on another stack of the same chain), sign
+                in with it — <strong>no reset needed</strong>, one Touch ID:
+                <div style={{ margin: '10px 0' }}>
+                  <button className="btn" style={{ padding: '8px 14px' }} onClick={doRelogin} disabled={reloginBusy}>
+                    {reloginBusy ? '▸ confirming with Touch ID…' : '🔐 Sign in with the existing passkey (Touch ID)'}
+                  </button>
+                </div>
+                {note && <div style={{ marginBottom: 8 }}>{note}</div>}
+                Reset the master ONLY if that passkey is gone from every device: dashboard ▸{' '}
+                <em>reset master</em> unbinds the on-chain{' '}
+                <span className="mono">operatorMasterWallet</span> for <strong>every stack and
+                browser on this chain</strong>, revokes the paired fleet, and requires a full
+                re-onboard. (A reset is refused while this broker cannot re-register, so it can
+                never strand you.)
+              </div>
+            )}
+            {/* Broker's sponsored-register runtime is down — NO passkey was
+                minted (the preflight caught it before credentials.create), so
+                the Secure Enclave stays clean and there is no orphan. Distinct
+                from 'blocked': nothing is bound; the broker just can't register
+                yet. Transient — Retry re-runs the whole ceremony (re-probes,
+                and mints only once the broker is ready). */}
+            {enrollMode === 'broker-not-ready' && (
+              <div style={{ fontSize: 12, color: '#b00', border: '1px solid #b00', borderRadius: 6, padding: 10, marginBottom: 14, lineHeight: 1.5 }}>
+                <strong>The broker can&apos;t register a master yet.</strong>
+                <br />
+                <span className="mono" style={{ fontSize: 11 }}>{blockedReason}</span>
+                <br />
+                No passkey was created. Local registration is not ready; the details above
+                identify the missing setup. Complete that setup, then retry:
+                <div style={{ margin: '10px 0' }}>
+                  <button
+                    className="btn"
+                    style={{ padding: '8px 14px' }}
+                    onClick={() => { setEnrollMode('pending'); setBlockedReason(''); setCeremonyRunKey((k) => k + 1); }}
+                  >
+                    ↻ Retry
+                  </button>
+                </div>
+                If you already attempted onboarding a few times before this, delete any stray{' '}
+                <em>AgentKeys master device</em> passkeys created then in System Settings ▸ Passwords
+                (older builds minted one per attempt).
+              </div>
+            )}
+            {/* #501: the chain is unreachable — the daemon is FINE. Previously
+                this rendered "demo · no daemon" and narrated every step green
+                to setup. No passkey was minted (we refuse to mint blind), so
+                nothing is stranded; it is purely transient. */}
+            {enrollMode === 'chain-unavailable' && (
+              <div style={{ fontSize: 12, color: '#b00', border: '1px solid #b00', borderRadius: 6, padding: 10, marginBottom: 14, lineHeight: 1.5 }}>
+                <strong>Can&apos;t reach the chain — onboarding stopped.</strong>
+                <br />
+                <span className="mono" style={{ fontSize: 11 }}>{blockedReason}</span>
+                <br />
+                Your master binding lives on chain, so we can&apos;t tell whether you already have
+                one — and creating a passkey without knowing would strand it. <strong>Nothing was
+                created</strong> and your keychain is untouched. This is the chain or its RPC being
+                unreachable, <em>not</em> a problem with your daemon or this app. Retry once it
+                answers:
+                <div style={{ margin: '10px 0' }}>
+                  <button
+                    className="btn"
+                    style={{ padding: '8px 14px' }}
+                    onClick={() => { setEnrollMode('pending'); setBlockedReason(''); setCeremonyRunKey((k) => k + 1); }}
+                  >
+                    ↻ Retry
+                  </button>
+                </div>
+              </div>
+            )}
+            {/* #501: the LATE failure — the passkey EXISTS but the register did
+                not land, so there is a real stranded credential. The app cannot
+                delete it (WebAuthn forbids a site deleting its own credential),
+                so name it and hand the operator the one action only they can
+                take. Retrying mints ANOTHER passkey, so say that plainly. */}
+            {enrollMode === 'register-failed' && (
+              <div style={{ fontSize: 12, color: '#b00', border: '1px solid #b00', borderRadius: 6, padding: 10, marginBottom: 14, lineHeight: 1.5 }}>
+                <strong>Your master was NOT registered on chain.</strong>
+                <br />
+                <span className="mono" style={{ fontSize: 11 }}>{blockedReason}</span>
+                <br />
+                A passkey <strong>was</strong> created a step earlier, but the on-chain registration
+                didn&apos;t land — so that passkey is now <strong>unused</strong> and bound to
+                nothing. We deliberately did <em>not</em> save it as your master key (that would be
+                the wrong-passkey trap: every later approval would fail). You are{' '}
+                <strong>not onboarded</strong>; nothing on chain changed.
+                <br />
+                <br />
+                Common cause: the broker&apos;s bundler ran out of gas, so the transaction couldn&apos;t
+                be paid for — an operator tops it up. Once it&apos;s fixed you can retry, but note{' '}
+                <strong>a retry creates a new passkey</strong>: delete the unused{' '}
+                <em>AgentKeys master device</em> passkey in System Settings ▸ Passwords first, so
+                they don&apos;t pile up.
+                <div style={{ margin: '10px 0' }}>
+                  <button
+                    className="btn"
+                    style={{ padding: '8px 14px' }}
+                    onClick={() => { setEnrollMode('pending'); setBlockedReason(''); setCeremonyRunKey((k) => k + 1); }}
+                  >
+                    ↻ Retry (creates a new passkey)
+                  </button>
+                </div>
+              </div>
+            )}
+            {omni && (
+              <div className="mono" style={{ fontSize: 11, color: 'var(--ink-dim)', marginBottom: 14, wordBreak: 'break-all' }}>
+                logged in as <strong>{maskEmail(email, maskEm)}</strong> · omni {omni}
+              </div>
+            )}
+            {/* The two-Touch-ID promise is only true on the real path — hide it
+                in every stopped state (no further Touch ID will fire), so the
+                notice never contradicts the panel above it. */}
+            {!['blocked', 'broker-not-ready', 'chain-unavailable', 'register-failed'].includes(enrollMode) && (
+              <div className="touchid-notice">
+                <strong>🔐 Touch ID is requested twice.</strong> Once to <strong>create</strong> your passkey, then once more to <strong>authorize</strong> its on-chain registration — both with the same passkey. The second prompt is expected, not a retry or an error.
+              </div>
+            )}
+            <CeremonyRunner key={ceremonyRunKey} steps={stages} onDone={() => setPhase('setup')} stepMs={760} />
+          </div>
+        )}
+
+        {phase === 'setup' && (
+          <div className="onboard-login">
+            {setupStage === 'checking' && (
+              <div style={{ fontSize: 11, letterSpacing: '0.1em', textTransform: 'uppercase', color: 'var(--ink-faint)' }}>
+                ▸ checking your setup…
+              </div>
+            )}
+
+            {setupStage === 'pick' && (
+              <>
+                <h1 className="serif" style={{ fontSize: 22, fontStyle: 'italic', margin: '0 0 6px' }}>Set up your categories.</h1>
+                <p style={{ fontSize: 12.5, color: 'var(--ink-dim)', marginBottom: 16, maxWidth: 420 }}>
+                  Pick a starting profile. This authors your <strong>category taxonomy</strong> — the vocabulary agentKeys uses
+                  to scope everything an agent can touch: the <strong>memory</strong> it reads, the <strong>credentials</strong> it
+                  uses, and more data classes (payments, …) as you add them. It seeds your categories now; credentials are
+                  auto-categorized into the same taxonomy when you connect an agent. Refine it any time — nothing is shared until
+                  you connect one.
+                </p>
+                {presets.length > 0 ? (
+                  <>
+                    <label htmlFor="ak-preset" style={{ display: 'block', fontSize: 10.5, letterSpacing: '0.08em', textTransform: 'uppercase', color: 'var(--ink-faint)', marginBottom: 6 }}>
+                      starting profile
+                    </label>
+                    <select
+                      id="ak-preset"
+                      value={selectedPreset}
+                      onChange={(e) => setSelectedPreset(e.target.value)}
+                      style={{ width: '100%', padding: '10px 11px', fontSize: 13, border: '1px solid var(--rule)', background: 'var(--bg)', color: 'var(--ink)', marginBottom: 10 }}
+                    >
+                      {presets.map((p) => <option key={p.id} value={p.id}>{p.label}</option>)}
+                    </select>
+                    {chosenPreset && (
+                      <>
+                        <p className="muted" style={{ fontSize: 11.5, margin: '0 0 10px' }}>{chosenPreset.description}</p>
+                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5, marginBottom: 16 }}>
+                          {chosenPreset.categories.map((c) => <span key={c.ns} className="chip">{c.label}</span>)}
+                        </div>
+                      </>
+                    )}
+                    <button className="btn primary" style={{ width: '100%', justifyContent: 'center', padding: '12px' }} onClick={startAuthoring}>
+                      ⊕ initialize my categories
+                    </button>
+                    <button className="btn" style={{ width: '100%', justifyContent: 'center', padding: '9px', marginTop: 8 }} onClick={() => onComplete()}>
+                      skip — set up later
+                    </button>
+                  </>
+                ) : (
+                  <button className="btn primary" style={{ width: '100%', justifyContent: 'center', padding: '12px' }} onClick={() => onComplete()}>
+                    Continue →
+                  </button>
+                )}
+                {setupNote && <div style={{ fontSize: 11.5, color: 'var(--accent, #b8860b)', marginTop: 12 }}>{setupNote}</div>}
+              </>
+            )}
+
+            {setupStage === 'authoring' && (
+              <>
+                <div style={{ fontSize: 11, letterSpacing: '0.1em', textTransform: 'uppercase', color: 'var(--ink-dim)', marginBottom: 14 }}>
+                  Authoring your taxonomy{chosenPreset ? ` · ${chosenPreset.label}` : ''}
+                </div>
+                <CeremonyRunner steps={initStages} onDone={authoringDone} stepMs={700} />
+              </>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}

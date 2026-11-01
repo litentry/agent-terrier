@@ -1,0 +1,140 @@
+{
+  "advertised": {
+    "pub_slots": [
+      "kitchen_screen",
+      "family_chat",
+      "opchat"
+    ],
+    "own_namespace": "app-chef",
+    "response": {
+      "actions": [
+        {
+          "name": "publish_to_slot",
+          "description": "Publish ONE event to a feed this application is bound to — the only way anything reaches a screen, a chat, or a device (a file you write publishes nothing). kind `doc` with the card JSON as `body` puts a card on a display slot; `text` sends a line to a chat slot; `command` drives an actuator; the `opchat` slot is your owner’s chat. Slots you can publish to now: kitchen_screen, family_chat, opchat. A refused slot was not granted at install — say so in your reply instead of retrying.",
+          "route": "/v1/sandbox/self/publish",
+          "requires_grant_prefix": "channel-pub:",
+          "parameters": [
+            {
+              "name": "slot",
+              "kind": "string",
+              "required": true,
+              "description": "The bound slot name (one of: kitchen_screen, family_chat, opchat) or a channel id."
+            },
+            {
+              "name": "kind",
+              "kind": "string",
+              "required": false,
+              "description": "The event kind; default text. A card is doc.",
+              "choices": [
+                "text",
+                "image",
+                "audio-clip",
+                "frame",
+                "command",
+                "doc"
+              ]
+            },
+            {
+              "name": "body",
+              "kind": "string",
+              "required": true,
+              "description": "The event body, verbatim: the card JSON (card: 1 contract) for doc, the message for text, the command JSON for command."
+            },
+            {
+              "name": "correlation",
+              "kind": "string",
+              "required": false,
+              "description": "Optional: the id of the event this answers (a command you act on), so the reply threads to it."
+            },
+            {
+              "name": "content_type",
+              "kind": "string",
+              "required": false,
+              "description": "Optional media type; the default follows the kind (doc = the card type)."
+            }
+          ],
+          "receipt_fields": [
+            "slot",
+            "channel_id",
+            "kind",
+            "bytes",
+            "correlation"
+          ]
+        },
+        {
+          "name": "propose_to_owner",
+          "description": "Propose ONE durable learning to your owner — a standing preference, a fact about the household, a rule you were told — so it can outlive this sandbox and reach the other applications. It lands in the owner’s review queue; nothing enters shared knowledge until they accept it. Propose the distilled learning (a few sentences), never a transcript; batch related learnings into one proposal. A namespace you are not granted to propose into is refused — say so in your reply instead of retrying. Your own namespace is app-chef; that is the default — leave the namespace out unless the owner told you which shared one you may propose into.",
+          "route": "/v1/sandbox/self/propose",
+          "requires_grant_prefix": "proposal:",
+          "parameters": [
+            {
+              "name": "text",
+              "kind": "string",
+              "required": true,
+              "description": "The learning, distilled: what to keep and why it matters."
+            },
+            {
+              "name": "namespace",
+              "kind": "string",
+              "required": false,
+              "description": "The knowledge namespace it belongs to (default: your own)."
+            },
+            {
+              "name": "key",
+              "kind": "string",
+              "required": false,
+              "description": "Optional stable key, so a refined proposal replaces the earlier one."
+            },
+            {
+              "name": "kind",
+              "kind": "string",
+              "required": false,
+              "description": "knowledge (default) or skill.",
+              "choices": [
+                "knowledge",
+                "skill"
+              ]
+            }
+          ],
+          "receipt_fields": [
+            "namespace",
+            "key",
+            "kind",
+            "content_hash"
+          ]
+        }
+      ]
+    }
+  },
+  "publish_request": {
+    "slot": "kitchen_screen",
+    "kind": "doc",
+    "body": "{\"card\":1}",
+    "correlation": "evt-9"
+  },
+  "propose_request": {
+    "text": "The family avoids gluten; keep wheat noodles off the plan.",
+    "namespace": "family",
+    "key": "pantry-habits",
+    "kind": "knowledge"
+  },
+  "publish_receipt": {
+    "outcome": "published",
+    "slot": "kitchen_screen",
+    "channel_id": "kitchen-display",
+    "kind": "doc",
+    "bytes": 10,
+    "correlation": "evt-9",
+    "body_ref": null,
+    "summary": "published: doc → kitchen_screen (kitchen-display), 10 bytes, correlation evt-9"
+  },
+  "propose_receipt": {
+    "outcome": "proposed",
+    "namespace": "family",
+    "key": "pantry-habits",
+    "kind": "knowledge",
+    "content_hash": "h",
+    "s3_key": "s",
+    "summary": "proposed: knowledge → family/pantry-habits (awaiting the owner’s review)"
+  }
+}

@@ -1,0 +1,96 @@
+name: public nightly qualification
+on:
+  schedule:
+    - cron: '23 2 * * *'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: public-qualification-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  deterministic:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      AGENT_TERRIER_TEST_DOCKER_SOCKET: /var/run/docker.sock
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Select private generated state outside the checkout
+        run: echo "AGENT_TERRIER_CACHE_DIR=${RUNNER_TEMP}/terrier-contract-cache" >> "${GITHUB_ENV}"
+      - name: Restore trusted native dependency cache
+        id: rust-cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: |
+            ~/.cargo/registry
+            target/debug/deps
+            target/debug/build
+            target/debug/.fingerprint
+          key: qualification-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', '**/Cargo.toml') }}
+      - name: Install the repository-pinned toolchain
+        run: env -u RUSTUP_TOOLCHAIN rustup toolchain install --no-self-update
+      - name: Prepare public component dependencies
+        uses: ./.github/actions/public-setup
+        with:
+          browser: 'true'
+          plugins: 'true'
+          contracts: 'true'
+          provisioner: 'true'
+      - name: Full native regression through the canonical CLI
+        run: python3 terrier test regression --online --report "${RUNNER_TEMP}/native-regression.json"
+      - name: Strict native formatting and lint
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets -- -D warnings
+      - name: Shared component checks
+        run: python3 terrier test focused --component ui --component display --component dsh --component managed --component contracts --component provisioner --online --report "${RUNNER_TEMP}/component-checks.json"
+      - name: Build the public service executables
+        run: cargo build --offline --locked --workspace --bins
+      - name: Prepare synthetic browser fixtures
+        run: npm exec --prefix provisioner-scripts -- playwright install --with-deps chromium
+      - name: Build the reviewed-revision local agent image
+        run: |
+          docker build --file packages/agent-terrier-runtime/Dockerfile --iidfile "${RUNNER_TEMP}/agent-image.id" .
+          echo "AGENT_TERRIER_TEST_AGENT_IMAGE=$(cat "${RUNNER_TEMP}/agent-image.id")" >> "${GITHUB_ENV}"
+      - name: Qualify managed Docker isolation and disk policy
+        run: cargo test --offline --locked -p agentkeys-runtime --test docker_managed -- --ignored --nocapture
+      - name: Qualify actual local services and Docker lifecycle
+        run: python3 terrier test qualification --component chain --component services --component storage --component agents --component ui --component provisioner --component website --report "${RUNNER_TEMP}/service-qualification.json"
+      - name: Summarize available reports and exact image
+        if: always()
+        run: |
+          for report_name in native-regression component-checks service-qualification; do
+            report_path="${RUNNER_TEMP}/${report_name}.json"
+            if [ -f "${report_path}" ]; then
+              python3 scripts/test-timing-summary.py "${report_path}" >> "${GITHUB_STEP_SUMMARY}"
+            else
+              echo "${report_name}: no report; this stage is incomplete." >> "${GITHUB_STEP_SUMMARY}"
+            fi
+          done
+          if [ -f "${RUNNER_TEMP}/agent-image.id" ]; then
+            echo "Built image candidate: $(cat "${RUNNER_TEMP}/agent-image.id")" >> "${GITHUB_STEP_SUMMARY}"
+          fi
+      - name: Retain structured reports only
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: public-qualification-reports
+          path: |
+            ${{ runner.temp }}/native-regression.json
+            ${{ runner.temp }}/component-checks.json
+            ${{ runner.temp }}/service-qualification.json
+          if-no-files-found: error
+          retention-days: 7
+      - name: Save only a successful main-revision cache
+        if: success() && github.ref == 'refs/heads/main' && steps.rust-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: |
+            ~/.cargo/registry
+            target/debug/deps
+            target/debug/build
+            target/debug/.fingerprint
+          key: ${{ steps.rust-cache.outputs.cache-primary-key }}

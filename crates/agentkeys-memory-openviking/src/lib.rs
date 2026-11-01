@@ -1,0 +1,1402 @@
+//! Optional OpenViking ingestion adapter for already-authorized canonical memory.
+//!
+//! The daemon mirror supplies each namespace's current authorized items. Reconciliation
+//! writes resource directories under `viking://resources/<namespace>/<item>`, including
+//! abstract/overview sidecars, and deletes items absent from that supplied set.
+//! The caller owns authorization and retry policy; this client does not grant access.
+//!
+//! The public runtime does not yet compose an OpenViking server or retrieval plugin.
+//! See `docs/wiki/local-models.md` for the qualified local model capabilities.
+
+pub mod server_config;
+
+pub const DEFAULT_ENDPOINT: &str = "http://127.0.0.1:1933";
+/// OpenViking's home for knowledge (`viking://resources/`, account-global; the
+/// recall's resources bucket searches it alongside the user's own `resources/`).
+pub const RESOURCES_ROOT: &str = "viking://resources";
+/// OpenViking's own L0 / L1 size defaults (docs: context layers).
+pub const ABSTRACT_MAX_CHARS: usize = 256;
+pub const OVERVIEW_MAX_CHARS: usize = 4000;
+const SEGMENT_MAX_CHARS: usize = 80;
+/// How long one item write waits for the engine to materialize a new
+/// directory's sidecar placeholders (its semantic queue does that after the
+/// body write; the public API refuses to CREATE a sidecar — "cannot create
+/// generated semantic sidecar directly" — so `replace` needs the placeholder
+/// first). Measured on 0.4.16: the placeholder appears within seconds.
+const SIDECAR_WAIT_ATTEMPTS: u32 = 40;
+const SIDECAR_WAIT_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// One canonical knowledge item as the mirror files it: the git-style store's
+/// `key` / `title` / `preview` / `body` (the owner curates title + preview on
+/// the Knowledge page — they become the recall's L0 / L1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MirrorItem {
+    pub key: String,
+    pub title: String,
+    pub preview: String,
+    pub body: String,
+}
+
+impl MirrorItem {
+    /// The item's directory name under its namespace.
+    pub fn segment(&self) -> String {
+        path_segment(&self.key)
+    }
+
+    /// Content hash over title + preview + body (first 16 hex of SHA-256): a
+    /// changed item rewrites its files, an unchanged one costs nothing.
+    pub fn content_hash(&self) -> String {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(self.title.as_bytes());
+        hasher.update([0u8]);
+        hasher.update(self.preview.as_bytes());
+        hasher.update([0u8]);
+        hasher.update(self.body.as_bytes());
+        let digest = hasher.finalize();
+        digest[..8].iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    fn heading(&self) -> &str {
+        let title = self.title.trim();
+        if title.is_empty() {
+            self.key.trim()
+        } else {
+            title
+        }
+    }
+}
+
+/// A canonical key as a viking path segment: `[A-Za-z0-9._-]` kept, every other
+/// run becomes one `-`; a leading `.` would name a hidden sidecar, so it is
+/// trimmed. A key the sanitizer had to change gets a 4-hex tail of the original
+/// so two keys can never share a directory; an empty result becomes `item-<hash>`.
+pub fn path_segment(key: &str) -> String {
+    let key = key.trim();
+    let mut out = String::new();
+    let mut last_dash = false;
+    for c in key.chars() {
+        if c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-' {
+            out.push(c);
+            last_dash = false;
+        } else if !last_dash && !out.is_empty() {
+            out.push('-');
+            last_dash = true;
+        }
+    }
+    let trimmed: String = out
+        .trim_matches(|c| c == '-' || c == '.')
+        .chars()
+        .take(SEGMENT_MAX_CHARS)
+        .collect();
+    let tail = short_hash(key);
+    if trimmed.is_empty() {
+        return format!("item-{tail}");
+    }
+    if trimmed == key {
+        trimmed
+    } else {
+        format!("{trimmed}-{}", &tail[..4])
+    }
+}
+
+/// L0: `<title>: <first paragraph of the preview, else of the body>`, ≤256 chars.
+pub fn abstract_text(item: &MirrorItem) -> String {
+    let source = if item.preview.trim().is_empty() {
+        &item.body
+    } else {
+        &item.preview
+    };
+    let head = first_paragraph(source);
+    let text = if head.is_empty() {
+        item.heading().to_string()
+    } else {
+        format!("{}: {head}", item.heading())
+    };
+    truncate_chars(&text, ABSTRACT_MAX_CHARS)
+}
+
+/// L1: `# <title>` + the preview (else the body), ≤4000 chars.
+pub fn overview_text(item: &MirrorItem) -> String {
+    let source = if item.preview.trim().is_empty() {
+        item.body.trim()
+    } else {
+        item.preview.trim()
+    };
+    truncate_chars(
+        &format!("# {}\n\n{source}", item.heading()),
+        OVERVIEW_MAX_CHARS,
+    )
+}
+
+/// L2: `# <title>` + the body (the preview when the body is empty).
+pub fn content_text(item: &MirrorItem) -> String {
+    let source = if item.body.trim().is_empty() {
+        item.preview.trim()
+    } else {
+        item.body.trim()
+    };
+    format!("# {}\n\n{source}", item.heading())
+}
+
+fn first_paragraph(text: &str) -> String {
+    text.split("\n\n")
+        .map(|p| p.split_whitespace().collect::<Vec<_>>().join(" "))
+        .find(|p| !p.is_empty())
+        .unwrap_or_default()
+}
+
+fn truncate_chars(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    let mut out: String = text.chars().take(max.saturating_sub(1)).collect();
+    out.push('…');
+    out
+}
+
+fn short_hash(text: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(text.as_bytes());
+    digest[..8].iter().map(|b| format!("{b:02x}")).collect()
+}
+
+#[derive(Debug, Clone)]
+pub struct OpenVikingClient {
+    endpoint: String,
+    api_key: String,
+    account: String,
+    user: String,
+    agent: String,
+    http: reqwest::Client,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum OpenVikingError {
+    #[error("openviking transport: {0}")]
+    Transport(String),
+    #[error("openviking http {status}: {body}")]
+    Http { status: u16, body: String },
+    #[error("openviking parse: {0}")]
+    Parse(String),
+}
+
+/// One manifest row: which item (by directory name) of which namespace is in
+/// the engine, at which content hash.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ManifestRow {
+    Item {
+        namespace: String,
+        segment: String,
+        hash: String,
+    },
+    /// The pre-2026-09-18 layout (`<ns>\t<hash>`, one `memories/<ns>/mem_<hash>.md`
+    /// per line): migrated away — deleted from the engine on the next pass.
+    Legacy {
+        namespace: String,
+        hash: String,
+    },
+    Other(String),
+}
+
+fn parse_row(line: &str) -> ManifestRow {
+    let parts: Vec<&str> = line.split('\t').collect();
+    match parts.as_slice() {
+        [namespace, segment, hash] if !namespace.is_empty() && !segment.is_empty() => {
+            ManifestRow::Item {
+                namespace: namespace.to_string(),
+                segment: segment.to_string(),
+                hash: hash.to_string(),
+            }
+        }
+        [namespace, hash] if !namespace.is_empty() && !hash.is_empty() => ManifestRow::Legacy {
+            namespace: namespace.to_string(),
+            hash: hash.to_string(),
+        },
+        _ => ManifestRow::Other(line.to_string()),
+    }
+}
+
+fn row_line(namespace: &str, segment: &str, hash: &str) -> String {
+    format!("{namespace}\t{segment}\t{hash}")
+}
+
+impl OpenVikingClient {
+    /// Build from the OpenViking env vars; `None` when `OPENVIKING_ENDPOINT` is
+    /// unset/empty (so the caller cleanly falls back to a built-in engine).
+    pub fn from_env() -> Option<Self> {
+        let endpoint = std::env::var("OPENVIKING_ENDPOINT")
+            .ok()
+            .filter(|s| !s.is_empty())?;
+        Some(Self::new(
+            endpoint,
+            std::env::var("OPENVIKING_API_KEY").unwrap_or_default(),
+            std::env::var("OPENVIKING_ACCOUNT").unwrap_or_else(|_| "default".to_string()),
+            std::env::var("OPENVIKING_USER").unwrap_or_else(|_| "default".to_string()),
+            // The engine tree's agent coordinate — the historical hermes-era default,
+            // kept for tree continuity (#621); override via OPENVIKING_AGENT.
+            std::env::var("OPENVIKING_AGENT").unwrap_or_else(|_| "hermes".to_string()),
+        ))
+    }
+
+    pub fn new(
+        endpoint: String,
+        api_key: String,
+        account: String,
+        user: String,
+        agent: String,
+    ) -> Self {
+        Self {
+            endpoint: endpoint.trim_end_matches('/').to_string(),
+            api_key,
+            account,
+            user,
+            agent,
+            http: reqwest::Client::new(),
+        }
+    }
+
+    fn with_headers(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        // `Actor-Peer` is the header the server's trusted mode reads (and what
+        // the hermes-era plugin sent); the legacy `Agent` spelling rides along for
+        // older servers that logged it.
+        let mut req = req
+            .header("X-OpenViking-Actor-Peer", &self.agent)
+            .header("X-OpenViking-Agent", &self.agent);
+        if !self.account.is_empty() {
+            req = req.header("X-OpenViking-Account", &self.account);
+        }
+        if !self.user.is_empty() {
+            req = req.header("X-OpenViking-User", &self.user);
+        }
+        if !self.api_key.is_empty() {
+            req = req
+                .header("X-API-Key", &self.api_key)
+                .header("Authorization", format!("Bearer {}", self.api_key));
+        }
+        req
+    }
+
+    pub async fn health(&self) -> bool {
+        let url = format!("{}/health", self.endpoint);
+        self.with_headers(self.http.get(&url))
+            .send()
+            .await
+            .map(|r| r.status().is_success())
+            .unwrap_or(false)
+    }
+
+    /// `POST /api/v1/content/write` with an explicit mode (`create` for a new
+    /// file, `replace` for an existing one — sidecars included).
+    pub async fn write_content(
+        &self,
+        uri: &str,
+        content: &str,
+        mode: &str,
+    ) -> Result<(), OpenVikingError> {
+        let url = format!("{}/api/v1/content/write", self.endpoint);
+        let resp = self
+            .with_headers(self.http.post(&url).json(&serde_json::json!({
+                "uri": uri,
+                "content": content,
+                "mode": mode,
+            })))
+            .send()
+            .await
+            .map_err(|e| OpenVikingError::Transport(e.to_string()))?;
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        if !status.is_success() || body_says_error(&body) {
+            return Err(OpenVikingError::Http {
+                status: status.as_u16(),
+                body,
+            });
+        }
+        Ok(())
+    }
+
+    /// Write a file so that it ends up with `content` whether or not it exists:
+    /// `create` first, and `replace` when the engine answers that it exists.
+    async fn write_upserting(&self, uri: &str, content: &str) -> Result<(), OpenVikingError> {
+        match self.write_content(uri, content, "create").await {
+            Ok(()) => Ok(()),
+            Err(OpenVikingError::Http { body, .. })
+                if body.to_ascii_lowercase().contains("exist") =>
+            {
+                self.write_content(uri, content, "replace").await
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// A directory sidecar (`.abstract.md` / `.overview.md`): the engine
+    /// materializes the placeholder itself after the body write (its semantic
+    /// queue, asynchronously) and refuses a `create` through the public API,
+    /// so this waits for the placeholder — `GET /api/v1/content/read` answers
+    /// once it exists — then `replace`s it. Bounded: a placeholder that never
+    /// appears is the item's write failure, retried next pass.
+    async fn write_sidecar(&self, uri: &str, content: &str) -> Result<(), OpenVikingError> {
+        let mut last = OpenVikingError::Transport(format!("{uri}: sidecar never materialized"));
+        for attempt in 0..SIDECAR_WAIT_ATTEMPTS {
+            if attempt > 0 {
+                tokio::time::sleep(SIDECAR_WAIT_INTERVAL).await;
+            }
+            if !self.exists(uri).await {
+                continue;
+            }
+            match self.write_content(uri, content, "replace").await {
+                Ok(()) => return Ok(()),
+                Err(e) => last = e,
+            }
+            // `replace` raced the placeholder's own materialization: the read
+            // succeeded a moment ago, so the next attempt normally lands.
+        }
+        Err(last)
+    }
+
+    /// `GET /api/v1/content/read?uri=…` answers 200 with `status: ok` once a
+    /// file exists (sidecars included; `ls` hides them).
+    async fn exists(&self, uri: &str) -> bool {
+        let url = format!("{}/api/v1/content/read", self.endpoint);
+        let resp = self
+            .with_headers(self.http.get(&url).query(&[("uri", uri)]))
+            .send()
+            .await;
+        match resp {
+            Ok(r) if r.status().is_success() => {
+                let body = r.text().await.unwrap_or_default();
+                !body_says_error(&body)
+            }
+            _ => false,
+        }
+    }
+
+    /// `DELETE /api/v1/fs?uri=…` — one file; 404 counts as gone.
+    pub async fn delete_content(&self, uri: &str) -> Result<(), OpenVikingError> {
+        self.delete(uri, false).await
+    }
+
+    /// `DELETE /api/v1/fs?uri=…&recursive=true` — an item directory with its
+    /// body and sidecars; 404 counts as gone.
+    pub async fn delete_tree(&self, uri: &str) -> Result<(), OpenVikingError> {
+        self.delete(uri, true).await
+    }
+
+    async fn delete(&self, uri: &str, recursive: bool) -> Result<(), OpenVikingError> {
+        let url = format!("{}/api/v1/fs", self.endpoint);
+        let mut query: Vec<(&str, String)> = vec![("uri", uri.to_string())];
+        if recursive {
+            query.push(("recursive", "true".to_string()));
+        }
+        let resp = self
+            .with_headers(self.http.delete(&url).query(&query))
+            .send()
+            .await
+            .map_err(|e| OpenVikingError::Transport(e.to_string()))?;
+        let status = resp.status();
+        if status.is_success() || status.as_u16() == 404 {
+            return Ok(());
+        }
+        let body = resp.text().await.unwrap_or_default();
+        Err(OpenVikingError::Http {
+            status: status.as_u16(),
+            body,
+        })
+    }
+
+    /// The item's directory — the ONE composition site of the layout
+    /// (`viking://resources/<ns>/<item>`; the e2e suite derives from here).
+    pub fn resource_dir(&self, namespace: &str, segment: &str) -> String {
+        format!("{RESOURCES_ROOT}/{namespace}/{segment}")
+    }
+
+    /// The pre-2026-09-18 file URI, kept only to migrate old sandboxes away.
+    pub fn legacy_memory_uri(&self, namespace: &str, hash: &str) -> String {
+        format!(
+            "viking://user/{}/memories/{namespace}/mem_{hash}.md",
+            if self.user.is_empty() {
+                "default"
+            } else {
+                &self.user
+            }
+        )
+    }
+
+    /// Write one item's three files (body first, so the directory exists for
+    /// the sidecars).
+    async fn write_item(&self, namespace: &str, item: &MirrorItem) -> Result<(), OpenVikingError> {
+        let segment = item.segment();
+        let dir = self.resource_dir(namespace, &segment);
+        self.write_upserting(&format!("{dir}/{segment}.md"), &content_text(item))
+            .await?;
+        self.write_sidecar(&format!("{dir}/.abstract.md"), &abstract_text(item))
+            .await?;
+        self.write_sidecar(&format!("{dir}/.overview.md"), &overview_text(item))
+            .await
+    }
+
+    /// The #566 distribution-mirror pass for ONE namespace: converge the engine
+    /// on exactly the gate-authorized `items`.
+    ///
+    /// - a new or changed item (by content hash) gets its three files written
+    ///   and its manifest row recorded; a failed write is counted and retried
+    ///   next pass (the row is not recorded);
+    /// - a recorded item the gate no longer returns (removed, or the whole
+    ///   namespace revoked with `items = []`) has its directory DELETE-THROUGHed
+    ///   and its row dropped; a failed delete keeps the row and retries;
+    /// - a legacy row (the old `memories/<ns>/mem_<hash>.md` layout) has its
+    ///   file deleted and the row dropped — old sandboxes migrate themselves.
+    ///
+    /// The manifest is one file shared by the concurrent namespace tasks (#694):
+    /// the network work runs unlocked, then this namespace's rows are swapped
+    /// in under the manifest lock in one read-modify-write
+    /// ([`swap_namespace_rows`]). A swap that cannot persist is reported in
+    /// [`ReconcileStats::manifest_error`] — the next pass re-mirrors those items.
+    pub async fn reconcile_items(
+        &self,
+        namespace: &str,
+        items: &[MirrorItem],
+        manifest: &std::path::Path,
+    ) -> ReconcileStats {
+        let mut stats = ReconcileStats::default();
+        let rows: Vec<ManifestRow> = read_manifest(manifest)
+            .iter()
+            .map(|l| parse_row(l))
+            .collect();
+        let mut recorded: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        let mut legacy: Vec<String> = Vec::new();
+        for row in &rows {
+            match row {
+                ManifestRow::Item {
+                    namespace: ns,
+                    segment,
+                    hash,
+                } if ns == namespace => {
+                    recorded.insert(segment.clone(), hash.clone());
+                }
+                ManifestRow::Legacy {
+                    namespace: ns,
+                    hash,
+                } if ns == namespace => {
+                    legacy.push(hash.clone());
+                }
+                _ => {}
+            }
+        }
+        // Desired state: one row per distinct directory (a duplicate key in the
+        // canonical array keeps its first occurrence).
+        let mut desired: Vec<(String, String, &MirrorItem)> = Vec::new();
+        for item in items {
+            let segment = item.segment();
+            if desired.iter().any(|(s, _, _)| *s == segment) {
+                continue;
+            }
+            desired.push((segment, item.content_hash(), item));
+        }
+        let mut next_rows: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+
+        // Deletions: recorded directories the gate no longer returns.
+        for (segment, hash) in &recorded {
+            if desired.iter().any(|(s, _, _)| s == segment) {
+                continue;
+            }
+            let dir = self.resource_dir(namespace, segment);
+            match self.delete_tree(&dir).await {
+                Ok(()) => stats.deleted += 1,
+                Err(e) => {
+                    stats.note_error("delete", &dir, &e);
+                    stats.delete_failed += 1;
+                    next_rows.insert(segment.clone(), hash.clone());
+                }
+            }
+        }
+        // Migration: the old per-line files leave the engine.
+        let mut legacy_kept: Vec<String> = Vec::new();
+        for hash in &legacy {
+            let legacy_uri = self.legacy_memory_uri(namespace, hash);
+            match self.delete_content(&legacy_uri).await {
+                Ok(()) => stats.deleted += 1,
+                Err(e) => {
+                    stats.note_error("delete", &legacy_uri, &e);
+                    stats.delete_failed += 1;
+                    legacy_kept.push(hash.clone());
+                }
+            }
+        }
+        // Writes: new or changed items.
+        for (segment, hash, item) in &desired {
+            if recorded.get(segment) == Some(hash) {
+                next_rows.insert(segment.clone(), hash.clone());
+                continue;
+            }
+            match self.write_item(namespace, item).await {
+                Ok(()) => {
+                    stats.mirrored += 1;
+                    next_rows.insert(segment.clone(), hash.clone());
+                }
+                Err(e) => {
+                    stats.note_error("write", &self.resource_dir(namespace, segment), &e);
+                    stats.write_failed += 1;
+                    if let Some(old) = recorded.get(segment) {
+                        next_rows.insert(segment.clone(), old.clone());
+                    }
+                }
+            }
+        }
+        let mut own: Vec<(String, String)> = next_rows.into_iter().collect();
+        own.sort();
+        if let Err(err) = swap_namespace_rows(manifest, namespace, &own, &legacy_kept) {
+            stats.note_manifest_error(manifest, &err);
+        }
+        stats
+    }
+}
+
+fn row_namespace(row: &ManifestRow) -> Option<&str> {
+    match row {
+        ManifestRow::Item { namespace, .. } | ManifestRow::Legacy { namespace, .. } => {
+            Some(namespace)
+        }
+        ManifestRow::Other(_) => None,
+    }
+}
+
+/// The engine answers 200 with `{status:"error"}` for some refusals.
+fn body_says_error(body: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| {
+            v.get("status")
+                .and_then(|s| s.as_str())
+                .map(|s| s == "error")
+        })
+        .unwrap_or(false)
+}
+
+/// Outcome of one [`OpenVikingClient::reconcile_items`] pass.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct ReconcileStats {
+    /// Items newly written or rewritten this pass.
+    pub mirrored: usize,
+    /// Items whose write errored (retried next pass).
+    pub write_failed: usize,
+    /// Stale item directories (and legacy files) removed from the engine.
+    pub deleted: usize,
+    /// Stale entries whose delete errored (kept in the manifest, retried).
+    pub delete_failed: usize,
+    /// The first failure's reason (uri + engine answer) — a count without its
+    /// reason is undebuggable (suite-7 once died on "1 write(s) failed" alone).
+    pub first_error: Option<String>,
+    /// Persistence failure; the next pass must not be reported as already reconciled.
+    pub manifest_error: Option<String>,
+}
+
+impl ReconcileStats {
+    pub fn is_noop(&self) -> bool {
+        self.mirrored == 0
+            && self.write_failed == 0
+            && self.deleted == 0
+            && self.delete_failed == 0
+            && self.manifest_error.is_none()
+    }
+
+    fn note_manifest_error(&mut self, path: &std::path::Path, err: &std::io::Error) {
+        tracing::warn!(path = ?path, error = %err, "openviking manifest not persisted — this namespace is re-mirrored (re-embedded) next pass");
+        self.manifest_error = Some(format!("{}: {err}", path.display()));
+    }
+
+    fn note_error(&mut self, what: &str, uri: &str, err: &OpenVikingError) {
+        tracing::warn!(uri, error = %err, "openviking mirror: {what} failed — retried next pass");
+        if self.first_error.is_none() {
+            self.first_error = Some(format!("{what} {uri}: {err}"));
+        }
+    }
+}
+
+/// Manifest path for [`OpenVikingClient::reconcile_items`], from the process
+/// env (see [`ingest_manifest_path`]); the home is [`std::env::home_dir`] —
+/// `$HOME`, else the running account's home from the password database.
+/// Lives in the SANDBOX filesystem on purpose — a respawn wipes it (or the
+/// #694 workspace checkpoint restores it beside the engine index), and the
+/// next pass rebuilds from canonical.
+///
+/// Missing `HOME` must not make the manifest relative to a potentially
+/// unwritable working directory; losing it would repeat ingestion each pass.
+pub fn ingest_manifest_from_env() -> std::path::PathBuf {
+    ingest_manifest_path(
+        std::env::var("AGENTKEYS_OV_INGEST_MANIFEST")
+            .ok()
+            .as_deref(),
+        std::env::home_dir().as_deref(),
+        &std::env::temp_dir(),
+    )
+}
+
+/// The manifest path, pure: `explicit` (`AGENTKEYS_OV_INGEST_MANIFEST`) wins;
+/// else `<home>/.agentkeys/ov-ingested.txt` for an absolute `home`; else
+/// `<temp>/agentkeys/ov-ingested.txt`. Never relative to the working directory.
+pub fn ingest_manifest_path(
+    explicit: Option<&str>,
+    home: Option<&std::path::Path>,
+    temp: &std::path::Path,
+) -> std::path::PathBuf {
+    if let Some(path) = explicit.map(str::trim).filter(|p| !p.is_empty()) {
+        return std::path::PathBuf::from(path);
+    }
+    match home.filter(|h| h.is_absolute()) {
+        Some(home) => home.join(".agentkeys").join("ov-ingested.txt"),
+        None => temp.join("agentkeys").join("ov-ingested.txt"),
+    }
+}
+
+/// #694 — namespaces of one pass reconcile concurrently; the manifest is ONE
+/// file, so each read / swap holds this lock (short, filesystem-only).
+static MANIFEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn manifest_guard() -> std::sync::MutexGuard<'static, ()> {
+    MANIFEST_LOCK.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+fn read_manifest(path: &std::path::Path) -> Vec<String> {
+    let _guard = manifest_guard();
+    std::fs::read_to_string(path)
+        .map(|s| s.lines().map(|l| l.to_string()).collect())
+        .unwrap_or_default()
+}
+
+/// Swap ONE namespace's rows into the manifest. The file is re-read under the
+/// lock, so a concurrent namespace task's rows (#694) are never dropped by
+/// this task's snapshot from before its network work. Nothing is written when
+/// the content would not change (a converged pass does no I/O); a write is
+/// tmp + rename, so a reader (the checkpoint's snapshot copy) never sees half
+/// a file.
+fn swap_namespace_rows(
+    path: &std::path::Path,
+    namespace: &str,
+    own: &[(String, String)],
+    legacy_kept: &[String],
+) -> std::io::Result<()> {
+    let _guard = manifest_guard();
+    let current = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(err) => return Err(err),
+    };
+    let mut lines: Vec<String> = current
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .filter(|line| row_namespace(&parse_row(line)) != Some(namespace))
+        .map(str::to_string)
+        .collect();
+    lines.extend(
+        own.iter()
+            .map(|(segment, hash)| row_line(namespace, segment, hash)),
+    );
+    lines.extend(
+        legacy_kept
+            .iter()
+            .map(|hash| format!("{namespace}\t{hash}")),
+    );
+    let mut body = lines.join("\n");
+    if !body.is_empty() {
+        body.push('\n');
+    }
+    if body == current {
+        return Ok(());
+    }
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".tmp");
+    let tmp = std::path::PathBuf::from(tmp);
+    std::fs::write(&tmp, &body)?;
+    std::fs::rename(&tmp, path).inspect_err(|_| {
+        let _ = std::fs::remove_file(&tmp);
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{routing::post, Json, Router};
+
+    fn client(endpoint: String) -> OpenVikingClient {
+        OpenVikingClient::new(
+            endpoint,
+            String::new(),
+            "default".into(),
+            "default".into(),
+            "hermes".into(),
+        )
+    }
+
+    fn item(key: &str, title: &str, preview: &str, body: &str) -> MirrorItem {
+        MirrorItem {
+            key: key.into(),
+            title: title.into(),
+            preview: preview.into(),
+            body: body.into(),
+        }
+    }
+
+    fn items() -> Vec<MirrorItem> {
+        vec![
+            item(
+                "food-preferences",
+                "Food preferences",
+                "Avoid gluten and cilantro; favourites are steamed fish and tomato egg stir-fry.",
+                "# Food preferences\n\nThe family avoids gluten: no wheat noodles, bread or seitan.\n\nNobody likes cilantro.",
+            ),
+            item("chengdu-trip", "", "", "Chengdu trip — Apr 12 to 16."),
+        ]
+    }
+
+    // ── pure pieces ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn a_key_becomes_a_safe_directory_name() {
+        assert_eq!(path_segment("food-preferences"), "food-preferences");
+        assert_eq!(path_segment("Gene_Report.v2"), "Gene_Report.v2");
+        // a changed key carries a tail so `a/b` and `a-b` never collide
+        let slashed = path_segment("diary/2026-09-17/lunch");
+        assert!(slashed.starts_with("diary-2026-09-17-lunch-"), "{slashed}");
+        assert_eq!(slashed.len(), "diary-2026-09-17-lunch-".len() + 4);
+        assert_ne!(path_segment("a/b"), path_segment("a-b"));
+        // a leading dot would name a hidden sidecar
+        assert!(!path_segment(".hidden").starts_with('.'));
+        // nothing usable → a hashed name, never empty
+        assert!(path_segment("///").starts_with("item-"));
+        assert!(path_segment("").starts_with("item-"));
+        // bounded
+        assert!(path_segment(&"k".repeat(500)).len() <= SEGMENT_MAX_CHARS + 5);
+    }
+
+    #[test]
+    fn layers_come_from_title_preview_and_body() {
+        let it = &items()[0];
+        assert_eq!(
+            abstract_text(it),
+            "Food preferences: Avoid gluten and cilantro; favourites are steamed fish and tomato egg stir-fry."
+        );
+        assert!(overview_text(it).starts_with("# Food preferences\n\nAvoid gluten"));
+        assert!(content_text(it)
+            .starts_with("# Food preferences\n\n# Food preferences\n\nThe family avoids"));
+        // no title → the key heads every layer; no preview → the body's first paragraph
+        let bare = &items()[1];
+        assert_eq!(
+            abstract_text(bare),
+            "chengdu-trip: Chengdu trip — Apr 12 to 16."
+        );
+        assert_eq!(
+            overview_text(bare),
+            "# chengdu-trip\n\nChengdu trip — Apr 12 to 16."
+        );
+        assert_eq!(
+            content_text(bare),
+            "# chengdu-trip\n\nChengdu trip — Apr 12 to 16."
+        );
+        // an empty item still has a heading
+        let empty = item("k", "", "", "");
+        assert_eq!(abstract_text(&empty), "k");
+    }
+
+    #[test]
+    fn layers_respect_openvikings_size_limits() {
+        let long = item("k", "T", "", &"word ".repeat(3000));
+        assert!(abstract_text(&long).chars().count() <= ABSTRACT_MAX_CHARS);
+        assert!(abstract_text(&long).ends_with('…'));
+        assert!(overview_text(&long).chars().count() <= OVERVIEW_MAX_CHARS);
+        assert!(
+            content_text(&long).len() > OVERVIEW_MAX_CHARS,
+            "the body is never cut"
+        );
+        // multi-byte safe
+        let cjk = item("k", "偏好", "", &"家庭饮食偏好。".repeat(200));
+        assert!(abstract_text(&cjk).chars().count() <= ABSTRACT_MAX_CHARS);
+    }
+
+    #[test]
+    fn content_hash_tracks_every_layer() {
+        let base = items()[0].clone();
+        let mut changed = base.clone();
+        changed.preview.push('!');
+        assert_ne!(base.content_hash(), changed.content_hash());
+        assert_eq!(base.content_hash(), items()[0].content_hash());
+        assert_eq!(base.content_hash().len(), 16);
+    }
+
+    #[test]
+    fn manifest_rows_parse_both_layouts() {
+        assert_eq!(
+            parse_row("family\tfood-preferences\tabcd"),
+            ManifestRow::Item {
+                namespace: "family".into(),
+                segment: "food-preferences".into(),
+                hash: "abcd".into()
+            }
+        );
+        assert_eq!(
+            parse_row("family\t0123456789abcdef"),
+            ManifestRow::Legacy {
+                namespace: "family".into(),
+                hash: "0123456789abcdef".into()
+            }
+        );
+        assert!(matches!(parse_row("garbage"), ManifestRow::Other(_)));
+    }
+
+    #[test]
+    fn the_manifest_path_never_resolves_against_the_working_directory() {
+        use std::path::{Path, PathBuf};
+        let temp = Path::new("/tmp");
+        // An absent HOME can still resolve through the account database.
+        assert_eq!(
+            ingest_manifest_path(None, Some(Path::new("/home/gem")), temp),
+            PathBuf::from("/home/gem/.agentkeys/ov-ingested.txt")
+        );
+        assert_eq!(
+            ingest_manifest_path(Some(" /var/ov.txt "), Some(Path::new("/home/gem")), temp),
+            PathBuf::from("/var/ov.txt"),
+            "the explicit override wins"
+        );
+        // No usable home (none, or relative like the old "." fallback) → the
+        // temp dir, never a path the cwd decides.
+        for home in [None, Some(Path::new(".")), Some(Path::new("rel/home"))] {
+            assert_eq!(
+                ingest_manifest_path(Some("  "), home, temp),
+                PathBuf::from("/tmp/agentkeys/ov-ingested.txt"),
+                "{home:?}"
+            );
+        }
+    }
+
+    /// The environment wrapper resolves an absolute path without HOME.
+    #[test]
+    fn a_home_less_process_resolves_an_absolute_manifest() {
+        const PROBE: &str = "AGENTKEYS_OV_MANIFEST_PROBE";
+        if std::env::var_os(PROBE).is_some() {
+            println!("<<{}>>", ingest_manifest_from_env().display());
+            return;
+        }
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tests::a_home_less_process_resolves_an_absolute_manifest",
+                "--nocapture",
+            ])
+            .env_remove("HOME")
+            .env_remove("AGENTKEYS_OV_INGEST_MANIFEST")
+            .env(PROBE, "1")
+            .output()
+            .expect("re-run this test binary");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let path = stdout
+            .split_once("<<")
+            .and_then(|(_, rest)| rest.split_once(">>"))
+            .map(|(path, _)| std::path::PathBuf::from(path))
+            .unwrap_or_else(|| panic!("the child printed no path: {stdout}"));
+        assert!(path.is_absolute(), "{path:?}");
+        assert!(path.ends_with("ov-ingested.txt"), "{path:?}");
+    }
+
+    // ── the engine stub ──────────────────────────────────────────────────────
+
+    /// What the stub records: `(method, uri, mode-or-recursive)`.
+    type Log = std::sync::Arc<std::sync::Mutex<Vec<(String, String, String)>>>;
+
+    /// Records writes and deletes; `write_status`/`write_body` answer every
+    /// write, `delete_status` every delete. `exists_on_create` makes a `create`
+    /// on an already-written URI answer 409 like the real engine.
+    async fn spawn_stub(
+        write_status: u16,
+        write_body: &'static str,
+        delete_status: u16,
+        exists_on_create: bool,
+    ) -> (String, Log) {
+        spawn_stub_slowing(
+            write_status,
+            write_body,
+            delete_status,
+            exists_on_create,
+            None,
+        )
+        .await
+    }
+
+    /// [`spawn_stub`], with every write under `slow.0` answered after `slow.1`.
+    async fn spawn_stub_slowing(
+        write_status: u16,
+        write_body: &'static str,
+        delete_status: u16,
+        exists_on_create: bool,
+        slow: Option<(&'static str, std::time::Duration)>,
+    ) -> (String, Log) {
+        use axum::extract::Query;
+        use axum::http::StatusCode;
+        let log: Log = Default::default();
+        let (lw, ld, lr) = (log.clone(), log.clone(), log.clone());
+        let app = Router::new()
+            .route(
+                "/api/v1/content/write",
+                post(move |Json(body): Json<serde_json::Value>| {
+                    let log = lw.clone();
+                    async move {
+                        let uri = body["uri"].as_str().unwrap_or_default().to_string();
+                        let mode = body["mode"].as_str().unwrap_or_default().to_string();
+                        if let Some((prefix, delay)) = slow {
+                            if uri.starts_with(prefix) {
+                                tokio::time::sleep(delay).await;
+                            }
+                        }
+                        let seen_before = log
+                            .lock()
+                            .unwrap()
+                            .iter()
+                            .any(|(m, u, _)| m == "write" && *u == uri);
+                        log.lock().unwrap().push(("write".into(), uri, mode.clone()));
+                        if exists_on_create && mode == "create" && seen_before {
+                            return (
+                                StatusCode::CONFLICT,
+                                r#"{"status":"error","error":{"code":"ALREADY_EXISTS","message":"already exists"}}"#.to_string(),
+                            );
+                        }
+                        (
+                            StatusCode::from_u16(write_status).unwrap(),
+                            write_body.to_string(),
+                        )
+                    }
+                }),
+            )
+            .route(
+                "/api/v1/fs",
+                axum::routing::delete(
+                    move |Query(q): Query<std::collections::HashMap<String, String>>| {
+                        let log = ld.clone();
+                        async move {
+                            log.lock().unwrap().push((
+                                "delete".into(),
+                                q.get("uri").cloned().unwrap_or_default(),
+                                q.get("recursive").cloned().unwrap_or_default(),
+                            ));
+                            (
+                                StatusCode::from_u16(delete_status).unwrap(),
+                                "{}".to_string(),
+                            )
+                        }
+                    },
+                ),
+            )
+            .route(
+                "/api/v1/content/read",
+                axum::routing::get(
+                    move |Query(q): Query<std::collections::HashMap<String, String>>| {
+                        let log = lr.clone();
+                        async move {
+                            // The placeholder race: a sidecar reads back only
+                            // once its directory's body was written (the real
+                            // engine materializes it a moment after).
+                            let uri = q.get("uri").cloned().unwrap_or_default();
+                            let dir = uri
+                                .rsplit_once('/')
+                                .map(|(d, _)| d.to_string())
+                                .unwrap_or_default();
+                            let body_written = log.lock().unwrap().iter().any(|(m, u, _)| {
+                                m == "write"
+                                    && u.starts_with(&format!("{dir}/"))
+                                    && !u.rsplit('/').next().unwrap_or("").starts_with('.')
+                            });
+                            log.lock().unwrap().push(("read".into(), uri, String::new()));
+                            if body_written {
+                                (
+                                    StatusCode::OK,
+                                    r#"{"status":"ok","result":"placeholder"}"#.to_string(),
+                                )
+                            } else {
+                                (
+                                    StatusCode::NOT_FOUND,
+                                    r#"{"status":"error","error":{"code":"NOT_FOUND","message":"no such file"}}"#.to_string(),
+                                )
+                            }
+                        }
+                    },
+                ),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (format!("http://{addr}"), log)
+    }
+
+    fn writes(log: &Log) -> Vec<(String, String)> {
+        log.lock()
+            .unwrap()
+            .iter()
+            .filter(|(m, _, _)| m == "write")
+            .map(|(_, u, mode)| (u.clone(), mode.clone()))
+            .collect()
+    }
+
+    fn deletes(log: &Log) -> Vec<(String, String)> {
+        log.lock()
+            .unwrap()
+            .iter()
+            .filter(|(m, _, _)| m == "delete")
+            .map(|(_, u, r)| (u.clone(), r.clone()))
+            .collect()
+    }
+
+    fn manifest_lines(path: &std::path::Path) -> Vec<String> {
+        std::fs::read_to_string(path)
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_sidecar_is_written_only_after_its_placeholder_reads_back() {
+        let (endpoint, log) = spawn_stub(200, "{}", 200, false).await;
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("ov-ingested.txt");
+        let c = client(endpoint);
+        let stats = c.reconcile_items("family", &items()[..1], &manifest).await;
+        assert_eq!((stats.mirrored, stats.write_failed), (1, 0));
+        let ops: Vec<(String, String)> = log
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(m, u, _)| (m.clone(), u.clone()))
+            .collect();
+        // body write, then a successful read of each sidecar BEFORE its replace
+        let body_at = ops
+            .iter()
+            .position(|(m, u)| m == "write" && u.ends_with("/food-preferences.md"))
+            .unwrap();
+        for name in [".abstract.md", ".overview.md"] {
+            let read_at = ops
+                .iter()
+                .position(|(m, u)| m == "read" && u.ends_with(name))
+                .unwrap();
+            let write_at = ops
+                .iter()
+                .position(|(m, u)| m == "write" && u.ends_with(name))
+                .unwrap();
+            assert!(body_at < read_at && read_at < write_at, "{name}: {ops:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_item_is_three_files_under_its_resource_directory_then_a_noop() {
+        let (endpoint, log) = spawn_stub(200, "{}", 200, false).await;
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("ov-ingested.txt");
+        let c = client(endpoint);
+        let stats = c.reconcile_items("family", &items(), &manifest).await;
+        assert_eq!(
+            (stats.mirrored, stats.write_failed, stats.deleted),
+            (2, 0, 0)
+        );
+        let w = writes(&log);
+        assert_eq!(w.len(), 6, "body + two sidecars per item");
+        assert_eq!(
+            w[0],
+            (
+                "viking://resources/family/food-preferences/food-preferences.md".to_string(),
+                "create".to_string()
+            )
+        );
+        assert_eq!(
+            w[1],
+            (
+                "viking://resources/family/food-preferences/.abstract.md".to_string(),
+                "replace".to_string()
+            )
+        );
+        assert_eq!(
+            w[2],
+            (
+                "viking://resources/family/food-preferences/.overview.md".to_string(),
+                "replace".to_string()
+            )
+        );
+        assert!(w[3]
+            .0
+            .starts_with("viking://resources/family/chengdu-trip/"));
+        let rows = manifest_lines(&manifest);
+        assert_eq!(rows.len(), 2);
+        assert!(
+            rows.iter()
+                .any(|r| r.starts_with("family\tfood-preferences\t")),
+            "{rows:?}"
+        );
+        // second pass: nothing to do, nothing sent
+        let again = c.reconcile_items("family", &items(), &manifest).await;
+        assert!(again.is_noop());
+        assert_eq!(writes(&log).len(), 6);
+        assert!(deletes(&log).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_changed_item_is_rewritten_and_a_removed_one_is_deleted_recursively() {
+        let (endpoint, log) = spawn_stub(200, "{}", 200, false).await;
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("ov-ingested.txt");
+        let c = client(endpoint);
+        c.reconcile_items("family", &items(), &manifest).await;
+        let mut next = items();
+        next[0].body.push_str("\n\nGrandma cannot have shellfish.");
+        next.truncate(1);
+        let stats = c.reconcile_items("family", &next, &manifest).await;
+        assert_eq!(
+            (stats.mirrored, stats.deleted, stats.delete_failed),
+            (1, 1, 0)
+        );
+        let d = deletes(&log);
+        assert_eq!(
+            d,
+            vec![(
+                "viking://resources/family/chengdu-trip".to_string(),
+                "true".to_string()
+            )]
+        );
+        assert_eq!(
+            writes(&log).len(),
+            9,
+            "the changed item rewrote its three files"
+        );
+        let rows = manifest_lines(&manifest);
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].starts_with("family\tfood-preferences\t"));
+        assert!(rows[0].ends_with(&next[0].content_hash()));
+    }
+
+    #[tokio::test]
+    async fn a_revoked_namespace_reconciles_onto_empty_and_keeps_other_namespaces() {
+        let (endpoint, log) = spawn_stub(200, "{}", 200, false).await;
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("ov-ingested.txt");
+        let c = client(endpoint);
+        c.reconcile_items("family", &items(), &manifest).await;
+        c.reconcile_items("health", &items()[..1], &manifest).await;
+        let stats = c.reconcile_items("family", &[], &manifest).await;
+        assert_eq!((stats.mirrored, stats.deleted), (0, 2));
+        let d = deletes(&log);
+        assert_eq!(d.len(), 2);
+        assert!(d
+            .iter()
+            .all(|(u, r)| u.starts_with("viking://resources/family/") && r == "true"));
+        let rows = manifest_lines(&manifest);
+        assert_eq!(
+            rows.len(),
+            1,
+            "health's row survives family's revocation: {rows:?}"
+        );
+        assert!(rows[0].starts_with("health\t"));
+    }
+
+    #[tokio::test]
+    async fn legacy_memory_files_are_migrated_away() {
+        let (endpoint, log) = spawn_stub(200, "{}", 200, false).await;
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("ov-ingested.txt");
+        std::fs::write(
+            &manifest,
+            "family\t0123456789abcdef\nwork\tfedcba9876543210\n",
+        )
+        .unwrap();
+        let c = client(endpoint);
+        let stats = c.reconcile_items("family", &items()[..1], &manifest).await;
+        assert_eq!((stats.mirrored, stats.deleted), (1, 1));
+        let d = deletes(&log);
+        assert_eq!(
+            d,
+            vec![(
+                "viking://user/default/memories/family/mem_0123456789abcdef.md".to_string(),
+                String::new()
+            )]
+        );
+        let rows = manifest_lines(&manifest);
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        assert!(
+            rows.contains(&"work\tfedcba9876543210".to_string()),
+            "another namespace's legacy row waits for its own pass"
+        );
+        assert!(rows
+            .iter()
+            .any(|r| r.starts_with("family\tfood-preferences\t")));
+    }
+
+    #[tokio::test]
+    async fn write_failures_are_counted_and_retried_next_pass() {
+        let (endpoint, log) = spawn_stub(500, "boom", 200, false).await;
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("ov-ingested.txt");
+        let c = client(endpoint);
+        let stats = c.reconcile_items("family", &items(), &manifest).await;
+        assert_eq!((stats.mirrored, stats.write_failed), (0, 2));
+        let reason = stats
+            .first_error
+            .clone()
+            .expect("the failure names its reason");
+        assert!(
+            reason.contains("write viking://resources/family/food-preferences")
+                && reason.contains("boom"),
+            "{reason}"
+        );
+        assert!(
+            manifest_lines(&manifest).is_empty(),
+            "nothing recorded for a failed item"
+        );
+        let again = c.reconcile_items("family", &items(), &manifest).await;
+        assert_eq!(again.write_failed, 2);
+        assert_eq!(
+            writes(&log).len(),
+            4,
+            "the body write fails first each time, so one write per item per pass"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_existing_body_takes_replace_and_a_failed_delete_keeps_the_row() {
+        let (endpoint, log) = spawn_stub(200, "{}", 500, true).await;
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("ov-ingested.txt");
+        let c = client(endpoint);
+        c.reconcile_items("family", &items()[..1], &manifest).await;
+        // manifest lost (a fresh sandbox restored without it): the body exists
+        // engine-side, `create` answers 409, `replace` completes the item
+        std::fs::remove_file(&manifest).unwrap();
+        let stats = c.reconcile_items("family", &items()[..1], &manifest).await;
+        assert_eq!((stats.mirrored, stats.write_failed), (1, 0));
+        let w = writes(&log);
+        let modes: Vec<&str> = w
+            .iter()
+            .filter(|(u, _)| u.ends_with("/food-preferences.md"))
+            .map(|(_, m)| m.as_str())
+            .collect();
+        assert_eq!(modes, vec!["create", "create", "replace"]);
+        // a delete the engine refuses keeps the row for the next pass
+        let stats = c.reconcile_items("family", &[], &manifest).await;
+        assert_eq!((stats.deleted, stats.delete_failed), (0, 1));
+        assert_eq!(manifest_lines(&manifest).len(), 1);
+    }
+
+    #[tokio::test]
+    async fn an_error_envelope_on_200_is_an_error() {
+        let (endpoint, _log) = spawn_stub(200, r#"{"status":"error","error":{"code":"INVALID_ARGUMENT","message":"unsupported write mode"}}"#, 200, false).await;
+        let c = client(endpoint);
+        let err = c
+            .write_content("viking://resources/x/y/y.md", "t", "overwrite")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, OpenVikingError::Http { status: 200, .. }));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_manifest_that_cannot_persist_is_reported_with_its_cost() {
+        let (endpoint, log) = spawn_stub(200, "{}", 200, false).await;
+        let dir = tempfile::tempdir().unwrap();
+        // The pod's shape — the read answers NotFound, the parent cannot be
+        // created (`/.agentkeys` for `gem`) — without relying on permissions
+        // (CI may run as root): the parent is a dangling symlink.
+        let parent = dir.path().join("dangling");
+        std::os::unix::fs::symlink(dir.path().join("gone/x"), &parent).unwrap();
+        let manifest = parent.join("ov-ingested.txt");
+        let c = client(endpoint);
+        let first = c
+            .reconcile_items("household", &items()[..1], &manifest)
+            .await;
+        assert_eq!(first.mirrored, 1);
+        let reason = first
+            .manifest_error
+            .clone()
+            .expect("a manifest that cannot persist is reported");
+        assert!(reason.contains("ov-ingested.txt"), "{reason}");
+        assert!(!first.is_noop());
+        let second = c
+            .reconcile_items("household", &items()[..1], &manifest)
+            .await;
+        assert_eq!(
+            (second.mirrored, writes(&log).len()),
+            (1, 6),
+            "unrecorded, the item is written again — three more engine writes"
+        );
+        assert!(second.manifest_error.is_some());
+        // A namespace with nothing recorded and nothing to record never
+        // touches the file, so it never fails on it.
+        assert!(c
+            .reconcile_items("personal", &[], &manifest)
+            .await
+            .is_noop());
+    }
+
+    /// #694 runs namespaces concurrently. Each swap re-reads the file under
+    /// the lock, so a namespace that read the manifest before its (slow)
+    /// writes never drops the rows another namespace recorded meanwhile —
+    /// a dropped row is a re-embed on the next pass.
+    #[tokio::test]
+    async fn concurrent_namespaces_never_drop_each_others_rows() {
+        let (endpoint, _log) = spawn_stub_slowing(
+            200,
+            "{}",
+            200,
+            false,
+            Some((
+                "viking://resources/slow/",
+                std::time::Duration::from_millis(300),
+            )),
+        )
+        .await;
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("ov-ingested.txt");
+        let c = client(endpoint);
+        let all = items();
+        let (slow_items, fast_items) = all.split_at(1);
+        let (slow, fast) = tokio::join!(c.reconcile_items("slow", slow_items, &manifest), async {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            c.reconcile_items("fast", fast_items, &manifest).await
+        });
+        assert_eq!((slow.mirrored, fast.mirrored), (1, 1));
+        let rows = manifest_lines(&manifest);
+        assert!(rows.iter().any(|r| r.starts_with("slow\t")), "{rows:?}");
+        assert!(rows.iter().any(|r| r.starts_with("fast\t")), "{rows:?}");
+        assert!(c
+            .reconcile_items("slow", slow_items, &manifest)
+            .await
+            .is_noop());
+        assert!(c
+            .reconcile_items("fast", fast_items, &manifest)
+            .await
+            .is_noop());
+    }
+
+    /// A converged pass does no manifest I/O: no rewrite, so the file keeps
+    /// its inode (a write is tmp + rename).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_converged_pass_leaves_the_manifest_untouched() {
+        use std::os::unix::fs::MetadataExt;
+        let (endpoint, _log) = spawn_stub(200, "{}", 200, false).await;
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("ov-ingested.txt");
+        let c = client(endpoint);
+        c.reconcile_items("family", &items(), &manifest).await;
+        let inode = std::fs::metadata(&manifest).unwrap().ino();
+        assert!(c
+            .reconcile_items("family", &items(), &manifest)
+            .await
+            .is_noop());
+        assert!(c.reconcile_items("work", &[], &manifest).await.is_noop());
+        assert_eq!(std::fs::metadata(&manifest).unwrap().ino(), inode);
+        assert!(
+            !dir.path().join("ov-ingested.txt.tmp").exists(),
+            "no temp file left behind"
+        );
+    }
+}

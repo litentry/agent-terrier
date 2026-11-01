@@ -1,0 +1,8 @@
+[package]
+license.workspace = true
+name = "agentkeys-memory-engine"
+version = "0.1.0"
+edition = "2021"
+description = "Deterministic memory selection with a shared engine trait and registry."
+
+[dependencies]

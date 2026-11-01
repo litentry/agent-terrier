@@ -1,0 +1,186 @@
+//! Operational `/readyz` handler that aggregates plugin Readiness +
+//! Tier-2 reachability state per plan §7.
+//!
+//! Responses:
+//! - 503 with `{"status":"unready", "degraded":false, "checks":[...], "ready":[...]}`
+//!   if any plug-in or Tier-2 check is `Unready` (or Tier-2 still-pending
+//!   for a feature-gated check that's enabled).
+//! - 200 with `{"status":"degraded", "degraded":true, "checks":[...], "ready":[...]}`
+//!   if any check is `Degraded` (the broker is still serving but a
+//!   dependency is impaired).
+//! - 200 with `{"status":"ready", "degraded":false, "checks":[], "ready":[...]}`
+//!   if every check is `Ready`. The body is always self-describing —
+//!   never an empty `{}` — so an operator running `curl … | jq` sees an
+//!   explicit verdict instead of having to read the HTTP status code.
+//!
+//! Each check entry links to the public service inspection guide.
+
+use std::sync::atomic::Ordering;
+
+use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
+use serde_json::{json, Value};
+
+use crate::plugins::Readiness;
+use crate::state::SharedState;
+
+/// Liveness probe — returns 200 unless the process is panicking/exiting.
+/// Decoupled from operational state so a failed `/readyz` doesn't fail
+/// liveness probes too (causing pod restarts that mask the real issue).
+pub async fn healthz() -> impl IntoResponse {
+    (StatusCode::OK, "ok")
+}
+
+/// Readiness probe — aggregates every plug-in's `Readiness` + Tier-2
+/// reachability flags. Returns the worst-case status.
+pub async fn readyz(State(state): State<SharedState>) -> impl IntoResponse {
+    // Plug-in readiness (sync — each plug-in's `ready()` is a fast probe).
+    let (overall_plugin_state, plugin_checks) = state.registry.aggregate_readiness();
+
+    // Tier-2 reachability flags (set by spawn_tier2_probes in main.rs).
+    let email_sender_ready = state.tier2.email_sender_ready.load(Ordering::Relaxed);
+    let evm_rpc_reachable = state.tier2.evm_rpc_reachable.load(Ordering::Relaxed);
+    let evm_fee_payer_funded = state.tier2.evm_fee_payer_funded.load(Ordering::Relaxed);
+
+    // Build the per-check JSON list. Plug-in readiness + Tier-2 flags
+    // both render with the same shape so monitoring tooling can iterate
+    // uniformly.
+    let mut checks: Vec<Value> = Vec::with_capacity(plugin_checks.len() + 4);
+    let mut ready_names: Vec<String> = Vec::new();
+    let mut degraded = false;
+    let mut unready = false;
+
+    for (name, r) in &plugin_checks {
+        let entry = readiness_to_json(name, r);
+        match r {
+            Readiness::Ready { .. } => {
+                ready_names.push(name.clone());
+            }
+            Readiness::Degraded { .. } => {
+                degraded = true;
+                checks.push(entry);
+            }
+            Readiness::Unready { .. } => {
+                unready = true;
+                checks.push(entry);
+            }
+        }
+    }
+
+    // Tier-2 email readiness probe — only reported when email-link auth is enabled.
+    if state.registry.auth.contains_key("email_link") {
+        if email_sender_ready {
+            ready_names.push("tier2/email".into());
+        } else {
+            unready = true;
+            checks.push(json!({
+                "name": "tier2/email",
+                "status": "unready",
+                "reason": "Email sender not ready since boot",
+                "docs": local_service_guide(),
+            }));
+        }
+    }
+
+    // Tier-2 EVM probes — only when EVM audit anchor is enabled.
+    if state
+        .registry
+        .audit
+        .iter()
+        .any(|a| a.name() == "evm_testnet")
+    {
+        if evm_rpc_reachable {
+            ready_names.push("tier2/evm_rpc".into());
+        } else {
+            unready = true;
+            checks.push(json!({
+                "name": "tier2/evm_rpc",
+                "status": "unready",
+                "reason": "EVM RPC eth_chainId probe has not succeeded since boot",
+                "docs": local_service_guide(),
+            }));
+        }
+        if evm_fee_payer_funded {
+            ready_names.push("tier2/evm_fee_payer".into());
+        } else {
+            unready = true;
+            checks.push(json!({
+                "name": "tier2/evm_fee_payer",
+                "status": "unready",
+                "reason": "EVM fee-payer balance below BROKER_EVM_FEE_PAYER_MIN_BALANCE",
+                "docs": local_service_guide(),
+            }));
+        }
+    }
+
+    let _ = overall_plugin_state; // captured implicitly through degraded/unready
+
+    // The accept/scope sponsor-submitter EOA (the bundler's handleOps
+    // beneficiary) — a PUBLIC address, surfaced so operators + the harness can
+    // discover and fund it without host access (#423: on the TEST stack the
+    // key is host-auto-generated, so nothing off-host knew the address to
+    // fund, and an unfunded submitter fails every handleOps broadcast with
+    // insufficient-funds). Null on hosts with no sponsor key provisioned.
+    let sponsor_signer = crate::handlers::accept::load_accept_config()
+        .map(|(cfg, _)| Value::String(format!("0x{}", hex::encode(cfg.broker_signer))))
+        .unwrap_or(Value::Null);
+
+    if unready {
+        let body = json!({
+            "status": "unready",
+            "degraded": false,
+            "checks": checks,
+            "ready": ready_names,
+            "sponsor_signer": sponsor_signer,
+        });
+        (StatusCode::SERVICE_UNAVAILABLE, Json(body)).into_response()
+    } else if degraded {
+        let body = json!({
+            "status": "degraded",
+            "degraded": true,
+            "checks": checks,
+            "ready": ready_names,
+            "sponsor_signer": sponsor_signer,
+        });
+        (StatusCode::OK, Json(body)).into_response()
+    } else {
+        // Self-describing all-green body. Earlier versions returned `{}`
+        // (Designer review #status-shape) but operators piping the
+        // output through `jq` saw nothing and assumed the endpoint was
+        // broken — explicit `status: "ready"` removes that confusion.
+        let body = json!({
+            "status": "ready",
+            "degraded": false,
+            "checks": [],
+            "ready": ready_names,
+            "sponsor_signer": sponsor_signer,
+        });
+        (StatusCode::OK, Json(body)).into_response()
+    }
+}
+
+fn readiness_to_json(name: &str, r: &Readiness) -> Value {
+    match r {
+        Readiness::Ready { detail } => json!({
+            "name": name,
+            "status": "ready",
+            "detail": detail,
+            "docs": local_service_guide(),
+        }),
+        Readiness::Degraded { reason } => json!({
+            "name": name,
+            "status": "degraded",
+            "reason": reason,
+            "docs": local_service_guide(),
+        }),
+        Readiness::Unready { reason } => json!({
+            "name": name,
+            "status": "unready",
+            "reason": reason,
+            "docs": local_service_guide(),
+        }),
+    }
+}
+
+fn local_service_guide() -> &'static str {
+    "https://github.com/litentry/agent-terrier/blob/main/docs/wiki/local-services.md#inspect-and-stop"
+}

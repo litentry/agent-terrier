@@ -1,0 +1,730 @@
+//! Owner-authorized runtime updates preserve actor identity and on-chain grants.
+//! Runtime-home export/import is best effort; any loss of continuity is surfaced.
+//! Image status compares immutable image identities rather than mutable tags.
+
+use axum::extract::State;
+use axum::http::{HeaderMap, StatusCode};
+use axum::Json;
+use serde::{Deserialize, Serialize};
+
+use agentkeys_core::audit::{envelope_for, AuditOpKind, AuditResult, SandboxTeardownBody};
+
+use crate::handlers::accept::{aerr, bearer, eth_call, load_accept_config, norm_omni, selector};
+use crate::handlers::revoke::{parse_device_probe, DeviceProbe};
+use crate::state::SharedState;
+
+/// Ceiling for one exported runtime home (the JSON snapshot body, bytes).
+/// `DSH_HOME` is the profile patch + durable session JSONL + skills docs
+/// (32 KiB/skill cap at the bridge) — tens of KiB in practice; 32 MiB is
+/// generous headroom, and anything larger is refused LOUDLY rather than
+/// relayed through broker RAM unbounded (D2: the snapshot only ever lives in
+/// this request's memory, never at rest).
+const SESSION_SNAPSHOT_MAX_BYTES: usize = 32 * 1024 * 1024;
+
+/// How long the import phase retries against the REPLACEMENT instance before
+/// giving up (its daemon needs a few seconds after CreateSandbox returns).
+const IMPORT_RETRY_WINDOW_SECS: u64 = 60;
+const IMPORT_RETRY_INTERVAL_SECS: u64 = 5;
+
+// ─── wire types ──────────────────────────────────────────────────────────────
+
+/// `POST /v1/agent/update` body (J1_master-gated). One delegate per request —
+/// parent-control's "Update all" iterates client-side, so a slow create never
+/// holds N delegates' outcomes hostage to one HTTP response.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AgentUpdateRequest {
+    pub operator_omni: String,
+    pub device_key_hash: String,
+    /// Update even while the delegate's background jobs (#340) are running
+    /// (their output stream dies with the instance). Default: refuse loudly.
+    #[serde(default)]
+    pub force: bool,
+}
+
+/// One update outcome. `sandbox` mirrors the ceremony/resolve `"sandbox"`
+/// object (`{sandbox_id,status,error}`) so the daemon can refresh the
+/// manifest runtime the same way it does at spawn.
+#[derive(Debug, Serialize)]
+pub struct AgentUpdateResponse {
+    pub device_key_hash: String,
+    /// The instances this update tore down (normally exactly one).
+    pub old_sandbox_ids: Vec<String>,
+    pub sandbox: serde_json::Value,
+    pub session: SessionHandoff,
+}
+
+/// The runtime-home hand-off outcome — always present, never silent.
+#[derive(Debug, Serialize)]
+pub struct SessionHandoff {
+    pub migrated: bool,
+    pub detail: String,
+}
+
+pub use agentkeys_protocol::console::{
+    AgentImageStatusRequest as ImageStatusRequest, ApiDelegateImageStatus as DelegateImageStatus,
+    ApiImageStatus as ImageStatusResponse,
+};
+
+// ─── shared auth + chain probe ───────────────────────────────────────────────
+
+/// J1 session auth + operator match (the spawn/archive rule, minus the
+/// master-ACCOUNT resolution — an update performs no chain write, so a
+/// legacy-EOA master may still update). Returns the normalized session omni.
+pub(crate) fn auth_session(
+    state: &SharedState,
+    headers: &HeaderMap,
+    operator_omni: &str,
+) -> Result<String, (StatusCode, Json<serde_json::Value>)> {
+    let token = bearer(headers)?;
+    let claims = crate::jwt::verify::verify_session_jwt(
+        &state.session_keypair,
+        &state.config.oidc_issuer,
+        &token,
+    )
+    .map_err(|e| aerr(StatusCode::UNAUTHORIZED, format!("session jwt: {e}")))?;
+    if norm_omni(&claims.agentkeys.omni_account) != norm_omni(operator_omni) {
+        return Err(aerr(StatusCode::FORBIDDEN, "operator_mismatch"));
+    }
+    Ok(norm_omni(&claims.agentkeys.omni_account))
+}
+
+/// Chain-probe one delegate binding and require: registered, not revoked,
+/// TIER_AGENT (2), owned by `session_omni`. Returns the probe (its
+/// `actor_omni` is the chain-read identity the re-create is labeled with).
+pub(crate) async fn probe_owned_delegate(
+    state: &SharedState,
+    rpc_url: &str,
+    registry: &[u8; 20],
+    session_omni: &str,
+    device_key_hash: &str,
+) -> Result<DeviceProbe, String> {
+    let hash: [u8; 32] = hex::decode(norm_omni(device_key_hash))
+        .ok()
+        .and_then(|b| b.try_into().ok())
+        .ok_or("device_key_hash must be 32 bytes hex")?;
+    let data = format!("0x{}{}", selector("getDevice(bytes32)"), hex::encode(hash));
+    let raw = eth_call(&state.http, rpc_url, registry, &data).await?;
+    let probe = parse_device_probe(&raw)?;
+    if !probe.is_registered() || probe.revoked {
+        return Err("binding is revoked or was never registered".into());
+    }
+    let operator_bytes: [u8; 32] = hex::decode(session_omni)
+        .ok()
+        .and_then(|b| b.try_into().ok())
+        .ok_or("session omni must be 32 bytes")?;
+    if probe.operator_omni != operator_bytes {
+        return Err("the binding belongs to a different operator".into());
+    }
+    if probe.tier != 2 {
+        return Err(format!(
+            "update is for DELEGATES (TIER_AGENT) — this binding is tier {}",
+            probe.tier
+        ));
+    }
+    Ok(probe)
+}
+
+// ─── the in-sandbox management client (#577 hand-off) ────────────────────────
+
+/// One bearer-gated call to an instance's in-sandbox management surface,
+/// through the backend's routing headers.
+#[allow(clippy::too_many_arguments)] // thin HTTP shim — a param per wire fact
+pub(crate) async fn mgmt_request(
+    http: &reqwest::Client,
+    base: &str,
+    headers: &[(String, String)],
+    token: &str,
+    method: reqwest::Method,
+    path: &str,
+    body: Option<Vec<u8>>,
+    timeout_secs: u64,
+) -> Result<Vec<u8>, String> {
+    let url = format!("{}{}", base.trim_end_matches('/'), path);
+    let mut req = http
+        .request(method, &url)
+        .bearer_auth(token)
+        .timeout(std::time::Duration::from_secs(timeout_secs));
+    for (k, v) in headers {
+        req = req.header(k, v);
+    }
+    if let Some(b) = body {
+        req = req
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(b);
+    }
+    let resp = req.send().await.map_err(|e| format!("{path}: {e}"))?;
+    let status = resp.status();
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| format!("{path} body: {e}"))?
+        .to_vec();
+    if !status.is_success() {
+        let detail = String::from_utf8_lossy(&bytes);
+        // char-boundary-safe truncation — byte slicing would panic mid-UTF-8.
+        let detail: String = detail.trim().chars().take(300).collect();
+        return Err(format!(
+            "{path} HTTP {status}{}{detail}",
+            if detail.is_empty() { "" } else { ": " },
+        ));
+    }
+    Ok(bytes)
+}
+
+/// `jobs_running` per the OLD instance's management status (`null` inside the
+/// JSON = the in-sandbox daemon couldn't reach its bridge — treated as "not
+/// provably running", surfaced in the detail).
+fn parse_jobs_running(status_body: &[u8]) -> Option<u64> {
+    let v: serde_json::Value = serde_json::from_slice(status_body).ok()?;
+    v.get("jobs").and_then(|j| j.as_u64())
+}
+
+/// The live agent identity one instance's bridge `/healthz` reports —
+/// deliberately the RUNNING truth (the ACP handshake's agent name/version),
+/// not the image tag's claim.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct AgentHealth {
+    engine: Option<String>,
+    version: Option<String>,
+    model: Option<String>,
+}
+
+/// Parse the bridge `/healthz` body. The bridge answers 200 when the ACP
+/// agent is alive and 503 while it (re)starts — BOTH carry the same body
+/// shape, so the caller parses regardless of status. Placeholder values the
+/// bridge uses before the handshake (`"?"`) normalize to `None`.
+fn parse_agent_health(body: &[u8]) -> AgentHealth {
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return AgentHealth::default();
+    };
+    let field = |k: &str| {
+        v.get(k)
+            .and_then(|x| x.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty() && *s != "?" && *s != "(unset)")
+            .map(str::to_string)
+    };
+    AgentHealth {
+        engine: field("engine"),
+        version: field("version"),
+        model: field("model"),
+    }
+}
+
+/// GET one instance's bridge `/healthz` through the gateway routing headers.
+/// Public liveness check, bounded by a short timeout, and
+/// best-effort: any transport failure yields empty fields, never an error —
+/// a stale/booting instance's row still renders.
+async fn fetch_agent_health(
+    http: &reqwest::Client,
+    base: &str,
+    headers: &[(String, String)],
+) -> AgentHealth {
+    let url = format!("{}/healthz", base.trim_end_matches('/'));
+    let mut req = http.get(&url).timeout(std::time::Duration::from_secs(8));
+    for (k, v) in headers {
+        req = req.header(k, v);
+    }
+    match req.send().await {
+        Ok(resp) => match resp.bytes().await {
+            Ok(bytes) => parse_agent_health(&bytes),
+            Err(_) => AgentHealth::default(),
+        },
+        Err(_) => AgentHealth::default(),
+    }
+}
+
+// ─── POST /v1/agent/update ───────────────────────────────────────────────────
+
+pub async fn agent_update(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(req): Json<AgentUpdateRequest>,
+) -> Result<Json<AgentUpdateResponse>, (StatusCode, Json<serde_json::Value>)> {
+    let session_omni = auth_session(&state, &headers, &req.operator_omni)?;
+    let Some(backend) = state.sandbox.clone() else {
+        return Err(aerr(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "no local sandbox lifecycle configured; set AGENT_TERRIER_SANDBOX_IMAGE",
+        ));
+    };
+    let (cfg, _broker_sk) =
+        load_accept_config().map_err(|e| aerr(StatusCode::SERVICE_UNAVAILABLE, e))?;
+    let probe = probe_owned_delegate(
+        &state,
+        &cfg.rpc_url,
+        &cfg.registry,
+        &session_omni,
+        &req.device_key_hash,
+    )
+    .await
+    .map_err(|e| aerr(StatusCode::CONFLICT, e))?;
+    let actor_omni = format!("0x{}", hex::encode(probe.actor_omni));
+    let operator_omni_0x = format!("0x{session_omni}");
+
+    // Pre-flight BEFORE any kill: a delegate without a durable spawn context
+    // (#546) would re-create chat-silent — refuse up front, never mid-flight.
+    match state.spawn_context_store.get(&req.device_key_hash) {
+        Ok(Some(ctx)) if ctx.has_valid_device_address() => {}
+        Ok(_) => {
+            return Err(aerr(
+                StatusCode::CONFLICT,
+                "no durable spawn context for this delegate (pre-#546 spawn?) — an in-place \
+                 update would re-create it chat-silent; archive + respawn instead",
+            ));
+        }
+        Err(e) => {
+            return Err(aerr(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("spawn-context read failed: {e}"),
+            ));
+        }
+    }
+
+    let session_bytes32: [u8; 32] = hex::decode(&session_omni)
+        .ok()
+        .and_then(|b| b.try_into().ok())
+        .unwrap_or([0u8; 32]);
+    // The rotate kills the old instance before it creates the new one, so it
+    // must finish even when the request is gone (nginx's 300 s cut, a closed
+    // console tab) — the create, the adopt and the home import run on their
+    // own task.
+    let rotate_state = state.clone();
+    let device_key_hash = req.device_key_hash.clone();
+    let force = req.force;
+    let rotated = crate::sandbox_backend::run_detached(async move {
+        rotate_delegate_runtime(
+            &rotate_state,
+            &backend,
+            &device_key_hash,
+            &actor_omni,
+            &operator_omni_0x,
+            session_bytes32,
+            force,
+            "update",
+        )
+        .await
+    })
+    .await
+    .map_err(|e| aerr(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")))?;
+    match rotated {
+        Ok(outcome) => Ok(Json(AgentUpdateResponse {
+            device_key_hash: req.device_key_hash,
+            old_sandbox_ids: outcome.old_sandbox_ids,
+            sandbox: outcome.sandbox_json,
+            session: outcome.session,
+        })),
+        Err(RotateError::JobsRunning(n)) => Err((
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": "jobs_running",
+                "jobs": n,
+                "message": format!(
+                    "{n} background job(s) are running in this delegate's sandbox — \
+                     updating now kills them and their output stream. Wait for them \
+                     to finish, or pass force=true to update anyway."
+                ),
+            })),
+        )),
+        Err(RotateError::Failed(e)) => Err(aerr(StatusCode::BAD_GATEWAY, e)),
+    }
+}
+
+// ─── the shared rotate core (#577 update · #594 lease sweeper) ───────────────
+
+/// One completed rotate: what was killed, the ensure outcome, the hand-off.
+pub(crate) struct RotateOutcome {
+    pub old_sandbox_ids: Vec<String>,
+    pub sandbox_json: serde_json::Value,
+    pub session: SessionHandoff,
+}
+
+pub(crate) enum RotateError {
+    /// #340 background jobs are live and `force` was not set — nothing was
+    /// touched. The handler maps this to its 409; the sweeper retries next
+    /// sweep (until its force margin).
+    JobsRunning(u64),
+    /// Failed before anything was re-created (list/kill) — nothing torn down
+    /// beyond what the message says; safe to retry.
+    Failed(String),
+}
+
+/// The rotate sequence both the #577 one-click update and the #594 lease
+/// sweeper run: best-effort snapshot of the live instance → #340 jobs guard →
+/// kill (+ one `SandboxTeardown` envelope per instance, with the caller's
+/// reason) → re-create through the #546 `ensure_for_delegate` path → import
+/// the snapshot into the replacement (retry while its bridge boots). ONE
+/// owner, so the operator-clicked and lease-driven paths can never drift.
+///
+/// `audit_omni` labels the teardown envelopes: the verified session omni on
+/// the handler path, the chain-probed operator omni on the sweeper path (the
+/// authority the standing spawn-on-pair lifecycle acts under).
+#[allow(clippy::too_many_arguments)] // the one rotate owner — a param per fact
+pub(crate) async fn rotate_delegate_runtime(
+    state: &SharedState,
+    backend: &crate::sandbox_backend::SandboxBackend,
+    device_key_hash: &str,
+    actor_omni: &str,
+    operator_omni_0x: &str,
+    audit_omni: [u8; 32],
+    force: bool,
+    teardown_reason: &str,
+) -> Result<RotateOutcome, RotateError> {
+    let rotate_started = std::time::Instant::now();
+    let live = backend
+        .live_for_device(device_key_hash)
+        .await
+        .map_err(|e| RotateError::Failed(format!("list live instances: {e:#}")))?;
+    tracing::info!(
+        device_key_hash = %device_key_hash,
+        reason = %teardown_reason,
+        live_instances = live.len(),
+        "#577 rotate: starting (snapshot → kill → re-create → import)"
+    );
+
+    // Snapshot + job guard against the OLD instance (best-effort, loud).
+    let mgmt_token =
+        crate::handlers::sandbox::sandbox_mgmt_token(&state.session_keypair, device_key_hash);
+    let mut snapshot: Option<Vec<u8>> = None;
+    let mut session_detail: String;
+    if live.is_empty() {
+        session_detail = "no live instance — cold start, nothing to migrate".to_string();
+    } else if let Some((base, route_headers)) = backend.instance_mgmt_endpoint(&live[0].id) {
+        match mgmt_request(
+            &state.http,
+            &base,
+            &route_headers,
+            &mgmt_token,
+            reqwest::Method::GET,
+            "/v1/sandbox/mgmt/status",
+            None,
+            15,
+        )
+        .await
+        {
+            Ok(body) => {
+                let jobs = parse_jobs_running(&body);
+                if let Some(n) = jobs.filter(|n| *n > 0) {
+                    if !force {
+                        return Err(RotateError::JobsRunning(n));
+                    }
+                    tracing::warn!(
+                        device_key_hash = %device_key_hash,
+                        jobs = n,
+                        reason = %teardown_reason,
+                        "#577 rotate FORCED over {n} running background job(s) — their output dies with the instance"
+                    );
+                }
+            }
+            // A status failure is not fatal: pre-#577 images have no mgmt
+            // surface at all. The export attempt below reports the same cause.
+            Err(e) => tracing::info!(
+                device_key_hash = %device_key_hash,
+                error = %e,
+                "#577 rotate: old-instance status probe failed (pre-#577 image?) — proceeding"
+            ),
+        }
+        {
+            match mgmt_request(
+                &state.http,
+                &base,
+                &route_headers,
+                &mgmt_token,
+                reqwest::Method::GET,
+                "/v1/sandbox/mgmt/session/export",
+                None,
+                60,
+            )
+            .await
+            {
+                Ok(body) if body.len() > SESSION_SNAPSHOT_MAX_BYTES => {
+                    session_detail = format!(
+                        "session export skipped: snapshot {} bytes exceeds the {} byte cap",
+                        body.len(),
+                        SESSION_SNAPSHOT_MAX_BYTES
+                    );
+                }
+                Ok(body) => {
+                    session_detail = format!("exported {} bytes from the old instance", body.len());
+                    snapshot = Some(body);
+                }
+                Err(e) => {
+                    session_detail = format!(
+                        "session export unavailable ({e}) — updated without the runtime-home \
+                         hand-off (a pre-#577 image has no export surface; this heals once the \
+                         new image runs)"
+                    );
+                }
+            }
+        }
+    } else {
+        session_detail =
+            "session hand-off unsupported on this backend (no broker-routable management path)"
+                .to_string();
+    }
+
+    // Teardown — the same kill the unpair hook performs, with the caller's
+    // reason ("update" / "lease-expiry").
+    let killed = backend
+        .kill_for_device(device_key_hash)
+        .await
+        .map_err(|e| {
+            RotateError::Failed(format!("teardown failed (nothing re-created yet): {e:#}"))
+        })?;
+    for sandbox_id in &killed {
+        let env = envelope_for(
+            audit_omni,
+            audit_omni,
+            AuditOpKind::SandboxTeardown,
+            SandboxTeardownBody {
+                device_key_hash: device_key_hash.to_string(),
+                sandbox_id: sandbox_id.clone(),
+                reason: teardown_reason.into(),
+            },
+            AuditResult::Success,
+            None,
+            None,
+        );
+        crate::handlers::sandbox::append_best_effort(env).await;
+    }
+
+    // Re-create from the durable spawn context — the same path a runtime
+    // expiry re-create takes (#546 reconstruction + fresh #552 J1 + lazily
+    // re-provisioned metered gate key), so update can never drift from it.
+    let provision = crate::handlers::sandbox::ensure_for_delegate(
+        state,
+        device_key_hash,
+        actor_omni,
+        operator_omni_0x,
+    )
+    .await;
+    let sandbox_json = provision
+        .as_ref()
+        .map(|p| p.to_json())
+        .unwrap_or(serde_json::Value::Null);
+    let new_id = provision.as_ref().and_then(|p| p.sandbox_id.clone());
+
+    // Restore into the replacement (retry while its daemon boots).
+    let mut migrated = false;
+    if let (Some(bytes), Some(new_id)) = (snapshot, new_id.as_deref()) {
+        if let Some((base, route_headers)) = backend.instance_mgmt_endpoint(new_id) {
+            let deadline = std::time::Instant::now()
+                + std::time::Duration::from_secs(IMPORT_RETRY_WINDOW_SECS);
+            let mut last_err;
+            loop {
+                match mgmt_request(
+                    &state.http,
+                    &base,
+                    &route_headers,
+                    &mgmt_token,
+                    reqwest::Method::POST,
+                    "/v1/sandbox/mgmt/session/import",
+                    Some(bytes.clone()),
+                    60,
+                )
+                .await
+                {
+                    Ok(body) => {
+                        let v: serde_json::Value =
+                            serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
+                        // #594 — the bridge's newer-wins guard may skip a
+                        // stale snapshot (applied:false); a pre-#594 bridge
+                        // has no `applied` field and always applied.
+                        if v.get("applied").and_then(|b| b.as_bool()).unwrap_or(true) {
+                            migrated = true;
+                            session_detail = format!(
+                                "runtime home migrated ({} file(s); agent re-sourced: {})",
+                                v.get("restored_files")
+                                    .and_then(|n| n.as_u64())
+                                    .unwrap_or(0),
+                                v.get("agent_restarted")
+                                    .and_then(|b| b.as_bool())
+                                    .unwrap_or(false),
+                            );
+                        } else {
+                            session_detail = format!(
+                                "import skipped by the bridge's newer-wins guard (a fresher \
+                                 snapshot was already applied): {v}"
+                            );
+                        }
+                        break;
+                    }
+                    Err(e) => last_err = e,
+                }
+                if std::time::Instant::now() >= deadline {
+                    session_detail = format!(
+                        "exported, but import into the replacement kept failing for \
+                         {IMPORT_RETRY_WINDOW_SECS}s (last: {last_err}) — the new instance runs \
+                         with a fresh runtime home"
+                    );
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(IMPORT_RETRY_INTERVAL_SECS))
+                    .await;
+            }
+        }
+    }
+
+    tracing::info!(
+        device_key_hash = %device_key_hash,
+        reason = %teardown_reason,
+        killed = killed.len(),
+        new_sandbox = %new_id.as_deref().unwrap_or("(create failed)"),
+        migrated,
+        handoff = %session_detail,
+        elapsed_ms = rotate_started.elapsed().as_millis() as u64,
+        "#577 rotate: complete"
+    );
+    Ok(RotateOutcome {
+        old_sandbox_ids: killed,
+        sandbox_json,
+        session: SessionHandoff {
+            migrated,
+            detail: session_detail,
+        },
+    })
+}
+
+// ─── POST /v1/agent/image-status ─────────────────────────────────────────────
+
+pub async fn agent_image_status(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(req): Json<ImageStatusRequest>,
+) -> Result<Json<ImageStatusResponse>, (StatusCode, Json<serde_json::Value>)> {
+    let session_omni = auth_session(&state, &headers, &req.operator_omni)?;
+    let Some(backend) = state.sandbox.clone() else {
+        // No lifecycle on this host: an empty, explicit answer — the UI shows
+        // "no runtime" rather than a guessed staleness.
+        return Ok(Json(ImageStatusResponse {
+            image: None,
+            current_image_id: None,
+            image_status: None,
+            delegates: req
+                .device_key_hashes
+                .iter()
+                .map(|dkh| DelegateImageStatus {
+                    device_key_hash: dkh.clone(),
+                    sandbox_id: None,
+                    sandbox_status: None,
+                    expire_at: None,
+                    booted_image_id: None,
+                    booted_image_ref: None,
+                    agent_engine: None,
+                    agent_version: None,
+                    model: None,
+                    stale: None,
+                    error: None,
+                })
+                .collect(),
+        }));
+    };
+    let (cfg, _broker_sk) =
+        load_accept_config().map_err(|e| aerr(StatusCode::SERVICE_UNAVAILABLE, e))?;
+
+    let current_rows = backend
+        .current_images()
+        .await
+        .map_err(|e| aerr(StatusCode::BAD_GATEWAY, format!("{e:#}")))?;
+    let current = current_rows.first();
+
+    let mut delegates = Vec::with_capacity(req.device_key_hashes.len());
+    for dkh in &req.device_key_hashes {
+        let mut row = DelegateImageStatus {
+            device_key_hash: dkh.clone(),
+            sandbox_id: None,
+            sandbox_status: None,
+            expire_at: None,
+            booted_image_id: None,
+            booted_image_ref: None,
+            agent_engine: None,
+            agent_version: None,
+            model: None,
+            stale: None,
+            error: None,
+        };
+        if let Err(e) =
+            probe_owned_delegate(&state, &cfg.rpc_url, &cfg.registry, &session_omni, dkh).await
+        {
+            row.error = Some(e);
+            delegates.push(row);
+            continue;
+        }
+        match backend.live_for_device(dkh).await {
+            Ok(live) => {
+                if let Some(first) = live.first() {
+                    row.sandbox_id = Some(first.id.clone());
+                    row.sandbox_status = Some(first.status.clone());
+                    row.expire_at = Some(first.expire_at.clone()).filter(|s| !s.trim().is_empty());
+                    match backend.booted_image_info(&first.id).await {
+                        Ok(booted) => {
+                            row.stale =
+                                crate::sandbox_backend::image_stale(booted.as_ref(), &current_rows);
+                            if let Some(b) = booted {
+                                row.booted_image_id = Some(b.image_id);
+                                row.booted_image_ref = Some(b.image_ref);
+                            }
+                        }
+                        Err(e) => row.error = Some(format!("describe: {e:#}")),
+                    }
+                    // The live agent identity, straight from the instance's
+                    // bridge healthz — best-effort, never fails the row.
+                    if let Some((base, route_headers)) = backend.instance_mgmt_endpoint(&first.id) {
+                        let health = fetch_agent_health(&state.http, &base, &route_headers).await;
+                        row.agent_engine = health.engine;
+                        row.agent_version = health.version;
+                        row.model = health.model;
+                    }
+                }
+            }
+            Err(e) => row.error = Some(format!("list: {e:#}")),
+        }
+        delegates.push(row);
+    }
+
+    Ok(Json(ImageStatusResponse {
+        image: current
+            .map(|c| c.image_url.clone())
+            .or_else(|| backend.current_image_tag()),
+        current_image_id: current.map(|c| c.image_id.clone()),
+        image_status: current.map(|c| c.status.clone()),
+        delegates,
+    }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_agent_health_reads_the_bridge_healthz_shape() {
+        // The live shape (the bridge /healthz — same body on 200 and; the
+        // hermes-agent row is historical data proving shape-generality
+        // the 503-while-restarting case, which is why status is ignored).
+        let h = parse_agent_health(
+            br#"{"ok":true,"engine":"hermes-agent","version":"0.19.0","model":"ep-2025-x"}"#,
+        );
+        assert_eq!(h.engine.as_deref(), Some("hermes-agent"));
+        assert_eq!(h.version.as_deref(), Some("0.19.0"));
+        assert_eq!(h.model.as_deref(), Some("ep-2025-x"));
+        // Pre-handshake placeholders ("?" / "(unset)") normalize to None —
+        // never rendered as a version.
+        let h = parse_agent_health(
+            br#"{"ok":false,"engine":"hermes-agent","version":"?","model":"(unset)"}"#,
+        );
+        assert_eq!(h.engine.as_deref(), Some("hermes-agent"));
+        assert_eq!(h.version, None);
+        assert_eq!(h.model, None);
+        assert_eq!(parse_agent_health(b"not json"), AgentHealth::default());
+    }
+
+    #[test]
+    fn parse_jobs_running_reads_the_mgmt_status_shape() {
+        assert_eq!(parse_jobs_running(br#"{"jobs":2}"#), Some(2));
+        assert_eq!(parse_jobs_running(br#"{"jobs":0}"#), Some(0));
+        // Bridge-unreachable inside the sandbox → jobs null → not provably
+        // running (the update proceeds; the status body said why).
+        assert_eq!(parse_jobs_running(br#"{"jobs":null}"#), None);
+        assert_eq!(parse_jobs_running(b"not json"), None);
+    }
+}

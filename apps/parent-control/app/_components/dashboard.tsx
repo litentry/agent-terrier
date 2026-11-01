@@ -1,0 +1,512 @@
+'use client';
+
+import { useEffect, useState } from 'react';
+import { CHIP_STYLES, NAMESPACES } from '@/lib/constants';
+import type { AuditActorOption } from '@/lib/client/auditFilter';
+import type { ConnectionStatus } from '@/lib/client/types';
+import { AgentTabsPanel } from './agent_tabs';
+import { AutoDistributePanel, StagedPermissionEditor } from './permissions';
+import type { ProposedScope } from '@/lib/client/types';
+import { ActorTree, Chip, Dot, EmptyState, LifecycleChip, PageHead, Panel } from './shared';
+import type { Actor, AuditEvent, ChipKind, Namespace, ScopeBits } from './types';
+import { isPluginService, isCapabilityService, capabilityGrantCommit, actorIsChannelEndpoint, actorTypeIsUnknown, channelGrantCommit, isChannelService } from './types';
+import {
+  ChannelAttachSelector,
+  attachmentsToServices,
+  servicesToAttachments,
+  type ChannelAttachment,
+} from './devices';
+import type { ChannelDef } from '@/lib/client/types';
+import { useClient } from '@/lib/ClientProvider';
+
+// ─── Actors list ─────────────────────────────────────────────────
+export function ActorsList({ actors, status, onPick }: { actors: Actor[]; status: ConnectionStatus; onPick: (id: string) => void }) {
+  const master = actors.find((a) => a.role === 'master');
+  const agents = actors.filter((a) => a.role === 'agent');
+  const active = agents.filter((a) => a.lastActive === 'now' || a.lastActive.endsWith('m ago')).length;
+
+  if (actors.length === 0) {
+    return (
+      <>
+        <PageHead
+          crumb="actor tree · O_master"
+          title="actors"
+          desc="Devices and agents bound to your actor tree. Each row is an HDKD child of your master — its own omni, its own scope, its own wallet."
+        />
+        <EmptyState
+          status={status}
+          title="no actors yet"
+          hint="Actors load from the daemon (GET /v1/actors). Your master device and any paired agents appear here once a daemon is connected."
+        />
+      </>
+    );
+  }
+
+  return (
+    <>
+      <PageHead
+        crumb="actor tree · O_master"
+        title="actors"
+        desc="Devices and agents bound to your actor tree. Each row is an HDKD child of your master — its own omni, its own scope, its own wallet."
+      />
+      <div className="stats">
+        <div className="stat"><div className="v">{agents.length}</div><div className="k">agents bound</div></div>
+        <div className="stat"><div className="v">{active}</div><div className="k">active now</div></div>
+      </div>
+
+      <Panel title="── actor tree" flush>
+        <div style={{ padding: '18px 22px' }}>
+          {master && <ActorTree actors={actors} onPick={onPick} />}
+        </div>
+      </Panel>
+
+      <Panel title="── devices · agents" flush>
+        <table className="tab">
+          <thead>
+            <tr><th style={{ width: 32 }} /><th>actor</th><th>derivation</th><th>vendor</th><th>device</th><th>last active</th><th /></tr>
+          </thead>
+          <tbody>
+            {master && (
+              <tr className="clickable" onClick={() => onPick(master.id)}>
+                <td><Dot status="ok" /></td>
+                <td>
+                  <span className="serif" style={{ fontStyle: 'italic', fontSize: 14 }}>{master.label}</span>
+                  <div className="secondary">{master.omni} · {master.omniHex}</div>
+                </td>
+                <td className="mono muted">/ (root)</td>
+                <td className="muted">self</td>
+                <td>{master.device}</td>
+                <td className="muted">now</td>
+                <td><Chip kind="default">master</Chip></td>
+              </tr>
+            )}
+            {agents.map((a) => (
+              <tr key={a.id} className="clickable" onClick={() => onPick(a.id)}>
+                <td><Dot status={a.status} pulse={a.lastActive.endsWith('m ago')} /></td>
+                <td>
+                  <span style={{ fontWeight: 500 }}>{a.label}</span>
+                  {/* #404 D6 — channel-endpoint devices are visibly a different
+                      kind from sandbox delegates (no runtime, channel grants only). */}
+                  {actorIsChannelEndpoint(a) && <Chip kind="device">device</Chip>}
+                  <div className="secondary">{a.omni}</div>
+                </td>
+                <td className="mono">{a.derivation}</td>
+                <td>{a.vendor}</td>
+                <td>{a.device}</td>
+                <td className="muted">{a.lastActive}</td>
+                <td><button className="btn sm" onClick={(e) => { e.stopPropagation(); onPick(a.id); }}>manage →</button></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </Panel>
+    </>
+  );
+}
+
+// ─── Actor detail — uses the mobile PermissionList (no tables) ────
+/** #541 — grant / revoke an actor's CHANNEL access from its own page.
+ *
+ *  Previously this card was read-only and told you to go to the devices page —
+ *  which only lists DEVICES, so a delegate's channel grants were unreachable
+ *  from the UI entirely (you could see `channel-pub:…` on the actor page and
+ *  had nowhere to change it). Both kinds edit here now; devices keep their
+ *  devices-page editor too.
+ *
+ *  The commit is one on-chain setScope (Touch ID). `channelGrantCommit` builds
+ *  the full set-replace payload — critically it SUBTRACTS the channel hashes
+ *  from the preserved ids, so a removal is not silently undone. */
+function ChannelGrantsPanel({
+  actor,
+  onCommitScope,
+}: {
+  actor: Actor;
+  onCommitScope: (
+    a: Actor,
+    services: string[],
+    readOnly: boolean,
+    preserveOverride?: string[],
+  ) => Promise<boolean>;
+}) {
+  const api = useClient();
+  const isDevice = actorIsChannelEndpoint(actor);
+  const current = (actor.services ?? []).filter(isChannelService);
+  const [channels, setChannels] = useState<ChannelDef[]>([]);
+  const [rows, setRows] = useState<ChannelAttachment[]>(() => servicesToAttachments(current));
+  const [editing, setEditing] = useState(false);
+  const [committing, setCommitting] = useState(false);
+
+  // Re-sync when the chain mirror refreshes (a commit refetches the actors).
+  useEffect(() => {
+    setRows(servicesToAttachments(current));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [current.join('|')]);
+
+  useEffect(() => {
+    (async () => {
+      // Optional on the client seam (the mock client omits it) — a missing
+      // registry just means the selector offers no preset ids, never a crash.
+      const r = await api.listChannels?.();
+      if (r?.ok) setChannels(r.data.channels);
+    })();
+  }, [api]);
+
+  const staged = attachmentsToServices(rows);
+  const dirty =
+    staged.length !== current.length || staged.some((s) => !current.includes(s));
+
+  const commit = async () => {
+    setCommitting(true);
+    const { services, preserve } = channelGrantCommit(actor, staged);
+    // readOnly is a dead on-chain flag (isServiceInScope ignores it) — the
+    // memory panel passes true, the devices page false; neither is meaningful.
+    const ok = await onCommitScope(actor, services, true, preserve);
+    setCommitting(false);
+    if (ok) setEditing(false);
+  };
+
+  return (
+    <Panel title={`── channels · ${isDevice ? "this device's" : "this agent's"} grants`}>
+      <div className="muted" style={{ fontSize: 11, marginBottom: 10 }}>
+        {isDevice ? (
+          <>
+            A device is a conduit — it holds ONLY channel grants (D6), never knowledge, credentials,
+            or a persona.
+          </>
+        ) : (
+          <>
+            Channel grants are how this agent hears and answers: <code>channel-sub:&lt;id&gt;</code>{' '}
+            to receive, <code>channel-pub:&lt;id&gt;</code> to reply. Without both it cannot hold a
+            conversation on that channel.
+          </>
+        )}{' '}
+        Every change is one on-chain setScope (Touch ID) with an audit receipt.
+      </div>
+      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 10 }}>
+        {current.map((s) => (
+          <span key={s} className="chip mono">{s}</span>
+        ))}
+        {current.length === 0 && (
+          <span className="muted" style={{ fontSize: 11.5 }}>
+            no channel grants — this actor cannot send or receive on any channel yet
+          </span>
+        )}
+      </div>
+      {editing ? (
+        <div style={{ display: 'grid', gap: 6 }}>
+          <ChannelAttachSelector rows={rows} onChange={setRows} channels={channels} />
+          <div style={{ display: 'flex', gap: 6 }}>
+            <button
+              className="btn primary"
+              style={{ flex: 1 }}
+              disabled={committing || !dirty}
+              onClick={() => void commit()}
+            >
+              {committing ? 'committing…' : `commit channels · Touch ID · ${staged.length}`}
+            </button>
+            <button
+              className="btn"
+              onClick={() => {
+                setEditing(false);
+                setRows(servicesToAttachments(current));
+              }}
+            >
+              discard
+            </button>
+          </div>
+        </div>
+      ) : (
+        <button className="btn" onClick={() => setEditing(true)}>
+          {current.length === 0 ? 'grant a channel' : 'edit channels'}
+        </button>
+      )}
+    </Panel>
+  );
+}
+
+export function ActorDetail({
+  actor,
+  onBack,
+  onUpdate,
+  onCommitScope,
+  onRevoke,
+  recentEvents,
+  proposals,
+  proposing,
+  onPropose,
+  onConfirmProposal,
+  onConfirmSafe,
+  onResetMaster,
+  onOpenAudit,
+}: {
+  actor: Actor;
+  onBack: () => void;
+  onUpdate: (id: string, patch: Partial<Actor>) => void;
+  /** #248: commit the staged memory grant on chain — ONE setScope UserOp signed
+   *  by the master K11 (Touch ID). Resolves true on success (clears staging).
+   *  #541: `preserveOverride` replaces the default echo set — the channel editor
+   *  needs it to DROP the channel hashes it is replacing (see channelGrantCommit). */
+  onCommitScope: (
+    a: Actor,
+    services: string[],
+    readOnly: boolean,
+    preserveOverride?: string[],
+  ) => Promise<boolean>;
+  onRevoke: (a: Actor) => void;
+  recentEvents: AuditEvent[];
+  proposals: ProposedScope[] | null;
+  proposing: boolean;
+  onPropose: (a: Actor) => void;
+  onConfirmProposal: (a: Actor, p: ProposedScope) => void;
+  onConfirmSafe: (a: Actor, ps: ProposedScope[]) => void;
+  /** #225 E7: unbind the master (local + on-chain) so a fresh passkey re-binds. Master only. */
+  onResetMaster?: () => void;
+  /** #693 — the audit feed filtered to this actor (a delegate's pull passes too). */
+  onOpenAudit?: (actorId: string) => void;
+}) {
+  const events = recentEvents.filter((e) => e.actorId === actor.id).slice(0, 6);
+  const isMaster = actor.role === 'master';
+  // #404 D6 — a channel-endpoint device: binding + channel grants only (no
+  // persona, no memory scopes, no auto-distribution — those are delegate/runtime
+  // concepts a conduit cannot hold).
+  const isDevice = actorIsChannelEndpoint(actor);
+
+  return (
+    <>
+      <PageHead
+        crumb={<><a onClick={onBack} style={{ cursor: 'pointer' }}>actors</a> <span className="muted">/</span> {actor.derivation}</>}
+        title={actor.label}
+        desc={`Bound at ${actor.omni}. Knowledge scope changes stage locally, then commit on chain with one master Touch ID (setScope · K11).`}
+        actions={
+          <>
+            <button className="btn" onClick={onBack}>← back</button>
+            {!isMaster && <button className="btn danger" onClick={() => onRevoke(actor)}>revoke device</button>}
+            {isMaster && onResetMaster && (
+              <button
+                className="btn danger"
+                title="Clear matching local state after an authorized chain recovery has completed"
+                onClick={() => {
+                  if (window.confirm('Clear the recovered local binding? Chain recovery must already be complete; no transaction is submitted and your OS passkey is unchanged.')) onResetMaster();
+                }}
+              >
+                clear recovered binding
+              </button>
+            )}
+          </>
+        }
+      />
+
+      {!isMaster && !isDevice && actor.status !== 'bad' && (
+        <div className="banner" style={{ marginBottom: 14 }}>
+          <span className="lbl">pull cost</span>
+          <span style={{ display: 'inline-flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+            <LifecycleChip channelId={`opchat-${actor.label.replace(' (revoked)', '')}`} sync empty={<Chip>no stage published yet</Chip>} />
+            <span className="muted" style={{ fontSize: 11.5 }}>
+              The chip is this delegate&apos;s last pull: its stage, the pass duration, and (on hover) the lines it wrote to its engine — one engine write is one embedding through the gate relay (op 93), so the line count is the embed count of the pass (#694). A respawn with nothing changed should read <code>0 lines mirrored</code>.
+            </span>
+          </span>
+        </div>
+      )}
+      <Panel title="── binding">
+        <dl className="kvs">
+          <dt>actor_omni</dt><dd className="mono">{actor.omni} <span className="muted">({actor.omniHex})</span></dd>
+          {actor.role === 'master' && (
+            <>
+              <dt>account</dt>
+              <dd className="mono">
+                {actor.accountType === 'p256account' && actor.accountAddress ? (
+                  <>{actor.accountAddress} <span className="muted">· passkey P256Account (ERC-4337 · operatorMasterWallet)</span></>
+                ) : (
+                  <span className="muted">not yet bound on chain — complete onboarding to register your master P256Account</span>
+                )}
+              </dd>
+            </>
+          )}
+          <dt>derivation</dt><dd className="mono">{actor.derivation} <span className="muted">(hard / HDKD)</span></dd>
+          <dt>device pubkey</dt><dd className="mono">{actor.devicePubkey} <span className="muted">· K10 secp256k1</span></dd>
+          {/* The device-key hash is how this actor is matched to the PHYSICAL
+              device that holds the K10 — it is what the device prints on boot
+              and what the fleet console shows as `identity`. Without it there is
+              no way to tell which paired actor a given device is. */}
+          <dt>device key hash</dt>
+          <dd className="mono">
+            {actor.deviceKeyHash
+              ? <>{actor.deviceKeyHash} <span className="muted">· K10 hash — matches the device&apos;s own `identity`</span></>
+              : <span className="muted">unknown</span>}
+          </dd>
+          <dt>vendor</dt><dd>{actor.vendor}</dd>
+          <dt>device</dt>
+          <dd>
+            {actor.device}
+            {actorTypeIsUnknown(actor) && (
+              <span className="muted"> · type unknown — no binding record (rebuilt from chain); grant its channels to record it</span>
+            )}
+          </dd>
+          <dt>K11 user-presence</dt><dd>{actor.k11 ? 'enrolled (master device)' : <span className="muted">none · agents cannot hold K11</span>}</dd>
+          <dt>last active</dt><dd>{actor.lastActive}</dd>
+        </dl>
+      </Panel>
+
+      {/* #404 D6 — a channel-endpoint DEVICE has no runtime: no persona, no
+          memory scopes, no auto-distribution. Its page is binding + channel
+          grants (managed on the devices page) + activity + revoke. */}
+      {!isMaster && <ChannelGrantsPanel actor={actor} onCommitScope={onCommitScope} />}
+
+      {/* #390 — the bound agent's persona editor + live context files. Sandbox
+          DELEGATES only: a master has no SOUL.md (it is the hub, not a runtime)
+          and a DEVICE has no runtime at all (#404 D6 — personas are a delegate
+          concept; a camera cannot hold one). */}
+      {!isMaster && !isDevice && <AgentTabsPanel actor={actor} />}
+
+      {!isMaster && !isDevice && (
+        <Panel title="── permissions · scoped (mobile-style)">
+          <div className="muted" style={{ fontSize: 11, marginBottom: 12 }}>
+            Maps to ScopeContract[O_master][{actor.omni}]. Knowledge toggles stage below; <strong>commit · Touch ID</strong> lands
+            them on chain (one setScope, master K11) — until then the chain grant is unchanged.
+          </div>
+          <StagedPermissionEditor
+            actor={actor}
+            onCommitScope={onCommitScope}
+            onEmailChange={(granted) => {
+              const services = new Set(actor.services ?? []);
+              if (granted) services.add('email'); else services.delete('email');
+              onUpdate(actor.id, { services: [...services] });
+            }}
+          />
+        </Panel>
+      )}
+
+      {!isMaster && !isDevice && (
+        <AutoDistributePanel
+          actor={actor}
+          proposals={proposals}
+          proposing={proposing}
+          onPropose={() => onPropose(actor)}
+          onConfirm={(p) => onConfirmProposal(actor, p)}
+          onConfirmSafe={(ps) => onConfirmSafe(actor, ps)}
+        />
+      )}
+
+      <Panel
+        title={`── recent activity · ${actor.label}`}
+        right={onOpenAudit && (
+          <button className="btn sm" onClick={() => onOpenAudit(actor.id)}>all rows in the audit feed →</button>
+        )}
+        flush
+      >
+        {events.length === 0 ? (
+          <div style={{ padding: 20 }} className="muted">no activity in this window.</div>
+        ) : (
+          events.map((e) => (
+            <div key={e.id} className="feed-row">
+              <span className="ts">{e.ts}</span>
+              <span className="actor">{e.actor}</span>
+              <span className="msg"><span style={{ fontWeight: 500 }}>{e.kind}</span><span className="arg"> · {e.detail}</span></span>
+              <Chip kind={e.chip}>{e.chip}</Chip>
+            </div>
+          ))
+        )}
+      </Panel>
+    </>
+  );
+}
+
+// ─── Audit feed — click any row → tx-decode modal (step 9) ────────
+export function AuditFeed({
+  events,
+  status,
+  onPick,
+  paused,
+  onPause,
+  actorOptions,
+  actorFilter,
+  onActorFilter,
+  actorRows,
+  source = 'daemon',
+}: {
+  source?: 'chain' | 'daemon';
+  events: AuditEvent[];
+  status: ConnectionStatus;
+  onPick: (e: AuditEvent) => void;
+  paused: boolean;
+  onPause: () => void;
+  /** #693 — filter to one actor; a delegate's rows include one row per pull
+   *  pass, read from its feed. */
+  actorOptions: AuditActorOption[];
+  actorFilter: string;
+  onActorFilter: (actorId: string) => void;
+  /** The filtered actor's rows — null until the first read answers. */
+  actorRows: AuditEvent[] | null;
+}) {
+  const [filter, setFilter] = useState<string>('all');
+  const scoped = actorFilter === 'all' ? events : actorRows ?? [];
+  const filtered = filter === 'all' ? scoped : scoped.filter((e) => e.chip === filter);
+  const filters: (ChipKind | 'all')[] = ['all', 'memory', 'creds', 'payment', 'audit', 'chain', 'broker'];
+  const reading = actorFilter !== 'all' && actorRows === null;
+
+  if (events.length === 0 && actorOptions.length === 0) {
+    return (
+      <>
+        <PageHead
+          crumb={source === 'chain' ? 'account activity · confirmed' : 'tier-1 · sse · audit-service · decodable on click'}
+          title="audit feed"
+          desc={source === 'chain' ? 'Confirmed activity from your account. Load older activity to continue through your history, or select a row for its receipt.' : 'Real-time stream from the audit-service worker. Tier-1 is off-chain SSE; tier-2 anchors a Merkle root on chain every 2 min. Click any row to decode its on-chain transaction.'}
+        />
+        <EmptyState
+          status={status}
+          title={source === 'chain' ? 'no activity in this page' : 'no audit events'}
+          hint={source === 'chain' ? 'Use Load older activity when available to continue through your account history.' : 'The feed streams from the daemon (GET /v1/audit + SSE). Events appear here once a daemon is connected and actors are active.'}
+        />
+      </>
+    );
+  }
+
+  return (
+    <>
+      <PageHead
+        crumb={source === 'chain' ? 'account activity · confirmed' : 'tier-1 · sse · audit-service · decodable on click'}
+        title="audit feed"
+        desc={source === 'chain' ? 'Confirmed activity from your account. Load older activity to continue through your history, or select a row for its receipt.' : 'Real-time stream from the audit-service worker. Tier-1 is off-chain SSE; tier-2 anchors a Merkle root on chain every 2 min. Click any row to decode its on-chain transaction.'}
+        actions={<button className="btn sm" onClick={onPause}>{paused ? '▶ resume' : '❚❚ pause'}</button>}
+      />
+      <Panel
+        title="── stream · newest first · click to decode"
+        right={
+          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
+            <select
+              value={actorFilter}
+              onChange={(e) => onActorFilter(e.target.value)}
+              aria-label="filter by actor"
+              style={{ padding: '4px 8px', fontSize: 12.5 }}
+            >
+              <option value="all">all actors</option>
+              {actorOptions.map((o) => (
+                <option key={o.id} value={o.id}>{o.label}</option>
+              ))}
+            </select>
+            {filters.map((f) => (
+              <button key={f} className={`btn sm ${filter === f ? 'primary' : ''}`} onClick={() => setFilter(f)}>{f}</button>
+            ))}
+          </div>
+        }
+        flush
+      >
+        <div className="feed">
+          {filtered.map((e) => (
+            <div key={e.id} className={`feed-row ${e._isNew ? 'new' : ''}`} onClick={() => onPick(e)}>
+              <span className="ts">{e.ts}</span>
+              <span className="actor">{e.actor}</span>
+              <span className="msg"><span style={{ fontWeight: 500 }}>{e.kind}</span><span className="arg"> · {e.detail}</span></span>
+              <span className={CHIP_STYLES[e.chip] ?? 'chip'}>{e.chip}</span>
+            </div>
+          ))}
+          {filtered.length === 0 && (
+            <div style={{ padding: 40, textAlign: 'center' }} className="muted">
+              {reading ? 'reading this actor’s rows and pull passes…' : 'no events match this filter.'}
+            </div>
+          )}
+        </div>
+      </Panel>
+    </>
+  );
+}

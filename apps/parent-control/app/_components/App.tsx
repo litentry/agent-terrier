@@ -1,0 +1,1837 @@
+'use client';
+
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import {
+  clearMasterIdentity,
+  getMasterCredId,
+  setActiveStack,
+  setOnboardedFlag,
+} from '@/lib/identityStore';
+import {
+  CHAIN_PROFILE,
+  ONCHAIN_KINDS,
+  PAIRING_STEPS,
+  contractFor,
+  decodeCalldata,
+} from '@/lib/demoData';
+import { NAMESPACES } from '@/lib/constants';
+import { getMaskEmail, maskEmail, setMaskEmail } from '@/lib/maskEmail';
+import { CeremonyRunner, OnboardingScreen } from './ceremony';
+import { ActorDetail, ActorsList, AuditFeed } from './dashboard';
+import { LogoPage } from './logos';
+import type { ApiInboxItem } from '@/lib/generated/ApiInboxItem';
+import { KnowledgePage } from './knowledge';
+import { HeaderSearch } from './search';
+import { PAGE_ENTRIES, type SearchEntry } from '@/lib/client/search';
+import { actorAuditRows, auditActorOptions } from '@/lib/client/auditFilter';
+import { decodeBase64Utf8, errorJson } from '@/lib/client/diff';
+import { DiffView } from './shared';
+import { CredentialsPage } from './credentials';
+import { DelegatesPage } from './pairing';
+import { ArchiveAgentDialog, SpawnAgentModal } from './spawn';
+import { DevicesPage } from './devices';
+import { ChannelRegistryPage } from './channels';
+import { ContactsPage, TransportPage } from './gateway';
+import { ApplicationsPage } from './applications';
+import { getAssertionOverHash } from '@/lib/webauthn';
+import { akLog } from '@/lib/debug';
+import { EmptyState, Modal, WebAuthnModal } from './shared';
+import { useClient, useConnectionStatus } from '@/lib/ClientProvider';
+import { CoreBackend } from '@/lib/client/core';
+import { useConsoleSession } from '@/lib/useConsoleSession';
+import { useConsoleRead } from '@/lib/useConsoleRead';
+import { MappedBackend } from '@/lib/client/daemon';
+import { PendingTransactions } from './PendingTransactions';
+import { HostedAuditHistory } from './HostedAuditHistory';
+import { HostedEnrollmentApproval } from './HostedEnrollmentApproval';
+import { PREPARED_MEMORY } from '@/lib/preparedMemory';
+import type { ChainInfo, ChainListEntry, ChannelDef, ConfigPreset, CredService, DecodedAuditEvent, MasterMemoryEntry, MemoryCategory, ProposedScope, StackEntry } from '@/lib/client/types';
+import type { Actor, AuditEvent, PairingRequest, PreservedMemory } from './types';
+import { actorIsChannelEndpoint, isChannelService, runtimeActivityLine } from './types';
+
+// #242: does a daemon error detail mean the master J1 lapsed (vs a genuine
+// missing-config / transport error)? The daemon says "master session expired —
+// re-authenticate (one passkey prompt)…"; match that so we offer Touch ID re-auth
+// rather than a dead-end toast. NOT triggered by partial-config errors.
+const looksSessionExpired = (detail?: string): boolean =>
+  !!detail && /session expired|re-?authenticate/i.test(detail);
+
+// #404 IA: household = delegates (sandbox agents) / devices (channel endpoints)
+// / channels (the id-anchored registry) / transport (the method the family
+// reaches the household through + the contact gate behind it: the bot, the
+// router, the live turns) / contacts (the family).
+// The former top-level 'pairing' page became 'delegates'.
+type Page = 'actors' | 'detail' | 'knowledge' | 'credentials' | 'delegates' | 'devices' | 'channels' | 'transport' | 'contacts' | 'applications' | 'audit' | 'decode' | 'chain' | 'logo';
+
+type PendingAction =
+  | { kind: 'revoke-device'; actor: Actor; intent: Intent }
+  | { kind: 'pair-accept'; req: PairingRequest; intent: Intent };
+interface Intent { text: string; fields: [string, string][] }
+
+// MasterMemoryEntry (client wire) → PreservedMemory (UI). The daemon's ns is
+// kept as-is: a curated item may live in a namespace the taxonomy doesn't name.
+function toPreserved(e: MasterMemoryEntry): PreservedMemory {
+  return { ns: e.ns, key: e.key, title: e.title, bytes: e.bytes, version: e.version, updated: e.updated, preview: e.preview, body: e.body, kind: e.kind };
+}
+
+export function App() {
+  const client = useClient();
+  const [sessionGeneration, setSessionGeneration] = useState(0);
+  const endSession = useCallback(() => setSessionGeneration(generation => generation + 1), []);
+  return <InteractiveApp key={sessionGeneration} hosted={client instanceof CoreBackend} onSessionEnd={endSession} />;
+}
+
+function InteractiveApp({ hosted, onSessionEnd }: { hosted: boolean; onSessionEnd: () => void }) {
+  const client = useClient();
+  const status = useConnectionStatus();
+  const [actors, setActors] = useState<Actor[]>([]);
+  // #429 — the spawn modal + archive dialog (one Touch ID each, zero rendezvous).
+  const [spawnOpen, setSpawnOpen] = useState(false);
+  const [archiveActor, setArchiveActor] = useState<Actor | null>(null);
+  const [events, setEvents] = useState<AuditEvent[]>([]);
+  // #693 — the audit feed filtered to one actor, and that actor's rows.
+  const [auditActor, setAuditActor] = useState<string>('all');
+  const [auditActorRows, setAuditActorRows] = useState<AuditEvent[] | null>(null);
+  const [page, setPage] = useState<Page>('actors');
+  const [actorId, setActorId] = useState<string | null>(null);
+  const [paused, setPaused] = useState(false);
+  const [pendingAction, setPendingAction] = useState<PendingAction | null>(null);
+  const [eventDetail, setEventDetail] = useState<AuditEvent | null>(null);
+  const [toast, setToast] = useState<{ msg: string; sticky?: boolean; action?: { label: string; fn: () => void } } | null>(null);
+
+  const readiness = useConsoleSession(client);
+  const onboarded = readiness.phase === 'ready';
+  const identity = readiness.identity;
+  // #404 — the channel registry (id-anchored definitions; channels page = CRUD,
+  // device pairing = selection). "cached" storage = dev-only (no config worker).
+  const [channels, setChannels] = useState<ChannelDef[]>([]);
+  const [channelStorage, setChannelStorage] = useState('ok');
+  const [maskEm, setMaskEm] = useState(true);
+  // #201 Phase 4: the list is CATEGORIES (from the durable taxonomy, no decrypt);
+  // per-namespace entries decrypt lazily into `entriesByNs` when a category opens
+  // ('loading' while in flight, the array once decrypted).
+  const [categories, setCategories] = useState<MemoryCategory[]>([]);
+  const [entriesByNs, setEntriesByNs] = useState<Record<string, PreservedMemory[] | 'loading'>>({});
+  const [planting, setPlanting] = useState(false);
+  // #339 P2 — the absorption-inbox curate queue (delegate proposals awaiting the
+  // master's accept-into-canonical or reject); `inboxBusy` blocks re-entry while
+  // a curate action is in flight.
+  const [inbox, setInbox] = useState<ApiInboxItem[]>([]);
+  const [inboxBusy, setInboxBusy] = useState(false);
+  const [reloadKey, setReloadKey] = useState(0);
+  // True while the actor tree is being (re)read — the channels page says
+  // "checking grants…" instead of "orphaned" until the fleet the daemon
+  // reconciled from chain is in hand (an install adds grants the previous
+  // read could not know).
+  const [actorsSyncing, setActorsSyncing] = useState(false);
+  // The header search's jump into one knowledge repository (a nonce so the
+  // same namespace can be picked twice in a row).
+  const [knowledgeFocus, setKnowledgeFocus] = useState<{ ns: string; nonce: number } | null>(null);
+  // The namespaces curated items live in — a repository the taxonomy may not
+  // name (or that a failed taxonomy read left out), so the search still finds it.
+  const [resourceNamespaces, setResourceNamespaces] = useState<string[]>([]);
+  // #207 item 1A — config-init entry point A (default-preset bootstrap): the
+  // bundled presets, the shipped default id, and the in-flight authoring state.
+  const [presets, setPresets] = useState<ConfigPreset[]>([]);
+  const [defaultPresetId, setDefaultPresetId] = useState('');
+  const [initializing, setInitializing] = useState(false);
+  const [pendingPreset, setPendingPreset] = useState('');
+  // #207 items 5/7 — connect-time auto-distribution: the classifier's proposed
+  // scopes for the actor currently open in detail (null = not classified yet).
+  const [proposals, setProposals] = useState<ProposedScope[] | null>(null);
+  const [proposing, setProposing] = useState(false);
+  // #207 credentials data class — the master's vaulted credentials (categorized).
+  const [credentials, setCredentials] = useState<CredService[]>([]);
+  const [storingCred, setStoringCred] = useState(false);
+  const [claiming, setClaiming] = useState(false);
+  const [pairingRequests, setPairingRequests] = useState<PairingRequest[]>([]);
+  const [pairingCeremony, setPairingCeremony] = useState<PairingRequest | null>(null);
+  const [justPaired, setJustPaired] = useState<string | null>(null);
+  const [memoryView, setMemoryView] = useState<PreservedMemory | null>(null);
+  // The chain the daemon actually operates on (from /v1/chain/list), so the
+  // header badge reflects the live AGENTKEYS_CHAIN instead of the build-time
+  // CHAIN_PROFILE constant (which is always 'heima').
+  const [daemonChain, setDaemonChain] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (status.kind !== 'connected') { setDaemonChain(null); return; }
+    let cancelled = false;
+    (async () => {
+      const r = await client.getChainList();
+      if (!cancelled && r.ok) {
+        setDaemonChain(r.data.daemonChain);
+        setActiveStack(r.data.daemonChain, r.data.daemonBroker ?? '');
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [client, status.kind]);
+
+  useEffect(() => { setMaskEm(getMaskEmail()); }, []);
+
+  useEffect(() => {
+    setActors([]);
+    setEvents([]);
+    setCategories([]);
+    setEntriesByNs({});
+    setCredentials([]);
+    setInbox([]);
+    setChannels([]);
+    setResourceNamespaces([]);
+    setSpawnOpen(false);
+    setArchiveActor(null);
+    setPendingAction(null);
+  }, [readiness.key]);
+
+  const loadActors = useCallback(() => client.listActors(), [client]);
+  const loadAudit = useCallback(() => client.listRecentAuditEvents({ limit: 80 }), [client]);
+  const loadCategories = useCallback(() => client.listMemoryCategories(), [client]);
+  const loadPresets = useCallback(() => client.listConfigPresets(), [client]);
+  const loadCredentials = useCallback(() => client.listCredentials(), [client]);
+  const loadInbox = useCallback(() => client.listInbox(), [client]);
+  const loadChannels = useCallback(() => client.listChannels!(), [client]);
+  const resourcesLoaded = useCallback((items: { ns: string }[]) => {
+    setResourceNamespaces(Array.from(new Set(items.map((item) => item.ns))).sort());
+  }, []);
+  const pauseExpiredSession = useCallback(() => readiness.pause(true), [readiness.pause]);
+  const liveReads = onboarded && !readiness.demo;
+  const needsKnowledge = ['knowledge', 'detail', 'delegates', 'devices'].includes(page);
+  const needsChannels = ['channels', 'devices', 'applications', 'detail'].includes(page);
+  const actorsRead = useConsoleRead(readiness.key, liveReads, reloadKey, loadActors, setActors, pauseExpiredSession);
+  const auditRead = useConsoleRead(readiness.key, liveReads && ['audit', 'decode', 'detail'].includes(page), reloadKey, loadAudit, setEvents, pauseExpiredSession);
+  const categoriesRead = useConsoleRead(readiness.key, liveReads && needsKnowledge, reloadKey, loadCategories, setCategories, pauseExpiredSession);
+  const presetsRead = useConsoleRead(readiness.key, liveReads && page === 'knowledge', reloadKey, loadPresets, (data) => {
+    setPresets(data.presets);
+    setDefaultPresetId(data.defaultId);
+  }, pauseExpiredSession);
+  const credentialsRead = useConsoleRead(readiness.key, liveReads && ['credentials', 'detail'].includes(page), reloadKey, loadCredentials, setCredentials, pauseExpiredSession);
+  const inboxRead = useConsoleRead(readiness.key, liveReads && page === 'knowledge', reloadKey, loadInbox, setInbox, pauseExpiredSession);
+  const channelsRead = useConsoleRead(readiness.key, liveReads && needsChannels && !!client.listChannels, reloadKey, loadChannels, (data) => {
+    setChannels(data.channels);
+    setChannelStorage(data.storage);
+  }, pauseExpiredSession);
+  const pageReads = [actorsRead,
+    ...(needsKnowledge ? [categoriesRead] : []),
+    ...(page === 'knowledge' ? [presetsRead, inboxRead] : []),
+    ...(['credentials', 'detail'].includes(page) ? [credentialsRead] : []),
+    ...(['audit', 'decode', 'detail'].includes(page) ? [auditRead] : []),
+    ...(needsChannels && client.listChannels ? [channelsRead] : []),
+  ];
+  const pageLoading = !readiness.demo && pageReads.some((read) => read.kind === 'loading' || read.kind === 'idle');
+  const pageError = !readiness.demo && pageReads.find((read) => read.kind === 'error');
+  const readCount = (read: { kind: string }, count: number) =>
+    read.kind === 'loaded' || readiness.demo ? count || '∅' : read.kind === 'error' ? '!' : '…';
+
+  // #339 P2 — re-fetch the curate queue (after an accept/reject, or on demand).
+  const refreshInbox = async () => {
+    const r = await client.listInbox();
+    if (r.ok) setInbox(r.data);
+  };
+
+  // #339 P2 — fetch one proposal's full body for the curate review (lazy: the
+  // list carries only metadata). Returns the body, or throws so the panel can
+  // surface the error.
+  const viewInboxBody = async (s3Key: string): Promise<string> => {
+    const r = await client.getInboxItem(s3Key);
+    if (r.ok) return r.data.body;
+    const detail = r.status.detail ?? '';
+    const m = detail.match(/\{"error":"([^"]+)"\}/);
+    throw new Error(m ? m[1] : detail || 'could not load the proposal body');
+  };
+
+  // #339 P2 — accept one proposal INTO canonical memory (merge + GC), then
+  // refresh both the queue and the category list (a new namespace may appear).
+  // #390 — `confirmContentHash` is the skill viewed-body watermark; the daemon's
+  // per-kind gate 428s a skill accept without it and 403s persona outright.
+  // D-K5 — a proposal whose key already exists with a different body is not
+  // merged blind: the daemon answers 409 `entry_exists` with the current body,
+  // the console shows the diff, and the owner chooses replace / keep both.
+  const [inboxConflict, setInboxConflict] = useState<{ s3Key: string; confirmContentHash?: string; ns: string; key: string; current: string; proposed: string } | null>(null);
+  const acceptInboxItem = async (s3Key: string, confirmContentHash?: string, onConflict?: 'replace' | 'keep-both') => {
+    if (inboxBusy) return;
+    setInboxBusy(true);
+    const r = await client.acceptInbox(s3Key, confirmContentHash, onConflict);
+    setInboxBusy(false);
+    if (!r.ok) {
+      const conflict = errorJson(r.status.detail);
+      if (conflict?.error === 'entry_exists') {
+        let proposed = '';
+        try {
+          proposed = await viewInboxBody(s3Key);
+        } catch (e) {
+          showToast(`Couldn't load the proposal body — ${(e as Error).message}`);
+          return;
+        }
+        setInboxConflict({
+          s3Key,
+          confirmContentHash,
+          ns: String(conflict.ns ?? ''),
+          key: String(conflict.key ?? ''),
+          current: decodeBase64Utf8(String(conflict.current_body_b64 ?? '')),
+          proposed,
+        });
+        return;
+      }
+    }
+    if (r.ok) {
+      setInboxConflict(null);
+      // Optimistic removal: drop the curated row immediately so the queue
+      // reflects the change without waiting on (or silently losing) the
+      // post-action refetch. The backend already deleted the inbox object;
+      // refreshInbox() below reconciles against the durable list.
+      setInbox((prev) => prev.filter((i) => i.s3_key !== s3Key));
+      showToast(`Curated ${r.data.ns}/${r.data.key} into canonical (${r.data.planted} new).`);
+      await refreshInbox();
+      const listed = await client.listMemoryCategories();
+      if (listed.ok) {
+        setCategories(listed.data);
+        setEntriesByNs({}); // drop the lazy cache so the updated namespace re-decrypts
+      }
+    } else {
+      const detail = r.status.detail ?? '';
+      const m = detail.match(/\{"error":"([^"]+)"\}/);
+      showToast(`Accept failed — ${m ? m[1] : detail || 'connect a daemon + memory worker first'}.`);
+    }
+  };
+
+  // #339 P2 — reject (discard) one proposal; it never enters canonical.
+  const rejectInboxItem = async (s3Key: string) => {
+    if (inboxBusy) return;
+    setInboxBusy(true);
+    const r = await client.rejectInbox(s3Key);
+    setInboxBusy(false);
+    if (r.ok) {
+      // Optimistic removal (see acceptInboxItem) — the discarded proposal
+      // leaves the queue at once; refreshInbox() reconciles.
+      setInbox((prev) => prev.filter((i) => i.s3_key !== s3Key));
+      showToast('Proposal discarded.');
+      await refreshInbox();
+    } else {
+      const detail = r.status.detail ?? '';
+      const m = detail.match(/\{"error":"([^"]+)"\}/);
+      showToast(`Reject failed — ${m ? m[1] : detail || 'reload the page'}.`);
+    }
+  };
+
+  // §2 lazy detail: decrypt a namespace's entries only when its category opens.
+  // Idempotent — a second open while loaded/loading is a no-op.
+  // (Re)decrypt one namespace. The Knowledge page calls the reload after it
+  // changed a namespace (add / edit / remove / curate) so the cache never shows
+  // the pre-change entry; opening a category loads it once.
+  const reloadCategory = async (ns: string) => {
+    setEntriesByNs((prev) => ({ ...prev, [ns]: 'loading' }));
+    const r = await client.getMemoryEntries(ns);
+    setEntriesByNs((prev) => ({ ...prev, [ns]: r.ok ? r.data.map(toPreserved) : [] }));
+    if (!r.ok) showToast(`Couldn't load ${ns} — ${r.status.detail ?? 'reload the page'}.`);
+  };
+  const loadCategory = async (ns: string) => {
+    if (entriesByNs[ns]) return;
+    await reloadCategory(ns);
+  };
+
+  // #432 (epic #425 O5) — the onboarding DEFAULT delegate rides the SAME spawn
+  // path as every other agent: once the master is bound on chain and the
+  // household has no delegate yet, auto-open the New-agent modal ONCE (Default
+  // assistant preselected, fully skippable). One code path — the D9
+  // `onboarding` and `option` legs converge on this modal; there is no second
+  // spawn implementation.
+  useEffect(() => {
+    if (!onboarded || spawnOpen) return;
+    if (typeof window === 'undefined') return;
+    if (window.localStorage.getItem('ak_default_spawn_offered') === '1') return;
+    const hasDelegate = actors.some((a) => a.role === 'agent' && !actorIsChannelEndpoint(a));
+    const masterBound = actors.some((a) => a.role === 'master' && a.accountType === 'p256account');
+    if (masterBound && !hasDelegate) {
+      window.localStorage.setItem('ak_default_spawn_offered', '1');
+      setSpawnOpen(true);
+    }
+  }, [onboarded, actors, spawnOpen]);
+
+  // Live audit stream (tier-1 SSE) — real events only, no synthetic feed.
+  useEffect(() => {
+    if (!onboarded || paused) return;
+    const stop = client.streamAudit(
+      (e) => {
+        setEvents((prev) => [{ ...e, _isNew: true }, ...prev].slice(0, 90));
+        setTimeout(
+          () => setEvents((prev) => prev.map((x) => (x.id === e.id ? { ...x, _isNew: false } : x))),
+          1500,
+        );
+      },
+      () => {},
+    );
+    return stop;
+  }, [onboarded, paused, client, readiness.key]);
+
+  // #693 — filtered to one actor, the feed reads that actor's rows from the
+  // daemon; for a delegate that includes one row per pull pass from its feed.
+  useEffect(() => {
+    if (!onboarded || hosted || page !== 'audit' || auditActor === 'all') return;
+    let alive = true;
+    const read = async () => {
+      const r = await client.listRecentAuditEvents({ actorId: auditActor, limit: 100 });
+      if (alive && r.ok) setAuditActorRows(r.data);
+    };
+    setAuditActorRows(null);
+    void read();
+    const t = setInterval(() => void read(), 30_000);
+    return () => {
+      alive = false;
+      clearInterval(t);
+    };
+  }, [client, page, auditActor, hosted, onboarded, readiness.key]);
+
+  const showToast = (msg: string, sticky = false, action?: { label: string; fn: () => void }) => {
+    setToast({ msg, sticky, action });
+    // Sticky toasts (e.g. post-onboarding next-steps) stay until dismissed.
+    if (!sticky) setTimeout(() => setToast(null), 2600);
+  };
+
+  const resetMaster = async () => {
+    if (hosted) { showToast('Sign in with an approved passkey. This action is for a recovered local binding.'); return; }
+    if (status.kind !== 'connected') { showToast('Connect a daemon first.'); return; }
+    const r = await client.resetMaster();
+    if (!r.ok) {
+      akLog('reset: FAILED ❌', { detail: r.status?.detail });
+      showToast(`Reset failed — ${r.status?.detail ?? 'daemon error'}`);
+      return;
+    }
+    if (r.data.ok === false) {
+      showToast(`Local cleanup blocked — ${r.data.note ?? 'chain recovery could not be confirmed'}`, true);
+      return;
+    }
+    clearMasterIdentity();
+    setActors([]);
+    setPairingRequests([]);
+    setProposals(null);
+    showToast('Chain recovery confirmed. Matching local binding cleared; sign in again. Your OS passkey is unchanged.', true);
+  };
+
+  // The header's ⋯ menu is a plain <details>: close it on an outside click,
+  // on Escape, and (below) on a pick — a native details only toggles on its
+  // own summary.
+  useEffect(() => {
+    const openMenus = () => Array.from(document.querySelectorAll<HTMLDetailsElement>('details.app-menu[open]'));
+    const onDown = (e: MouseEvent) => openMenus().forEach((d) => { if (!d.contains(e.target as Node)) d.open = false; });
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') openMenus().forEach((d) => { d.open = false; }); };
+    document.addEventListener('mousedown', onDown);
+    document.addEventListener('keydown', onKey);
+    return () => { document.removeEventListener('mousedown', onDown); document.removeEventListener('keydown', onKey); };
+  }, []);
+
+  // Everything the header search can land on: the sections, the actors (an
+  // app's delegate carries the app's label), the knowledge repositories, the
+  // channels and the vault's services — all from state the shell already holds.
+  const searchIndex = useMemo<SearchEntry[]>(() => [
+    ...PAGE_ENTRIES,
+    ...categories.map((c) => ({ kind: 'repository' as const, id: c.ns, label: c.label, hint: `knowledge:${c.ns}`, keywords: [c.ns] })),
+    ...resourceNamespaces
+      .filter((ns) => !categories.some((c) => c.ns === ns))
+      .map((ns) => ({ kind: 'repository' as const, id: ns, label: ns, hint: `knowledge:${ns}`, keywords: [ns] })),
+    ...actors.map((a) => ({
+      kind: 'actor' as const,
+      id: a.id,
+      label: a.label.replace(' (revoked)', ''),
+      hint: [a.role, a.kind === 'device' ? 'device' : '', a.derivation, a.status === 'bad' ? 'revoked' : ''].filter(Boolean).join(' · '),
+      keywords: [a.omniHex, a.vendor],
+    })),
+    ...channels.map((ch) => ({ kind: 'channel' as const, id: ch.id, label: ch.name || ch.id, hint: ch.id, keywords: [ch.note ?? ''] })),
+    ...credentials.map((c) => ({ kind: 'credential' as const, id: c.service, label: c.service, hint: `${c.category} · ${c.sensitivity}` })),
+  ], [categories, resourceNamespaces, actors, channels, credentials]);
+  const pickSearch = (e: SearchEntry) => {
+    if (e.kind === 'page') go(e.id as Page);
+    else if (e.kind === 'actor') go('detail', e.id);
+    else if (e.kind === 'repository') { setKnowledgeFocus({ ns: e.id, nonce: Date.now() }); go('knowledge'); }
+    else if (e.kind === 'channel') go('channels');
+    else go('credentials');
+  };
+
+  const go = (p: Page, id: string | null = null) => {
+    document.querySelectorAll<HTMLDetailsElement>('details.app-menu[open]').forEach((d) => { d.open = false; });
+    setPage(p);
+    setActorId(id);
+    setProposals(null); // #207: a fresh actor detail starts un-classified
+    setProposing(false);
+    if (typeof window !== 'undefined') window.scrollTo({ top: 0, behavior: 'instant' });
+  };
+
+  // #207 items 5/7 — connect-time auto-distribution. Classify the agent's surface
+  // (its cred services) → sensitivity-tiered proposals. The grant itself rides the
+  // existing K11-gated scope mutation; confirming here surfaces the gesture
+  // (sensitive ⇒ explicit) and clears the proposal. No scope is written on propose.
+  const proposeForActor = async (actor: Actor) => {
+    const credSurface = (actor.services ?? [])
+      .filter((s) => s !== 'email')
+      .map((s) => ({ dataClass: 'credentials', entity: s }));
+    // #207 item 8 — agent memory inheritance: the agent can inherit the master's
+    // namespaces (the taxonomy categories); the master curates per-namespace, and
+    // sensitive namespaces (health, finance, …) land in the explicit-pick tier.
+    const memSurface = categories.map((c) => ({ dataClass: 'memory', entity: c.ns }));
+    const surface = [...memSurface, ...credSurface];
+    if (surface.length === 0) { setProposals([]); return; }
+    setProposing(true);
+    const r = await client.proposeScopes(actor.id, surface);
+    setProposing(false);
+    if (r.ok) {
+      setProposals(r.data);
+    } else {
+      const m = (r.status.detail ?? '').match(/\{"error":"([^"]+)"\}/);
+      showToast(`Classify failed — ${m ? m[1] : r.status.detail ?? 'connect a daemon, then onboard first'}.`);
+    }
+  };
+  const confirmProposal = async (actor: Actor, proposal: ProposedScope) => {
+    const services = [...new Set([...(actor.services ?? []), proposal.service])];
+    if (await commitScope(actor, services, false)) {
+      setProposals((previous) => previous?.filter((item) => item.service !== proposal.service) ?? null);
+    }
+  };
+  const confirmSafeSet = async (actor: Actor, proposals: ProposedScope[]) => {
+    const services = [...new Set([...(actor.services ?? []), ...proposals.map((proposal) => proposal.service)])];
+    if (await commitScope(actor, services, false)) {
+      const granted = new Set(proposals.map((proposal) => proposal.service));
+      setProposals((previous) => previous?.filter((item) => !granted.has(item.service)) ?? null);
+    }
+  };
+
+  const logout = async () => {
+    readiness.pause();
+    setOnboardedFlag(false);
+    await client.logout();
+    onSessionEnd();
+  };
+
+  const updateActor = (id: string, patch: Partial<Actor>) => {
+    setActors((prev) => prev.map((a) => (a.id === id ? { ...a, ...patch } : a)));
+  };
+
+  // #249/#248 — the memory namespaces the operator can grant: the loaded
+  // taxonomy categories when available (the real per-master namespace set),
+  // else the canonical four. Drives the pairing accept picker, the claim's
+  // default requested scope, and the permissions panel.
+  const availableNamespaces =
+    categories.length > 0 ? categories.map((c) => c.ns) : (NAMESPACES as readonly string[]).slice();
+
+  // #248 — commit the permissions panel's staged memory grant on chain: ONE
+  // setScope (set-replace) UserOp signed by the master K11 (Touch ID), relayed
+  // via the broker → bundler → EntryPoint.handleOps. Returns true on success so
+  // the panel clears its staged state; the #233 mirror then re-reads the grant
+  // from chain on the refetch below (persistence across refetch + restart).
+  // `preserveOverride` (#408): the device channel editor passes `[]` — a device's
+  // grant set is channel-only by construction (D6), so the staged channel list IS
+  // the full replacement and blind-preserving the mirror's unknown hashes would
+  // resurrect the very grants being removed. Memory-panel callers omit it and
+  // keep the #248 preserve behavior.
+  const commitScope = async (actor: Actor, services: string[], readOnly: boolean, preserveOverride?: string[]): Promise<boolean> => {
+    if (status.kind !== 'connected') {
+      showToast('Reconnect before committing scope changes.');
+      return false;
+    }
+    if (services.length === 0) {
+      // The commit below still echoes the actor's PRESERVED (non memory/inbox)
+      // grants — credentials, email, … — so "zero selected" revokes ONLY memory +
+      // inbox, never those. Say exactly that (Codex review: the old text claimed
+      // full denial while the request preserved cred grants).
+      const preserved = actor.scopeUnknownServiceIds ?? [];
+      const msg = preserved.length > 0
+        ? `Revoke ALL knowledge + inbox grants for ${actor.label}?\n\nIts ${preserved.length} other on-chain grant(s) (credentials, email, …) stay UNCHANGED — revoke those from their own controls, or revoke the device to clear everything.\n\nContinue?`
+        : `Commit ZERO grants for ${actor.label}? This revokes every knowledge + inbox grant on chain — the agent will be denied everywhere.\n\nRevoke all?`;
+      if (!window.confirm(msg)) return false;
+    }
+    showToast(`Building setScope for ${actor.label}…`);
+    // setScope is set-replace — echo the mirror's unmatched on-chain service ids
+    // (e.g. cred:<service> granted at accept) so a memory toggle can't wipe them.
+    const built = await client.scopeBuild({
+      actorOmni: actor.omniHex,
+      services,
+      preserveServiceIds: preserveOverride ?? actor.scopeUnknownServiceIds ?? [],
+      readOnly,
+    });
+    if (!built.ok) {
+      showToast(`Scope build failed — ${built.status?.detail ?? 'check master session + chain'}`);
+      return false;
+    }
+    showToast('Approve with Touch ID…');
+    let assertion;
+    try {
+      const masterCred = getMasterCredId() || null;
+      akLog('scope: signing userOpHash (Touch ID)', {
+        actor: actor.id,
+        services,
+        readOnly,
+        userOpHash: built.data.user_op_hash,
+      });
+      assertion = await getAssertionOverHash(
+        built.data.user_op_hash,
+        masterCred ? [masterCred] : undefined,
+      );
+    } catch {
+      showToast('Touch ID cancelled — scope unchanged on chain.');
+      return false;
+    }
+    const submitted = await client.scopeSubmit({ user_op: built.data.user_op, assertion });
+    if (!submitted.ok) {
+      const detail = submitted.status?.detail ?? 'handleOps error';
+      akLog('scope: submit FAILED ❌', { actor: actor.id, detail });
+      if (!hosted && /SIG_VALIDATION|wrong passkey|reverted on-chain/i.test(detail)) {
+        showToast(
+          `Scope commit failed (${detail}). Your signing passkey ≠ the one bound to your master account — use the bound passkey, or complete authorized recovery before clearing the local binding.`,
+          true,
+          { label: 'Clear recovered binding', fn: resetMaster },
+        );
+      } else {
+        showToast(`Scope commit failed — ${detail}`);
+      }
+      return false;
+    }
+    akLog('scope: submit OK ✅', {
+      actor: actor.id,
+      txHash: submitted.data.txHash,
+      auditEnvelopeHashes: submitted.data.auditEnvelopeHashes,
+    });
+    const scopeReceipt = submitted.data.auditEnvelopeHashes?.[0];
+    showToast(
+      `${actor.label} scope committed on chain (Touch ID · setScope).` +
+        (scopeReceipt ? ` Audit receipt ${scopeReceipt.slice(0, 10)}….` : ''),
+    );
+    const a = await client.listActors();
+    if (a.ok) setActors(a.data);
+    return true;
+  };
+
+  // #207 item 1A — config-init entry point A: author the taxonomy from a bundled
+  // preset. Two-phase like plant (ceremony → real call) so the authoring shows
+  // the same ritual. Master-self Config write; no K11 (it writes the category
+  // index, not scope grants).
+  const initDefault = (presetId: string) => {
+    if (initializing || planting) return;
+    setPendingPreset(presetId);
+    setInitializing(true);
+  };
+  const initDone = async () => {
+    setInitializing(false);
+    const r = await client.initConfigDefault(pendingPreset);
+    if (r.ok) {
+      // taxonomyStatus: "ok" (durable, real Config store) · "cached" (NO config
+      // worker configured at all — dev/no-infra, in-memory only). A configured-
+      // but-broken store does NOT reach here — it hard-fails into the else branch
+      // (no silent in-memory fallback; real data or a loud error).
+      const cached = r.data.taxonomyStatus === 'cached';
+      setCategories(r.data.categories);
+      setEntriesByNs({});
+      showToast(
+        `Initialized · ${r.data.categories.length} categories${cached ? ' (dev only — no config worker configured)' : ''}.`,
+      );
+    } else {
+      const detail = r.status.detail ?? '';
+      const m = detail.match(/\{"error":"([^"]+)"\}/);
+      const reason = m ? m[1] : detail || 'connect a daemon, then complete onboarding (login + K11 enroll) first';
+      showToast(`Initialize failed — ${reason}`);
+    }
+  };
+
+  // §2 plant: import the PREPARED archive through the real client seam (daemon
+  // content-hash dedup — idempotent server-side, so no client dedup guard needed;
+  // just block re-entry while a ceremony is running).
+  const plantMemory = () => {
+    if (planting || initializing) return;
+    setPlanting(true);
+  };
+
+  // #207 credentials: vault a master credential through the real chain (cap-mint →
+  // STS → cred worker → S3), then re-list. Real durable write or a loud error.
+  const storeCredential = async (service: string, secret: string) => {
+    if (storingCred) return;
+    setStoringCred(true);
+    const r = await client.storeCredential(service, secret);
+    setStoringCred(false);
+    if (r.ok) {
+      showToast(`Vaulted ${r.data.service} (${r.data.category}).`);
+      const listed = await client.listCredentials();
+      if (listed.ok) setCredentials(listed.data);
+    } else {
+      const detail = r.status.detail ?? '';
+      const m = detail.match(/\{"error":"([^"]+)"\}/);
+      showToast(`Vault failed — ${m ? m[1] : detail || 'connect a daemon + a cred worker first'}.`);
+    }
+  };
+  const plantDone = async () => {
+    setPlanting(false);
+    const r = await client.plantMemory(PREPARED_MEMORY);
+    if (r.ok) {
+      // #201 codex finding 2: the memory blobs are durable, but if the category
+      // index (taxonomy) write failed, say so — the categories would be stale.
+      const taxFailed = r.data.taxonomyStatus.startsWith('failed');
+      const listed = await client.listMemoryCategories();
+      if (listed.ok) {
+        setCategories(listed.data);
+        setEntriesByNs({}); // drop the lazy cache so an opened category re-decrypts fresh
+        const base = `Planted · ${r.data.planted} new, ${r.data.skipped} deduped · ${listed.data.length} categories.`;
+        showToast(taxFailed ? `${base} ⚠ category index didn't update — re-plant to retry.` : base);
+      } else {
+        showToast(`Planted ${r.data.planted} new, but the category list didn't load — ${listed.status.detail ?? 'reload the page'}.`);
+      }
+    } else {
+      // The plant button only renders when the daemon is connected, so a failure
+      // here is almost never "no daemon" — surface the daemon's ACTUAL reason
+      // (e.g. 409 "no master session — complete onboarding first" / "master device
+      // not registered on chain yet", or a 502 worker error) instead of masking it.
+      const detail = r.status.detail ?? '';
+      const m = detail.match(/\{"error":"([^"]+)"\}/);
+      const reason = m ? m[1] : detail || 'connect a daemon, then complete onboarding (login + K11 enroll) first';
+      showToast(`Plant failed — ${reason}`);
+    }
+  };
+
+  // ─── Pairing: accept → register on chain (§10.2 P.2) ───────────────
+  // #214: the daemon submits registerAgentDevice for the binding + acks the broker.
+  // The agent's scope grant (Touch ID, P.3) is the next step via its actor detail.
+  //
+  // #249: `services` is the operator's SELECTION from the accept card's namespace
+  // picker (default = the requested tokens), not a blind compile of the request —
+  // the operator adjusts the grant BEFORE Touch ID, so §B's "review the device +
+  // requested scope → accept" actually ends with the agent scoped.
+  const acceptPairing = async (req: PairingRequest, services: string[]) => {
+    if (status.kind !== 'connected') {
+      showToast('Connect a daemon to approve a pairing.');
+      return;
+    }
+    // #408 §14.10 — the accept card HARD-enforces the device rule: a channel-
+    // endpoint device must attach ≥1 channel grant (a grant-less device is inert;
+    // the broker layer only warns). The device accept card disables its button
+    // too — this is the belt for any other caller.
+    const isDevice = req.isDevice === true;
+    if (isDevice && !services.some(isChannelService)) {
+      showToast(
+        `${req.agent} is a DEVICE claim — attach at least one channel (channel-pub/-sub) before accepting (§14.10).`,
+      );
+      return;
+    }
+    // #225 E7 — the real Touch-ID gate: build the sponsored executeBatch UserOp on
+    // the broker, sign its userOpHash with K11 (Touch ID), submit → handleOps. This
+    // does BOTH registerAgentDevice (P.2) + setScope (P.3) atomically, in one block.
+    if (services.length === 0) {
+      // Binding with zero grants is legitimate (grant later from the actor page),
+      // but it must NEVER be silent (#245 floor) — and per #249 it now needs an
+      // EXPLICIT confirmation, because zero grants is exactly the deny-everywhere
+      // trap the runbook's pairing story does not expect.
+      const proceed = window.confirm(
+        `${req.agent} would be bound with ZERO scope grants — it cannot read any knowledge or credentials until you grant scopes from its actor page.\n\nBind with zero grants?`,
+      );
+      if (!proceed) return;
+      showToast(
+        `Heads-up: this accept binds ${req.agent} with ZERO grants. Grant scopes from its actor page afterwards (permissions · commit · Touch ID).`,
+        true,
+      );
+    }
+    showToast(`Building accept for ${req.agent}…`);
+    const built = await client.acceptBuild({
+      requestId: req.id,
+      services,
+      readOnly: false,
+      maxPerCall: '0',
+      maxPerPeriod: '0',
+      maxTotal: '0',
+      periodSeconds: 0,
+      isDevice,
+    });
+    if (!built.ok) {
+      showToast(`Accept build failed — ${built.status?.detail ?? 'check master session + chain (cutover?)'}`);
+      return;
+    }
+    showToast('Approve with Touch ID…');
+    const masterAccount = built.data.user_op?.sender;
+    akLog('accept: built UserOp — master account = operatorMasterWallet', {
+      masterAccount,
+      userOpHash: built.data.user_op_hash,
+      entryPoint: built.data.entry_point,
+    });
+    let assertion;
+    try {
+      // Auto-select the master passkey (stored at K11 enrollment) so the browser
+      // skips its picker and the right key signs. Absent ⇒ full picker (fallback).
+      const masterCred = getMasterCredId() || null;
+      akLog('accept: signing userOpHash (Touch ID)', {
+        masterAccount,
+        requestedCredentialId: masterCred ?? '(none — full picker)',
+        userOpHash: built.data.user_op_hash,
+      });
+      assertion = await getAssertionOverHash(
+        built.data.user_op_hash,
+        masterCred ? [masterCred] : undefined,
+      );
+      // THE key diagnostic: the passkey that actually signed vs the one we requested.
+      // If signingCredentialId ≠ the credential bound at onboarding, the accept will
+      // SIG_VALIDATION_FAILED on chain (the account verifies only the bound pubkey).
+      akLog('accept: assertion produced', {
+        masterAccount,
+        requestedCredentialId: masterCred ?? '(none)',
+        signingCredentialId: assertion.credential_id,
+        autoSelectMatched: !masterCred || assertion.credential_id === masterCred,
+      });
+    } catch {
+      // Either the operator cancelled, OR the bound master passkey was deleted in the
+      // OS password manager (the picker then has nothing to sign with).
+      if (hosted) { showToast('Touch ID cancelled. Your account and grants are unchanged. Try again when you are ready.', true); return; }
+      showToast(
+        'Touch ID cancelled — or your master passkey was deleted. If it was deleted, complete authorized recovery before clearing the local binding.',
+        true,
+        { label: 'Clear recovered binding', fn: resetMaster },
+      );
+      return;
+    }
+    const submitted = await client.acceptSubmit({ user_op: built.data.user_op, assertion });
+    if (!submitted.ok) {
+      const detail = submitted.status?.detail ?? 'handleOps error';
+      akLog('accept: submit FAILED ❌', {
+        masterAccount,
+        signingCredentialId: assertion.credential_id,
+        detail,
+      });
+      if (!hosted && /SIG_VALIDATION|wrong passkey|reverted on-chain/i.test(detail)) {
+        showToast(
+          `Accept failed (${detail}). Your signing passkey ≠ the one bound to your master account — use the bound passkey, or complete authorized recovery before clearing the local binding.`,
+          true,
+          { label: 'Clear recovered binding', fn: resetMaster },
+        );
+      } else {
+        showToast(`Accept submit failed — ${detail}`);
+      }
+      return;
+    }
+    akLog('accept: submit OK ✅', {
+      masterAccount,
+      signingCredentialId: assertion.credential_id,
+      txHash: submitted.data.txHash,
+      auditEnvelopeHashes: submitted.data.auditEnvelopeHashes,
+    });
+    const acceptReceipts = submitted.data.auditEnvelopeHashes?.length ?? 0;
+    showToast(
+      `${req.agent} accepted on chain (Touch ID · register + scope, one block).` +
+        (acceptReceipts > 0 ? ` ${acceptReceipts} audit receipt${acceptReceipts > 1 ? 's' : ''} recorded.` : ''),
+    );
+    // Drop it from the pending list. The accept registered the agent on-chain, but the
+    // broker only clears the rendezvous row on an explicit ack (the accept/submit body
+    // carries no request_id) — without this the request reappears on every refresh.
+    // Remove locally for instant feedback, then ack the broker so it stays gone.
+    setPairingRequests((prev) => prev.filter((r) => r.id !== req.id));
+    const acked = await client.ackPairing(req.id);
+    if (!acked.ok) akLog('accept: ack pending-binding failed (request may reappear)', { detail: acked.status?.detail });
+    await refreshPairing();
+    const a = await client.listActors();
+    if (a.ok) setActors(a.data);
+  };
+  const declinePairing = async (id: string) => {
+    // Actually drop the request on the broker (J1-gated, no Touch ID) — not just
+    // the local list, or it reappears on the next refresh.
+    const r = await client.declinePairing(id);
+    if (!r.ok) {
+      showToast(`Decline failed — ${r.status?.detail ?? 'check the master session'}`);
+      return;
+    }
+    setPairingRequests((prev) => prev.filter((req) => req.id !== id));
+    showToast('Pairing request declined.');
+    await refreshPairing();
+  };
+  // #214: poll the REAL broker rendezvous (daemon GET /v1/agent/pairing/pending)
+  // for agents the master has claimed that await on-chain approval. Replaces the
+  // former local-state mock.
+  const refreshPairing = async () => {
+    if (status.kind !== 'connected') {
+      showToast('Connect a daemon to poll for agent pairing codes.');
+      return;
+    }
+    const r = await client.listPairingRequests();
+    if (!r.ok) {
+      showToast('Could not reach the daemon to poll agent pairings.');
+      return;
+    }
+    setPairingRequests(r.data);
+    showToast(
+      r.data.length > 0
+        ? `${r.data.length} agent${r.data.length > 1 ? 's' : ''} awaiting on-chain approval.`
+        : 'Polled rendezvous · no pending agent pairings.',
+    );
+  };
+
+  // #214 §10.2 P.1 — claim the agent's pairing code via the daemon → broker; on
+  // success, re-poll so the claimed agent appears in the rendezvous (awaiting
+  // on-chain register + scope approval).
+  //
+  // #249: the claim declares a NAMESPACE-QUALIFIED default scope (`knowledge:<ns>`
+  // per known namespace) — never a bare `memory`. A bare token can't compile to
+  // an on-chain service, which is how an accept silently landed `setScope([])`;
+  // with qualified defaults the accept card's picker has the real namespaces
+  // preselected and §B ends with the agent actually scoped.
+  const claimPairing = async (input: { code: string; label: string }) => {
+    if (status.kind !== 'connected') {
+      showToast('Connect a daemon to claim a pairing code.');
+      return;
+    }
+    setClaiming(true);
+    const scope = availableNamespaces.map((ns) => `knowledge:${ns}`).join(',');
+    const r = await client.claimPairing({ ...input, scope });
+    setClaiming(false);
+    if (!r.ok) {
+      showToast('Claim failed — check the code + that your master session is active.');
+      return;
+    }
+    showToast(`Claimed ${input.label} — now awaiting your on-chain approval.`);
+    await refreshPairing();
+  };
+
+  // #408 D6 — claim a DEVICE's pairing code from the channels page: the declared
+  // scope is the channel attachment (channel-pub/-sub:<id> only), which is what
+  // makes the broker treat the claim as a device (D9 no-spawn) and the daemon
+  // flag it `isDevice` for the channel-page accept card. ≥1 channel enforced
+  // here too (§14.10 — the claim is where the attachment is first declared).
+  const claimDevicePairing = async (input: { code: string; label: string; channels: string[] }) => {
+    if (status.kind !== 'connected') {
+      showToast('Connect a daemon to claim a device pairing code.');
+      return;
+    }
+    const channelServices = input.channels.filter(isChannelService);
+    if (channelServices.length === 0) {
+      showToast('A device claim must attach at least one channel (§14.10).');
+      return;
+    }
+    setClaiming(true);
+    const r = await client.claimPairing({
+      code: input.code,
+      label: input.label,
+      scope: channelServices.join(','),
+    });
+    setClaiming(false);
+    if (!r.ok) {
+      showToast('Device claim failed — check the code + that your master session is active.');
+      return;
+    }
+    showToast(`Claimed device ${input.label} — review + accept below (Touch ID).`);
+    await refreshPairing();
+  };
+
+  // ─── #404 channel registry — CRUD against the daemon's config-class doc ───
+  // Channels are created HERE (or via the devices page's explicit inline
+  // creator) and only ever SELECTED at pairing — never minted silently. The id
+  // is the immutable on-chain anchor; delete is refused while grants hold it.
+  const refreshChannels = async () => {
+    if (!client.listChannels) return;
+    // The holders come from the actor tree: re-read it with the registry so a
+    // grant an install just minted stops reading as "orphaned".
+    setActorsSyncing(true);
+    const [r, a] = await Promise.all([client.listChannels(), client.listActors()]);
+    setActorsSyncing(false);
+    if (a.ok) setActors(a.data);
+    if (r.ok) {
+      setChannels(r.data.channels);
+      setChannelStorage(r.data.storage);
+    } else {
+      showToast(`Channel registry unavailable — ${r.status?.detail ?? 'check the daemon'}`);
+    }
+  };
+  const createChannel = async (input: { id: string; name: string; note?: string; kind?: ChannelDef['kind'] }): Promise<ChannelDef | null> => {
+    if (!client.createChannel) {
+      showToast('This backend has no channel registry.');
+      return null;
+    }
+    const r = await client.createChannel(input);
+    if (!r.ok) {
+      showToast(`Create channel failed — ${r.status?.detail ?? 'check master session'}`);
+      return null;
+    }
+    await refreshChannels();
+    showToast(`Channel ${r.data.id} registered — its id is now the immutable anchor.`);
+    return r.data;
+  };
+  const updateChannel = async (id: string, input: { name?: string; note?: string }): Promise<boolean> => {
+    if (!client.updateChannel) return false;
+    const r = await client.updateChannel(id, input);
+    if (!r.ok) {
+      showToast(`Rename failed — ${r.status?.detail ?? 'check master session'}`);
+      return false;
+    }
+    await refreshChannels();
+    showToast(`Channel ${id} updated (id unchanged — ids never rename).`);
+    return true;
+  };
+  const deleteChannel = async (id: string): Promise<boolean> => {
+    if (!client.deleteChannel) return false;
+    const r = await client.deleteChannel(id);
+    if (!r.ok) {
+      const detail = r.status?.detail ?? '';
+      const holders = detail.match(/"holders":\[([^\]]*)\]/)?.[1]?.replaceAll('"', '') ?? '';
+      showToast(
+        holders
+          ? `Channel ${id} is in use by ${holders} — revoke those grants first.`
+          : `Delete failed — ${detail || 'check master session'}`,
+      );
+      return false;
+    }
+    await refreshChannels();
+    showToast(`Channel ${id} removed from the registry.`);
+    return true;
+  };
+  // One daemon write drops every registry entry no actor holds a grant on; the
+  // daemon re-derives the set against the chain-reconciled fleet (and refuses
+  // while that fleet is unreconciled), so the page's count is display only.
+  const clearOrphanedChannels = async (): Promise<boolean> => {
+    if (!client.clearOrphanedChannels) {
+      showToast('This backend has no channel registry.');
+      return false;
+    }
+    const r = await client.clearOrphanedChannels();
+    if (!r.ok) {
+      showToast(`Clear orphaned channels failed — ${r.status?.detail ?? 'check master session'}`);
+      return false;
+    }
+    await refreshChannels();
+    const { removed, kept } = r.data;
+    showToast(
+      removed.length === 0
+        ? 'No orphaned channels — every registry entry is held by a device or agent.'
+        : `Cleared ${removed.length} orphaned channel${removed.length === 1 ? '' : 's'}: ${removed.join(', ')}${kept.length ? ` · kept ${kept.length} in use` : ''}.`,
+    );
+    return true;
+  };
+
+  const handleRevokeDevice = (actor: Actor) => {
+    setPendingAction({
+      kind: 'revoke-device',
+      actor,
+      intent: {
+        text: `Revoke device · ${actor.label}`,
+        fields: [
+          ['actor_omni', actor.omni],
+          ['device_pubkey', actor.devicePubkey.slice(0, 22) + '…'],
+          ['mutation', 'SidecarRegistry.revoke_device'],
+          ['propagation', 'SSE drop + cache zero'],
+          ['scope effect', 'all caps invalidated · ttl 0s'],
+        ],
+      },
+    });
+  };
+
+  const confirmAction = async () => {
+    const action = pendingAction;
+    setPendingAction(null);
+    if (!action) return;
+    if (action.kind === 'pair-accept') {
+      setPairingRequests((prev) => prev.filter((r) => r.id !== action.req.id));
+      setPairingCeremony(action.req);
+    }
+    if (action.kind === 'revoke-device') {
+      const actor = action.actor;
+      if (!actor.deviceKeyHash) {
+        showToast('Cannot verify revocation: this actor has no on-chain device key hash.');
+        return;
+      }
+      const confirmRevoke = async (): Promise<boolean> => {
+        showToast(`Confirming ${actor.label} revocation on chain…`);
+        const r = await client.revokeDevice(actor.id, action.intent);
+        if (!r.ok) {
+          showToast(`Revoke failed — ${r.status?.detail ?? 'check the daemon + chain config'}`);
+          return false;
+        }
+        return true;
+      };
+      if (actor.deviceKeyHash) {
+        showToast(`Building revoke for ${actor.label}…`);
+        const built = await client.revokeBuild({ deviceKeyHashes: [actor.deviceKeyHash] });
+        if (!built.ok) {
+          const buildDetail = built.status?.detail ?? '';
+          if (/nothing to revoke/i.test(buildDetail)) {
+            if (!(await confirmRevoke())) return;
+            const a0 = await client.listActors();
+            if (a0.ok) setActors(a0.data);
+            showToast(`${actor.label} revoked on chain.`);
+            go('audit');
+            return;
+          }
+          showToast(`Revoke build failed — ${buildDetail || 'check master session + chain'}`);
+          return;
+        }
+        showToast('Approve with Touch ID…');
+        let assertion;
+        try {
+          const masterCred = getMasterCredId() || null;
+          akLog('revoke: signing userOpHash (Touch ID)', {
+            actor: actor.id,
+            deviceKeyHash: actor.deviceKeyHash,
+            userOpHash: built.data.user_op_hash,
+          });
+          assertion = await getAssertionOverHash(
+            built.data.user_op_hash,
+            masterCred ? [masterCred] : undefined,
+          );
+        } catch {
+          showToast('Touch ID cancelled — the device is still bound.');
+          return;
+        }
+        const submitted = await client.revokeSubmit({ user_op: built.data.user_op, assertion });
+        if (!submitted.ok) {
+          const detail = submitted.status?.detail ?? 'handleOps error';
+          akLog('revoke: submit FAILED ❌', { actor: actor.id, detail });
+          if (!hosted && /SIG_VALIDATION|wrong passkey|reverted on-chain/i.test(detail)) {
+            showToast(
+              `Revoke failed (${detail}). Your signing passkey ≠ the one bound to your master account — use the bound passkey, or complete authorized recovery before clearing the local binding.`,
+              true,
+              { label: 'Clear recovered binding', fn: resetMaster },
+            );
+          } else {
+            showToast(`Revoke submit failed — ${detail}`);
+          }
+          return;
+        }
+        const txHash = submitted.data.txHash;
+        const auditEnvelopeHashes = submitted.data.auditEnvelopeHashes;
+        akLog('revoke: submit OK ✅', { actor: actor.id, txHash, auditEnvelopeHashes });
+        const r = await client.revokeDevice(actor.id, action.intent, { txHash, auditEnvelopeHashes });
+        if (!r.ok) {
+          showToast(`Revoke landed on chain but the daemon verify failed — ${r.status?.detail ?? 'refresh'}`);
+          return;
+        }
+      }
+      const a = await client.listActors();
+      if (a.ok) setActors(a.data);
+      showToast(`${actor.label} revoked on chain.`);
+      go('audit');
+    }
+  };
+
+  // Workflow 7-8: pairing ceremony completes → re-fetch the actor tree so a
+  // newly-bound agent (if the daemon bound one) appears. No fabricated actor.
+  const finishPairingCeremony = async () => {
+    const req = pairingCeremony;
+    setPairingCeremony(null);
+    if (!req) return;
+    setJustPaired(req.agent);
+    const a = await client.listActors();
+    if (a.ok) setActors(a.data);
+    showToast(`${req.agent} paired · cap-tokens minted · session key handed off.`);
+    go('delegates');
+  };
+
+  const currentActor = actorId ? actors.find((a) => a.id === actorId) : null;
+  const master = actors.find((a) => a.role === 'master');
+  // Theme hues: delegates keeps the former 'pairing' section styling; devices
+  // shares the channels hue (both are the conduit family).
+  const sectionAttr = page === 'decode' ? 'audit'
+    : page === 'delegates' ? 'pairing'
+    : page === 'devices' ? 'channels'
+    : page === 'applications' ? 'pairing'
+    : page === 'transport' ? 'contacts'
+    : ((['audit', 'knowledge', 'channels', 'contacts', 'chain', 'logo'] as string[]).includes(page) ? page : undefined);
+
+  if (readiness.phase === 'checking' || readiness.phase === 'error') {
+    return <main className="app-main">
+      <div className="banner" role={readiness.phase === 'error' ? 'alert' : 'status'}>
+        {readiness.phase === 'checking' ? 'Restoring session…' : readiness.detail}
+        {readiness.phase === 'error' && <button className="btn sm" onClick={() => void readiness.refresh(true)}>Retry</button>}
+      </div>
+    </main>;
+  }
+  if (!onboarded) {
+    return <>
+      {readiness.expired && <div className="banner" role="status">Session expired. Sign back in with Touch ID to restore access.</div>}
+      <OnboardingScreen
+        onComplete={async (summary) => {
+          if (readiness.demo) setOnboardedFlag(true);
+          if (!await readiness.refresh(true)) return;
+          go('actors');
+          // Jump straight into the app; a STICKY toast (no auto-dismiss) carries
+          // the next step so it isn't a wall the user has to click through.
+          if (summary?.categories != null) {
+            const n = summary.categories;
+            const noun = n === 1 ? 'category' : 'categories';
+            const head = summary.already
+              ? `✓ You're set up — ${n} ${noun} already configured.`
+              : `✓ ${n} ${noun} authored${summary.dev ? ' (dev only — no config worker)' : ''}.`;
+            showToast(`${head}  Next: connect an agent — open the Delegates tab to pair one.`, true);
+          }
+        }}
+      />
+    </>;
+  }
+
+  // Privacy-preserving identity for the header: a public omni hash is truncated
+  // (full value in the title/hover), and we prefer the on-chain actor omni
+  // (`master.omni`) once it exists, falling back to the email-identity omni held
+  // after login. Never render the hosted session bearer or device keys.
+  const shortOmni = (o?: string) => {
+    if (!o) return '';
+    const h = o.startsWith('0x') ? o.slice(2) : o;
+    return h.length <= 12 ? o : `0x${h.slice(0, 6)}…${h.slice(-4)}`;
+  };
+  const whoOmni = master?.omni ?? identity?.omni;
+  // Email shown masked when the privacy toggle is on (persisted in localStorage).
+  const whoLabel = master?.label ?? (identity?.email ? maskEmail(identity.email, maskEm) : undefined) ?? 'O_master';
+
+  return (
+    <div className="app">
+      <header className="app-head">
+        <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
+          <div className="brand">
+            <span className="mark">agentKeys</span>
+            <span className="sub">parent control · m1</span>
+          </div>
+          <HeaderSearch entries={searchIndex} onPick={pickSearch} />
+        </div>
+        <div className="head-right">
+          <span className="head-status" style={{ fontSize: 10, letterSpacing: '0.08em', textTransform: 'uppercase' }}>{hosted ? 'console' : (daemonChain ?? CHAIN_PROFILE.name)} · {hosted ? (status.kind === 'connected' ? 'browser · broker connected' : 'broker unavailable') : status.kind === 'connected' ? `daemon ${status.via}` : 'daemon offline'}</span>
+          <button
+            className={`bell ${pairingRequests.length ? 'has-req' : ''}`}
+            // Route to where the pending claims actually are: delegate claims →
+            // delegates page; device-only claims → devices page.
+            onClick={() => go(pairingRequests.some((r) => !r.isDevice) || pairingRequests.length === 0 ? 'delegates' : 'devices')}
+            aria-label="pairing requests"
+            title={pairingRequests.length ? `${pairingRequests.length} pairing request` : 'no pending requests'}
+          >
+            ◉{pairingRequests.length > 0 && <span className="badge">{pairingRequests.length}</span>}
+          </button>
+          <button
+            className="btn sm"
+            onClick={() => { const v = !maskEm; setMaskEm(v); setMaskEmail(v); }}
+            title={maskEm ? 'Email masked (for screen-sharing) — click to show' : 'Email shown — click to mask'}
+          >{maskEm ? '🕶' : '👁'}</button>
+          <span className="who" title={whoOmni ?? ''}><span className="who-text">{whoOmni ? `${whoLabel} · ${shortOmni(whoOmni)}` : whoLabel}</span></span>
+          <button className="btn sm" onClick={logout} title="Clear this session and return to login">log out</button>
+          <details className="app-menu">
+            <summary className="btn sm" title="account · session">⋯</summary>
+            <div className="menu-body">
+              <button className="menu-item" onClick={() => go('logo')}>logo &amp; brand</button>
+              {!hosted && <button
+                className="menu-item"
+                style={{ color: 'var(--danger)' }}
+                title="Clear matching local state after an authorized chain recovery has completed"
+                onClick={() => {
+                  if (window.confirm('Clear local binding state after chain recovery?\n\nThe daemon first verifies that the master and device bindings are absent on chain. It submits no transaction and preserves local state if confirmation fails. Your OS passkey is unchanged.')) resetMaster();
+                }}
+              >
+                clear recovered binding
+              </button>}
+              <div className="menu-info">
+                K6 · session JWT<br />{hosted ? 'browser · session in this tab' : status.kind === 'connected' ? `daemon · ${status.via}` : 'daemon · offline'}<br />K11 · master device
+              </div>
+            </div>
+          </details>
+        </div>
+      </header>
+      {client instanceof CoreBackend && <PendingTransactions client={client} onConfirmed={() => setReloadKey((key) => key + 1)} />} 
+
+      {/* The sections as one tab row under the header (the GitHub shape, #695
+          §9): counters ride as pills, the pending pairing claims tint their tab,
+          and the open actor page shows as its own tab. The former left rail's
+          account + session rows live in the header's ⋯ menu; the actor tree is
+          the Actors page itself. */}
+      <nav className="app-nav" aria-label="sections">
+        <button className={`app-nav-item ${page === 'actors' ? 'active' : ''}`} onClick={() => go('actors')}>
+          actors<span className="count">{readCount(actorsRead, actors.length)}</span>
+        </button>
+        <button className={`app-nav-item ${page === 'knowledge' ? 'active' : ''}`} onClick={() => go('knowledge')}>
+          knowledge<span className="count">{readCount(categoriesRead, categories.length)}</span>
+        </button>
+        <button className={`app-nav-item ${page === 'credentials' ? 'active' : ''}`} onClick={() => go('credentials')}>
+          credentials<span className="count">{readCount(credentialsRead, credentials.length)}</span>
+        </button>
+        <span className="app-nav-sep" aria-hidden="true" />
+        <button className={`app-nav-item ${page === 'delegates' ? 'active' : ''}`} onClick={() => go('delegates')}>
+          delegates
+          {pairingRequests.filter((r) => !r.isDevice).length > 0 && <span className="count attention">{pairingRequests.filter((r) => !r.isDevice).length}</span>}
+        </button>
+        <button className={`app-nav-item ${page === 'devices' ? 'active' : ''}`} onClick={() => go('devices')}>
+          devices
+          {pairingRequests.filter((r) => r.isDevice).length > 0 && <span className="count attention">{pairingRequests.filter((r) => r.isDevice).length}</span>}
+        </button>
+        <button className={`app-nav-item ${page === 'channels' ? 'active' : ''}`} onClick={() => go('channels')}>
+          channels<span className="count">{readCount(channelsRead, channels.length)}</span>
+        </button>
+        <button className={`app-nav-item ${page === 'transport' ? 'active' : ''}`} onClick={() => go('transport')}>
+          transport
+        </button>
+        <button className={`app-nav-item ${page === 'contacts' ? 'active' : ''}`} onClick={() => go('contacts')}>
+          contacts
+        </button>
+        <button className={`app-nav-item ${page === 'applications' ? 'active' : ''}`} onClick={() => go('applications')}>
+          applications
+        </button>
+        <span className="app-nav-sep" aria-hidden="true" />
+        <button className={`app-nav-item ${page === 'audit' || page === 'decode' ? 'active' : ''}`} onClick={() => go('audit')}>
+          audit feed<span className="count">{events.length}</span>
+        </button>
+        <button className={`app-nav-item ${page === 'chain' ? 'active' : ''}`} onClick={() => go('chain')}>
+          chain
+        </button>
+        {page === 'detail' && currentActor && (
+          <>
+            <span className="app-nav-sep" aria-hidden="true" />
+            <button className="app-nav-item active" onClick={() => go('detail', currentActor.id)}>
+              ↳ {currentActor.label.replace(' (revoked)', '')}
+              {currentActor.status === 'bad' && <span className="count">revoked</span>}
+            </button>
+          </>
+        )}
+        {page === 'logo' && (
+          <>
+            <span className="app-nav-sep" aria-hidden="true" />
+            <button className="app-nav-item active" onClick={() => go('logo')}>logo</button>
+          </>
+        )}
+      </nav>
+
+      <main className="app-main" data-section={sectionAttr}>
+        {pageError && <div className="banner" role="alert">
+          Couldn&apos;t load this page. {pageError.detail}
+          <button className="btn sm" onClick={() => setReloadKey((key) => key + 1)}>Retry</button>
+        </div>}
+        {!pageError && pageLoading && <div className="banner" role="status">Loading {page}…</div>}
+        {!pageLoading && !pageError && <>
+        {page === 'actors' && <ActorsList actors={actors} status={status} onPick={(id) => go('detail', id)} />}
+        {page === 'detail' && currentActor && (
+          <ActorDetail actor={currentActor} onBack={() => go('actors')} onUpdate={updateActor} onCommitScope={commitScope} onRevoke={handleRevokeDevice} recentEvents={events} proposals={proposals} proposing={proposing} onPropose={proposeForActor} onConfirmProposal={confirmProposal} onConfirmSafe={confirmSafeSet} onResetMaster={hosted ? undefined : resetMaster} onOpenAudit={(id) => { setAuditActor(id); go('audit'); }} />
+        )}
+        {client instanceof MappedBackend && !(client instanceof CoreBackend) && (
+          <HostedEnrollmentApproval active={onboarded} credentialId={getMasterCredId() ?? ''}
+            pending={async () => {
+              const result = await client.hostedApprovalPending();
+              if (!result.ok) {
+                if (result.status.reason === 'unauthorized' || looksSessionExpired(result.status.detail)) readiness.pause(true);
+                throw new Error(result.status.detail);
+              }
+              return result.data;
+            }}
+            dismiss={async (id) => { const result = await client.hostedApprovalDismiss(id); if (!result.ok) throw new Error(result.status.detail); }}
+            prepare={async (request) => { const result = await client.hostedApprovalPrepare(request); if (!result.ok) throw new Error(result.status.detail); return result.data; }}
+            build={async (request) => { const result = await client.hostedApprovalBuild(request); if (!result.ok) throw new Error(result.status.detail); return result.data; }}
+            submit={async (request) => { const result = await client.hostedApprovalSubmit(request); if (!result.ok) throw new Error(result.status.detail); return result.data; }} />
+        )}
+        {page === 'knowledge' && (
+          // 2026-09-13 — ONE page over canonical memory + the curated, bindable items
+          // (the former memory + resources pages); it reads the app registry itself.
+          <KnowledgePage onResourcesLoaded={resourcesLoaded} client={client} showToast={showToast} reloadKey={reloadKey} categories={categories} entriesByNs={entriesByNs} actors={actors} status={status} presets={presets} defaultPresetId={defaultPresetId} initializing={initializing} planting={planting} inbox={inbox} inboxBusy={inboxBusy} onInitDefault={initDefault} onInitDone={initDone} onPlant={plantMemory} onPlantDone={plantDone} onLoadCategory={loadCategory} onReloadNamespace={reloadCategory} onView={setMemoryView} onAcceptInbox={acceptInboxItem} onRejectInbox={rejectInboxItem} onRefreshInbox={refreshInbox} onViewInboxBody={viewInboxBody} onOpenActor={(id) => go('detail', id)} onOpenApps={() => go('applications')} focusNs={knowledgeFocus} onCommitScope={commitScope} />
+        )}
+        {page === 'credentials' && (
+          <CredentialsPage credentials={credentials} status={status} storing={storingCred} onStore={storeCredential} />
+        )}
+        {page === 'delegates' && (
+          <DelegatesPage requests={pairingRequests.filter((r) => !r.isDevice)} actors={actors.filter((a) => !actorIsChannelEndpoint(a))} namespaces={availableNamespaces} onAccept={acceptPairing} onDecline={declinePairing} onRefresh={refreshPairing} onClaim={claimPairing} claiming={claiming} justPaired={justPaired} onManage={(id) => go('detail', id)} onCommitScope={commitScope} onUnpair={handleRevokeDevice} onNewAgent={() => setSpawnOpen(true)} onArchive={(a) => setArchiveActor(a)} deviceRequestCount={pairingRequests.filter((r) => r.isDevice).length} onGoDevices={() => go('devices')} showToast={showToast} />
+        )}
+        {page === 'devices' && (
+          <DevicesPage
+            devices={{
+              requests: pairingRequests.filter((r) => r.isDevice === true),
+              actors: actors.filter((a) => actorIsChannelEndpoint(a)),
+              channels,
+              claiming,
+              onClaim: claimDevicePairing,
+              onAccept: acceptPairing,
+              onDecline: declinePairing,
+              onRefresh: () => { void refreshPairing(); void refreshChannels(); },
+              onUnpair: handleRevokeDevice,
+              onManage: (id: string) => go('detail', id),
+              onCreateChannel: createChannel,
+              onGoChannels: () => go('channels'),
+              onCommitChannels: commitScope,
+            }}
+          />
+        )}
+        {page === 'channels' && (
+          <ChannelRegistryPage
+            registry={{
+              channels,
+              storage: channelStorage,
+              actors,
+              actorsSyncing: actorsSyncing || actorsRead.kind === 'loading',
+              onCreate: createChannel,
+              onUpdate: updateChannel,
+              onDelete: deleteChannel,
+              onClearOrphaned: clearOrphanedChannels,
+              onRefresh: () => void refreshChannels(),
+              onGoDevices: () => go('devices'),
+            }}
+          />
+        )}
+        {page === 'transport' && (
+          // How the family reaches the household: the method this stack runs
+          // (its connection, the owner's own bind) and the contact gate behind
+          // it — the router (#722), the live turns, the record, the contact audit.
+          <TransportPage onGoContacts={() => go('contacts')} />
+        )}
+        {page === 'contacts' && (
+          // The family: invites, and each member's rows on the household's
+          // channel documents (speak / read per channel), read from the contact gate.
+          <ContactsPage onGoTransport={() => go('transport')} />
+        )}
+        {page === 'applications' && (
+          // #682 — install / inspect / uninstall against the real registries
+          // (epic #660 stage 1). Channels feed the wizard's slot options.
+          <ApplicationsPage client={client} channels={channels} showToast={showToast} onGoChannels={() => go('channels')} onInstalled={() => setReloadKey((k) => k + 1)} onCreateChannel={createChannel} />
+        )}
+        {page === 'audit' && hosted && (
+          <HostedAuditHistory
+            client={client}
+            events={events}
+            status={status}
+            onPick={(e) => { setEventDetail(e); go('decode'); }}
+            paused={paused}
+            onPause={() => setPaused((p) => !p)}
+            actorOptions={auditActorOptions(actors, events)}
+            actorFilter={auditActor}
+            onActorFilter={setAuditActor}
+            actorRows={auditActorRows && actorAuditRows(auditActorRows, events, auditActor)}
+          />
+        )}
+        {page === 'audit' && !hosted && (
+          <AuditFeed
+            events={events}
+            status={status}
+            onPick={(e) => { setEventDetail(e); go('decode'); }}
+            paused={paused}
+            onPause={() => setPaused((p) => !p)}
+            actorOptions={auditActorOptions(actors, events)}
+            actorFilter={auditActor}
+            onActorFilter={setAuditActor}
+            actorRows={auditActorRows && actorAuditRows(auditActorRows, events, auditActor)}
+          />
+        )}
+        {page === 'decode' && eventDetail && <EventDecodePage event={eventDetail} onBack={() => go('audit')} />}
+        {page === 'chain' && <ChainPage />}
+        {page === 'logo' && <LogoPage />}
+        </>}
+      </main>
+      {spawnOpen && (
+        <SpawnAgentModal
+          client={client}
+          onClose={() => setSpawnOpen(false)}
+          onSpawned={() => {
+            void (async () => {
+              const a = await client.listActors();
+              if (a.ok) setActors(a.data);
+            })();
+          }}
+          showToast={showToast}
+        />
+      )}
+      {archiveActor && (
+        <ArchiveAgentDialog
+          client={client}
+          actor={archiveActor}
+          onClose={() => setArchiveActor(null)}
+          onArchived={() => {
+            void (async () => {
+              const a = await client.listActors();
+              if (a.ok) setActors(a.data);
+            })();
+          }}
+          showToast={showToast}
+        />
+      )}
+
+      {pendingAction && (
+        <WebAuthnModal intent={pendingAction.intent} onConfirm={confirmAction} onCancel={() => setPendingAction(null)} />
+      )}
+
+      {inboxConflict && (
+        <Modal
+          wide
+          title={`${inboxConflict.ns}/${inboxConflict.key} already exists — replace it, or keep both?`}
+          onClose={() => setInboxConflict(null)}
+          footer={
+            <>
+              <button className="btn" onClick={() => setInboxConflict(null)} disabled={inboxBusy}>cancel</button>
+              <button className="btn" onClick={() => void acceptInboxItem(inboxConflict.s3Key, inboxConflict.confirmContentHash, 'keep-both')} disabled={inboxBusy}>keep both (as {inboxConflict.key}-2)</button>
+              <button className="btn primary" onClick={() => void acceptInboxItem(inboxConflict.s3Key, inboxConflict.confirmContentHash, 'replace')} disabled={inboxBusy}>replace with the proposal</button>
+            </>
+          }
+        >
+          <p className="muted" style={{ fontSize: 12.5, marginTop: 0 }}>
+            The proposal would replace the current entry under this key. Lines it removes are struck through, lines it adds are highlighted. Every app granted this namespace reads the result at its next pull.
+          </p>
+          <DiffView before={inboxConflict.current} after={inboxConflict.proposed} />
+        </Modal>
+      )}
+      {memoryView && (
+        <Modal
+          title={`knowledge · ${memoryView.ns}/${memoryView.title}`}
+          onClose={() => setMemoryView(null)}
+          footer={<button className="btn" onClick={() => setMemoryView(null)}>close</button>}
+        >
+          <dl className="kvs" style={{ marginBottom: 14 }}>
+            <dt>path</dt><dd className="mono" style={{ fontSize: 11 }}>s3://…/bots/&lt;omni&gt;/{memoryView.ns}/{memoryView.key}.enc</dd>
+            <dt>envelope</dt><dd className="mono">{memoryView.version} · AES-256-GCM · k3 v1</dd>
+            <dt>bytes</dt><dd className="mono">{memoryView.bytes}</dd>
+            <dt>updated</dt><dd>{memoryView.updated}</dd>
+          </dl>
+          <div style={{ fontSize: 10, letterSpacing: '0.1em', textTransform: 'uppercase', color: 'var(--ink-faint)', marginBottom: 6 }}>decrypted plaintext</div>
+          <pre className="mem-body">{memoryView.body}</pre>
+        </Modal>
+      )}
+
+      {pairingCeremony && (
+        <div className="modal-bg">
+          <div className="modal" style={{ maxWidth: 520 }} onClick={(e) => e.stopPropagation()}>
+            <div className="modal-head"><span className="ttl">pairing ceremony · {pairingCeremony.agent}</span></div>
+            <div className="modal-body">
+              <div style={{ fontSize: 12, color: 'var(--ink-dim)', marginBottom: 14 }}>
+                Binding <span className="mono">O_master{pairingCeremony.derivation}</span> under your master identity. Each on-chain step is a real transaction on the daemon&apos;s chain.
+              </div>
+              <CeremonyRunner steps={PAIRING_STEPS} onDone={finishPairingCeremony} stepMs={680} />
+            </div>
+          </div>
+        </div>
+      )}
+
+      {toast && (
+        <div style={{ position: 'fixed', bottom: 24, left: '50%', transform: 'translateX(-50%)', display: 'flex', alignItems: 'center', gap: 14, maxWidth: 'min(92vw, 560px)', background: 'var(--ink)', color: 'var(--bg)', padding: '10px 14px 10px 18px', fontSize: 12, border: '1px solid var(--ink)', zIndex: 200, animation: 'pop 0.22s cubic-bezier(.2,.8,.2,1)' }}>
+          <span>{toast.msg}</span>
+          {toast.action && (
+            <button
+              onClick={() => { toast.action!.fn(); }}
+              style={{ background: 'var(--bg)', color: 'var(--ink)', border: '1px solid var(--bg)', cursor: 'pointer', fontSize: 11, lineHeight: 1, padding: '5px 9px', flexShrink: 0, whiteSpace: 'nowrap' }}
+            >
+              {toast.action.label}
+            </button>
+          )}
+          {toast.sticky && (
+            <button
+              onClick={() => setToast(null)}
+              aria-label="dismiss"
+              style={{ background: 'none', border: 'none', color: 'var(--bg)', opacity: 0.7, cursor: 'pointer', fontSize: 15, lineHeight: 1, padding: 0, flexShrink: 0 }}
+            >
+              ×
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Render one decoded ABI arg value (bytes32/uint/bool/address/array) compactly.
+function argValue(v: unknown): string {
+  if (Array.isArray(v)) return v.length ? `[${v.map(String).join(', ')}]` : '[]';
+  if (v === null || v === undefined) return '—';
+  return String(v);
+}
+
+// ─── Step 9: decode the on-chain transaction for an audit event ──────
+// Real decode (#153): the daemon decodes the CBOR AuditEnvelope + the on-chain
+// calldata against the verified ABIs. While loading / when no daemon is wired,
+// a clearly-labelled reference decode (demoData) is shown instead. Rendered as a
+// dedicated page (reachable at the `decode` nav state), not a modal.
+function EventDecodePage({ event, onBack }: { event: AuditEvent; onBack: () => void }) {
+  const client = useClient();
+  const [decoded, setDecoded] = useState<DecodedAuditEvent | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  // The daemon's live chain display (e.g. "Base mainnet"), so the decode footer
+  // names the chain the event was actually committed on — not the build-time
+  // CHAIN_PROFILE constant. Falls back to that constant until the list loads.
+  const [chainDisplay, setChainDisplay] = useState<string | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    void (async () => {
+      const r = await client.decodeAuditEvent(event.id);
+      if (!alive) return;
+      if (r.ok) { setDecoded(r.data); setErr(null); }
+      else { setDecoded(null); setErr(r.status.detail ?? 'decode unavailable'); }
+    })();
+    return () => { alive = false; };
+  }, [client, event.id]);
+
+  useEffect(() => {
+    let alive = true;
+    void (async () => {
+      const r = await client.getChainList();
+      if (!alive || !r.ok) return;
+      const entry = r.data.chains.find((c) => c.name === r.data.daemonChain);
+      setChainDisplay(entry?.display ?? r.data.daemonChain);
+    })();
+    return () => { alive = false; };
+  }, [client]);
+
+  const mock = decodeCalldata(event);
+  const onchain = ONCHAIN_KINDS.has(event.kind);
+  const tx = decoded?.tx ?? null;
+  const env = decoded?.envelope ?? null;
+  // #97: real decodes carry EVERY fetched envelope (an accept has two:
+  // DeviceAdd + ScopeGrant); synthesized previews keep the single one.
+  const envs = decoded?.envelopes?.length ? decoded.envelopes : env ? [env] : [];
+  const realTxHash = event.txHash ?? decoded?.tx_hash;
+  const tier = decoded?.tier_label ?? (onchain ? 'tier-2 · committed on-chain' : 'tier-1 (sse) · folds into next 2-min anchor');
+  const signer = event.actor === 'Sara (master)' ? 'D_pub_master_iphone' : 'D_pub_' + event.actor.toLowerCase().replace(/[^a-z]/g, '');
+
+  const sel = tx?.decoded.selector ?? mock.sel;
+  const fn = tx?.decoded.signature ?? mock.fn;
+  const toContract = tx?.to_contract ?? contractFor(event.kind);
+  const toAddr = tx?.to_address ?? '';
+  // Only link to chain when there's a real on-chain contract target — the
+  // contract page (Heima /contract/{addr}). No fabricated tx link for
+  // synthesized / tier-1 / offline decodes (codex review #153).
+  const contractLink = tx?.explorer_url ?? null;
+
+  return (
+    <>
+      <div className="page-head">
+        <div>
+          <div className="crumb">audit · event · {event.kind}</div>
+          <h1>decode</h1>
+          <div className="desc">CBOR audit envelope + the on-chain transaction, decoded against the verified ABIs.</div>
+        </div>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>
+          <button className="btn" onClick={onBack}>← audit</button>
+          {contractLink && <a className="btn primary" href={contractLink} target="_blank" rel="noreferrer">view contract ↗</a>}
+        </div>
+      </div>
+
+      {decoded?.synthesized && (
+        <div style={{ fontSize: 11, color: 'var(--warn, #b8860b)', border: '1px solid var(--warn, #b8860b)', padding: '8px 12px', marginBottom: 16 }}>
+          ⚠ preview decode — reconstructed from the audit row. The shape is real (verified-ABI calldata + canonical CBOR), but the values + hashes are derived, not yet fetched from a stored envelope / on-chain tx.
+        </div>
+      )}
+      {decoded && decoded.synthesized === false && (
+        <div style={{ fontSize: 11, color: 'var(--ok, #2e7d32)', border: '1px solid var(--ok, #2e7d32)', padding: '8px 12px', marginBottom: 16 }}>
+          ✓ {decoded.provenance ?? 'real decode — envelope(s) fetched from the audit worker by the submit receipt hashes.'}
+        </div>
+      )}
+
+      <div className="panel">
+        <div className="panel-head"><span>── event</span></div>
+        <div className="panel-body">
+          <dl className="kvs">
+            <dt>timestamp</dt><dd className="mono">{event.ts}</dd>
+            <dt>actor</dt><dd>{event.actor}</dd>
+            <dt>kind</dt><dd className="mono">{event.kind}</dd>
+            <dt>detail</dt><dd>{event.detail}</dd>
+            <dt>worker</dt><dd className="mono">{event.chip}-service</dd>
+            <dt>tier</dt><dd>{tier}</dd>
+            <dt>K10 signer</dt><dd className="mono">{signer}…</dd>
+            {realTxHash && (<><dt>tx</dt><dd className="mono" style={{ wordBreak: 'break-all' }}>{realTxHash}</dd></>)}
+            {event.auditEnvelopeHashes && event.auditEnvelopeHashes.length > 0 && (
+              <>
+                <dt>audit receipts</dt>
+                <dd className="mono" style={{ wordBreak: 'break-all' }}>
+                  {event.auditEnvelopeHashes.join(' · ')}
+                </dd>
+              </>
+            )}
+          </dl>
+        </div>
+      </div>
+
+      {/* ── CBOR AuditEnvelope(s) (decoded) — one panel per fetched envelope ── */}
+      {envs.map((e, i) => (
+        <div className="panel" key={e.envelope_hash || i}>
+          <div className="panel-head"><span>── decoded audit envelope{envs.length > 1 ? ` ${i + 1}/${envs.length}` : ''} · cbor v{e.version}</span></div>
+          <div className="panel-body">
+            <div className="tx-decode">
+              {/* #617 activity report — the owner-language line for a RUNTIME
+                  envelope, above the raw rows. Denials render as a warning so
+                  "it asked and was refused" is as visible as "it acted". */}
+              {(() => {
+                const line = runtimeActivityLine(e);
+                return line ? (
+                  <div className="tx-row">
+                    <span className="tx-k">activity</span>
+                    <span className="tx-v" style={line.denied ? { color: 'var(--warn, #935A00)' } : undefined}>
+                      {line.text}
+                    </span>
+                  </div>
+                ) : null;
+              })()}
+              <div className="tx-row"><span className="tx-k">op_kind</span><span className="tx-v mono">{e.op_kind}{e.op_kind_label ? ` · ${e.op_kind_label}` : ' · Unknown(byte)'}</span></div>
+              {e.intent_text && <div className="tx-row"><span className="tx-k">intent</span><span className="tx-v">{e.intent_text}</span></div>}
+              {Object.entries(e.op_body || {}).map(([k, v]) => (
+                <div className="tx-row" key={k}><span className="tx-k">{k}</span><span className="tx-v mono" style={{ wordBreak: 'break-all' }}>{argValue(v)}</span></div>
+              ))}
+              <div className="tx-row"><span className="tx-k">envelope_hash</span><span className="tx-v mono" style={{ wordBreak: 'break-all' }}>{e.envelope_hash}</span></div>
+            </div>
+          </div>
+        </div>
+      ))}
+
+      {/* ── on-chain transaction (calldata decoded against the verified ABI) ── */}
+      <div className="panel">
+        <div className="panel-head"><span>── decoded on-chain transaction</span></div>
+        <div className="panel-body">
+          {decoded && !tx ? (
+            <div className="muted" style={{ fontSize: 12 }}>
+              tier-1 · off-chain action — recorded in the audit envelope above and folded into the next 2-min Merkle anchor. No direct contract call.
+            </div>
+          ) : (
+            <div className="tx-decode">
+              <div className="tx-row"><span className="tx-k">to</span><span className="tx-v mono">{toContract}{toAddr ? ` · ${toAddr}` : ''}</span></div>
+              <div className="tx-row"><span className="tx-k">selector</span><span className="tx-v mono">{sel}</span></div>
+              <div className="tx-row"><span className="tx-k">function</span><span className="tx-v mono" style={{ wordBreak: 'break-all' }}>{fn}</span></div>
+              {tx?.decoded.args.map((a) => (
+                <div className="tx-row" key={a.name}><span className="tx-k">{a.name}</span><span className="tx-v mono" style={{ wordBreak: 'break-all' }}>{argValue(a.value)} <span className="muted">· {a.ty}</span></span></div>
+              ))}
+              {tx?.decoded.note && <div className="tx-row"><span className="tx-k">note</span><span className="tx-v">{tx.decoded.note}</span></div>}
+            </div>
+          )}
+          <div className="muted" style={{ fontSize: 11, marginTop: 12 }}>
+            {decoded ? (
+              <>{decoded.provenance ?? 'calldata + CBOR decoded by the daemon against the verified ABIs'} · {chainDisplay ?? CHAIN_PROFILE.display}</>
+            ) : err ? (
+              <>offline — showing reference decode · <span className="mono">connect a daemon for real decode (#153)</span></>
+            ) : (
+              <>decoding…</>
+            )}
+          </div>
+        </div>
+      </div>
+    </>
+  );
+}
+
+interface ChainRow { name: string; addr: string; deployedAt: string; purpose: string; explorerUrl: string }
+
+// ─── Chain page — deployed contract registry (real, from the daemon #153) ──
+function ChainPage() {
+  const client = useClient();
+  const [info, setInfo] = useState<ChainInfo | null>(null);
+  const [picked, setPicked] = useState<ChainRow | null>(null);
+  // #282 chain switcher — VIEW any built-in chain's registry. Display-only:
+  // the daemon's operational chain (ceremonies, audit, onboarding) never moves.
+  const [chains, setChains] = useState<ChainListEntry[]>([]);
+  const [daemonChain, setDaemonChain] = useState<string | null>(null);
+  const [view, setView] = useState<string>('');
+  const [stacks, setStacks] = useState<StackEntry[]>([]);
+  const [daemonBroker, setDaemonBroker] = useState<string | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    void (async () => {
+      const r = await client.getChainList();
+      if (alive && r.ok) {
+        setChains(r.data.chains);
+        setDaemonChain(r.data.daemonChain);
+        setView((v) => v || r.data.daemonChain);
+      }
+      const s = await client.getStackList();
+      if (alive && s.ok) {
+        setStacks(s.data.stacks);
+        setDaemonBroker(s.data.daemonBroker ?? null);
+      }
+    })();
+    return () => { alive = false; };
+  }, [client]);
+
+  useEffect(() => {
+    let alive = true;
+    void (async () => {
+      const r = await client.getChainInfo(view || undefined);
+      if (alive && r.ok) setInfo(r.data);
+    })();
+    return () => { alive = false; };
+  }, [client, view]);
+
+  const name = info?.name ?? CHAIN_PROFILE.name;
+  const chainId = info?.chainId ?? CHAIN_PROFILE.chainId;
+  const explorer = info?.explorer ?? CHAIN_PROFILE.explorer;
+  const rpc = info?.rpc ?? CHAIN_PROFILE.rpc;
+  const display = info?.display ?? CHAIN_PROFILE.display;
+  const live = info != null;
+
+  const contracts: ChainRow[] = info
+    ? info.contracts.map((c) => ({ name: c.name, addr: c.address, deployedAt: c.deployedAt, purpose: c.purpose, explorerUrl: c.explorerUrl }))
+    : CHAIN_PROFILE.contracts.map((c) => ({ name: c.name, addr: c.addr, deployedAt: c.deployedAt, purpose: c.purpose, explorerUrl: `${explorer}/contract/${c.addr}` }));
+
+  return (
+    <>
+      <div className="page-head">
+        <div>
+          <div className="crumb">chain · {name} · chain_id {chainId}</div>
+          <h1>chain</h1>
+          <div className="desc">{display}. Contracts deployed via Foundry; tier-2 audit anchors a Merkle root here every 2 minutes.</div>
+        </div>
+        {chains.length > 0 && (
+          <div>
+            <select
+              value={view}
+              onChange={(e) => setView(e.target.value)}
+              aria-label="view chain"
+              style={{ padding: '7px 9px', fontSize: 12.5 }}
+            >
+              {chains.map((c) => (
+                <option key={c.name} value={c.name}>
+                  {c.name} · {c.chainId}{c.name === daemonChain ? ' · daemon' : ''}
+                </option>
+              ))}
+            </select>
+            {daemonChain && view && view !== daemonChain && (
+              <div className="muted" style={{ fontSize: 11, marginTop: 6, maxWidth: 280 }}>
+                viewing {view} — the daemon operates on {daemonChain} (ceremonies + audit stay there)
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+      <div className="stats">
+        <div className="stat"><div className="v">{name}</div><div className="k">{daemonChain && view && view !== daemonChain ? 'viewing chain' : 'AGENTKEYS_CHAIN'}</div></div>
+        <div className="stat"><div className="v">{chainId}</div><div className="k">chain id</div></div>
+        <div className="stat"><div className="v">{live ? 'live' : 'reference'}</div><div className="k">source</div></div>
+        <div className="stat"><div className="v">{contracts.length}</div><div className="k">contracts deployed</div></div>
+      </div>
+      {stacks.length > 0 && (
+        <div className="panel">
+          <div className="panel-head"><span>── stacks · (chain, broker) pairs — the daemon runs ONE per boot</span></div>
+          <div className="panel-body flush">
+            <table className="tab">
+              <thead><tr><th>stack</th><th>chain</th><th>broker</th><th>health</th><th /></tr></thead>
+              <tbody>
+                {stacks.map((s) => (
+                  <tr key={s.name} style={s.healthy ? undefined : { opacity: 0.55 }}>
+                    <td><span style={{ fontWeight: 500 }}>{s.name}</span></td>
+                    <td className="mono" style={{ fontSize: 11 }}>{s.chain}</td>
+                    <td className="mono" style={{ fontSize: 11 }}>{s.brokerUrl}</td>
+                    <td>{s.healthy ? 'live' : 'degraded'}</td>
+                    <td className="right">
+                      {s.active
+                        ? <span style={{ fontSize: 11, fontWeight: 600 }}>active</span>
+                        : <span className="muted" style={{ fontSize: 11 }}>switch via fleet `c` (daemon relaunch)</span>}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            <div className="muted" style={{ fontSize: 11, padding: '6px 10px' }}>
+              browser sessions + onboarding are isolated per (chain, broker) — the same chain behind
+              another broker keeps its own sign-in{daemonBroker ? ` · this daemon → ${daemonBroker}` : ''}
+            </div>
+          </div>
+        </div>
+      )}
+      <div className="panel">
+        <div className="panel-head"><span>── deployed contracts{live ? '' : ' · reference (connect a daemon for live addresses)'}</span></div>
+        <div className="panel-body flush">
+          <table className="tab">
+            <thead><tr><th>contract</th><th>address</th><th>deployed</th><th /></tr></thead>
+            <tbody>
+              {contracts.map((c) => (
+                <tr key={c.name} className="clickable" onClick={() => setPicked(c)}>
+                  <td><span style={{ fontWeight: 500 }}>{c.name}</span><div className="secondary">{c.purpose}</div></td>
+                  <td className="mono" style={{ fontSize: 11 }}>{c.addr}</td>
+                  <td className="muted mono">{c.deployedAt}</td>
+                  <td className="right"><a href={c.explorerUrl} target="_blank" rel="noreferrer" style={{ fontSize: 11 }}>explorer ↗</a></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+      {picked && (
+        <Modal
+          title={`contract · ${picked.name}`}
+          onClose={() => setPicked(null)}
+          footer={<a className="btn primary" href={picked.explorerUrl} target="_blank" rel="noreferrer">view on {name} explorer ↗</a>}
+        >
+          <dl className="kvs">
+            <dt>name</dt><dd>{picked.name}</dd>
+            <dt>address</dt><dd className="mono" style={{ fontSize: 11 }}>{picked.addr}</dd>
+            <dt>deployed at</dt><dd>{picked.deployedAt}</dd>
+            <dt>purpose</dt><dd>{picked.purpose}</dd>
+            <dt>verify</dt><dd className="mono" style={{ fontSize: 11 }}>cast code {picked.addr} --rpc-url {rpc}</dd>
+          </dl>
+        </Modal>
+      )}
+    </>
+  );
+}

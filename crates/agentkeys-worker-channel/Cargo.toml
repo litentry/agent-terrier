@@ -1,0 +1,35 @@
+[package]
+license.workspace = true
+name = "agentkeys-worker-channel"
+version = "0.1.0"
+edition = "2021"
+description = "Encrypted capability-scoped channel feeds"
+
+[[bin]]
+name = "agentkeys-worker-channel"
+path = "src/main.rs"
+
+[lib]
+name = "agentkeys_worker_channel"
+path = "src/lib.rs"
+
+[dependencies]
+agentkeys-worker-creds = { path = "../agentkeys-worker-creds" }
+agentkeys-core = { workspace = true }
+agentkeys-protocol = { workspace = true }
+axum = { version = "0.7", features = ["json"] }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+reqwest = { version = "0.12", features = ["json"] }
+tracing = "0.1"
+hex = "0.4"
+base64 = "0.22"
+sha2 = "0.10"
+zeroize = "1"
+clap = { version = "4", features = ["derive", "env"] }
+
+[dev-dependencies]
+tokio = { workspace = true }
+tower = { version = "0.4", features = ["util"] }

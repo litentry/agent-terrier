@@ -1,0 +1,301 @@
+use std::collections::BTreeMap;
+
+use agentkeys_core::chain_profile::ChainProfile;
+use agentkeys_protocol::{model_runtime, sandbox_env};
+use anyhow::{ensure, Result};
+use serde::{Deserialize, Serialize};
+
+pub const BOOTSTRAP_VERSION: u32 = 1;
+pub const MAX_BOOTSTRAP_BYTES: usize = 64 * 1024;
+pub const STARTUP_TIMEOUT_SECONDS: u64 = 30;
+pub const RUNTIME_SCRIPT: &str = "/opt/terrier/packages/agent-terrier-runtime/start.mjs";
+
+pub const SERVICE_ENVIRONMENT: &[(&str, &str)] = &[
+    ("broker", sandbox_env::BROKER_URL),
+    ("signer", sandbox_env::SIGNER_URL),
+    ("channel", sandbox_env::CHANNEL_WORKER_URL),
+    ("cred", "AGENTKEYS_WORKER_CRED_URL"),
+    ("memory", "AGENTKEYS_WORKER_MEMORY_URL"),
+    ("config", "AGENTKEYS_WORKER_CONFIG_URL"),
+    ("model", model_runtime::BASE_URL),
+];
+
+const TOKENS: &[&str] = &[
+    sandbox_env::SESSION_JWT,
+    sandbox_env::BRIDGE_TOKEN,
+    sandbox_env::MGMT_TOKEN,
+    model_runtime::API_KEY,
+];
+
+const OPTIONAL_APPLICATION_ENVIRONMENT: &[&str] = &[
+    sandbox_env::MEMORY_NS,
+    sandbox_env::BOUND_CHANNELS,
+    sandbox_env::APP_TEMPLATE,
+    sandbox_env::APP_AVAILABILITY,
+    sandbox_env::MEMORY_NAMESPACES,
+    sandbox_env::WAKE_SINCE_MS,
+    sandbox_env::APP_TZ_OFFSET_MINUTES,
+];
+
+fn require_identifier(value: &str) -> Result<()> {
+    ensure!(
+        !value.is_empty()
+            && value.len() <= 256
+            && !value
+                .bytes()
+                .any(|byte| byte.is_ascii_control() || byte.is_ascii_whitespace()),
+        "invalid bootstrap identifier"
+    );
+    Ok(())
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeBootstrap {
+    pub version: u32,
+    pub chain_profile: ChainProfile,
+    pub environment: BTreeMap<String, String>,
+}
+
+impl RuntimeBootstrap {
+    pub fn agent_environment(&self) -> BTreeMap<String, String> {
+        self.environment
+            .iter()
+            .filter(|(name, _)| {
+                [
+                    model_runtime::BASE_URL,
+                    model_runtime::API_KEY,
+                    model_runtime::MODEL_ID,
+                    model_runtime::SPEECH_URL,
+                    sandbox_env::BRIDGE_TOKEN,
+                    sandbox_env::MGMT_TOKEN,
+                ]
+                .contains(&name.as_str())
+            })
+            .map(|(name, value)| (name.clone(), value.clone()))
+            .collect()
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        ensure!(
+            self.version == BOOTSTRAP_VERSION,
+            "unsupported bootstrap version"
+        );
+        self.chain_profile.require_local_development(true, None)?;
+        for name in self.environment.keys() {
+            ensure!(
+                SERVICE_ENVIRONMENT
+                    .iter()
+                    .any(|(_, environment_name)| environment_name == name)
+                    || TOKENS.contains(&name.as_str())
+                    || OPTIONAL_APPLICATION_ENVIRONMENT.contains(&name.as_str())
+                    || [
+                        sandbox_env::ACTOR_OMNI,
+                        sandbox_env::OPERATOR_OMNI,
+                        sandbox_env::CHAT_CHANNEL_ID,
+                        model_runtime::MODEL_ID,
+                        model_runtime::SPEECH_URL
+                    ]
+                    .contains(&name.as_str()),
+                "unsupported bootstrap environment field"
+            );
+        }
+        for (_, name) in SERVICE_ENVIRONMENT {
+            let value = self.value(name)?;
+            agentkeys_protocol::model_config::require_local_endpoint(value)
+                .map_err(anyhow::Error::msg)?;
+            if *name != model_runtime::BASE_URL {
+                ensure!(
+                    reqwest::Url::parse(value)?.path() == "/",
+                    "service endpoint must be an origin"
+                );
+            }
+        }
+        for name in TOKENS {
+            let value = self.value(name)?;
+            ensure!(
+                value.len() >= 16
+                    && value.len() <= 16 * 1024
+                    && !value
+                        .bytes()
+                        .any(|byte| byte.is_ascii_control() || byte.is_ascii_whitespace()),
+                "invalid bootstrap credential"
+            );
+        }
+        for name in [sandbox_env::ACTOR_OMNI, sandbox_env::OPERATOR_OMNI] {
+            let value = self
+                .value(name)?
+                .strip_prefix("0x")
+                .unwrap_or(self.value(name)?);
+            ensure!(
+                value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit()),
+                "invalid bootstrap actor identity"
+            );
+        }
+        for name in [sandbox_env::CHAT_CHANNEL_ID, model_runtime::MODEL_ID] {
+            require_identifier(self.value(name)?)?;
+        }
+        for name in [sandbox_env::MEMORY_NS, sandbox_env::APP_TEMPLATE] {
+            if let Some(value) = self.environment.get(name) {
+                require_identifier(value)?;
+            }
+        }
+        if let Some(value) = self.environment.get(sandbox_env::MEMORY_NAMESPACES) {
+            for namespace in value.split(',') {
+                require_identifier(namespace)?;
+            }
+        }
+        if let Some(value) = self.environment.get(sandbox_env::BOUND_CHANNELS) {
+            let channels: Vec<agentkeys_protocol::BoundChannel> = serde_json::from_str(value)
+                .map_err(|_| anyhow::anyhow!("invalid bootstrap bound channels"))?;
+            for channel in channels {
+                require_identifier(&channel.slot)?;
+                require_identifier(&channel.channel_id)?;
+                if let Some(actor) = channel.endpoint_actor_omni {
+                    let actor = actor.strip_prefix("0x").unwrap_or(&actor);
+                    ensure!(
+                        actor.len() == 64 && actor.bytes().all(|byte| byte.is_ascii_hexdigit()),
+                        "invalid bootstrap channel actor"
+                    );
+                }
+            }
+        }
+        if let Some(value) = self.environment.get(sandbox_env::APP_AVAILABILITY) {
+            ensure!(
+                agentkeys_protocol::Availability::parse(value).is_some(),
+                "invalid bootstrap availability"
+            );
+        }
+        if let Some(value) = self.environment.get(sandbox_env::WAKE_SINCE_MS) {
+            ensure!(value.parse::<u64>().is_ok(), "invalid bootstrap wake time");
+        }
+        if let Some(value) = self.environment.get(sandbox_env::APP_TZ_OFFSET_MINUTES) {
+            ensure!(
+                value
+                    .parse::<i64>()
+                    .is_ok_and(|minutes| (-14 * 60..=14 * 60).contains(&minutes)),
+                "invalid bootstrap timezone offset"
+            );
+        }
+        model_runtime::validate_environment(|name| self.environment.get(name).map(String::as_str))
+            .map_err(anyhow::Error::msg)
+    }
+
+    fn value(&self, name: &str) -> Result<&str> {
+        self.environment
+            .get(name)
+            .map(String::as_str)
+            .ok_or_else(|| anyhow::anyhow!("incomplete bootstrap configuration"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fixture() -> RuntimeBootstrap {
+        let mut environment = BTreeMap::new();
+        for (_, name) in SERVICE_ENVIRONMENT {
+            environment.insert((*name).into(), "http://127.0.0.1:1".into());
+        }
+        for name in TOKENS {
+            environment.insert((*name).into(), "synthetic-proof-only".into());
+        }
+        for name in [sandbox_env::ACTOR_OMNI, sandbox_env::OPERATOR_OMNI] {
+            environment.insert(name.into(), "ab".repeat(32));
+        }
+        environment.insert(sandbox_env::CHAT_CHANNEL_ID.into(), "opchat-test".into());
+        environment.insert(model_runtime::MODEL_ID.into(), "fixture-model".into());
+        RuntimeBootstrap {
+            version: BOOTSTRAP_VERSION,
+            chain_profile: ChainProfile::load_builtin("anvil").unwrap(),
+            environment,
+        }
+    }
+
+    #[test]
+    fn bootstrap_requires_explicit_local_services_and_scoped_credentials() {
+        let valid = fixture();
+        valid.validate().unwrap();
+        let agent_environment = valid.agent_environment();
+        assert_eq!(agent_environment.len(), 5);
+        assert!(!agent_environment.contains_key(sandbox_env::SESSION_JWT));
+        assert!(!agent_environment.contains_key(sandbox_env::SIGNER_URL));
+        assert_eq!(
+            agent_environment[model_runtime::API_KEY],
+            valid.environment[model_runtime::API_KEY]
+        );
+        for name in valid.environment.keys() {
+            let mut invalid = fixture();
+            invalid.environment.remove(name);
+            assert!(
+                invalid.validate().is_err(),
+                "missing required field accepted"
+            );
+        }
+        for (name, value) in [
+            (sandbox_env::BROKER_URL, "https://example.invalid"),
+            (sandbox_env::SIGNER_URL, "http://127.0.0.1:1/wrong"),
+            (model_runtime::BASE_URL, "http://secret@localhost/v1"),
+            (sandbox_env::SESSION_JWT, "secret\nsecond-line"),
+            (sandbox_env::ACTOR_OMNI, "wrong-actor"),
+            (sandbox_env::DEVICE_KEY_HEX, "never-pass-private-keys"),
+            ("NODE_OPTIONS", "--require=arbitrary-code"),
+        ] {
+            let mut invalid = fixture();
+            invalid.environment.insert(name.into(), value.into());
+            let error = invalid.validate().unwrap_err().to_string();
+            assert!(!error.contains(value));
+        }
+        let mut invalid = fixture();
+        invalid.chain_profile.chain_id = 1;
+        assert!(invalid.validate().is_err());
+        invalid = fixture();
+        invalid.version += 1;
+        assert!(invalid.validate().is_err());
+    }
+
+    #[test]
+    fn broker_metadata_uses_shared_shapes_and_rejects_malformed_values() {
+        let mut valid = fixture();
+        valid
+            .environment
+            .extend(agentkeys_protocol::model_runtime::relay_environment(
+                "http://127.0.0.1:1/v1",
+                "synthetic-proof-only".into(),
+                "fixture-model",
+            ));
+        for (name, value) in [
+            (sandbox_env::MEMORY_NS, "agent-memory"),
+            (sandbox_env::APP_TEMPLATE, "fixture-app"),
+            (sandbox_env::MEMORY_NAMESPACES, "agent-memory,shared"),
+            (sandbox_env::BOUND_CHANNELS, "[]"),
+            (sandbox_env::APP_AVAILABILITY, "always-on"),
+            (sandbox_env::WAKE_SINCE_MS, "123"),
+            (sandbox_env::APP_TZ_OFFSET_MINUTES, "480"),
+        ] {
+            valid.environment.insert(name.into(), value.into());
+        }
+        valid.validate().unwrap();
+        assert_eq!(valid.agent_environment().len(), 6);
+        assert!(!valid
+            .agent_environment()
+            .contains_key(sandbox_env::MEMORY_NS));
+        for (name, value) in [
+            (sandbox_env::MEMORY_NS, "bad\nnamespace"),
+            (sandbox_env::MEMORY_NAMESPACES, "first,,third"),
+            (sandbox_env::BOUND_CHANNELS, "[{\"slot\":\"x\"}]"),
+            (sandbox_env::APP_AVAILABILITY, "invalid"),
+            (sandbox_env::WAKE_SINCE_MS, "-1"),
+            (sandbox_env::APP_TZ_OFFSET_MINUTES, "841"),
+            (model_runtime::SPEECH_URL, "http://127.0.0.1:2"),
+        ] {
+            let previous = valid.environment.insert(name.into(), value.into()).unwrap();
+            assert!(
+                valid.validate().is_err(),
+                "malformed optional metadata accepted"
+            );
+            valid.environment.insert(name.into(), previous);
+        }
+    }
+}

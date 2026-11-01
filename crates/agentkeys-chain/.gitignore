@@ -1,0 +1,17 @@
+# Foundry build artifacts
+out/
+cache/
+broadcast/
+
+# Foundry coverage reports
+lcov.info
+coverage/
+
+# Local-deploy artifacts (broadcast logs land here, can leak deployer addr
+# but no key material). Keep out of the repo to avoid stale runs polluting
+# diffs; the canonical contract addresses live in
+# scripts/operator-workstation.env via env_set.
+broadcast/
+
+# Forge-std submodule (handled via .gitmodules; lib/forge-std itself is
+# populated on `forge install` / `git submodule update --init`).

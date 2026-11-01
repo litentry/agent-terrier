@@ -1,0 +1,17 @@
+[profile.default]
+src = "src"
+out = "out"
+libs = ["lib"]
+test = "test"
+solc = "0.8.24"
+optimizer = true
+optimizer_runs = 200
+
+# Phase C US-030 — operator runs `forge build` + `forge test` to compile +
+# unit-test AgentKeysAudit.sol. Deployment to Base Sepolia is operator-
+# managed via `forge create` with the funded keystore configured via
+# BROKER_EVM_FEE_PAYER_KEYSTORE. See operator-runbook-stage7.md
+# §evm-deploy.
+
+[rpc_endpoints]
+base_sepolia = "${BASE_SEPOLIA_RPC_URL}"

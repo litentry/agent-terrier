@@ -1,0 +1,38 @@
+{
+  "files": [
+    ".gitignore",
+    ".public-source.json",
+    ".public-test-fixtures.json",
+    "AGENTS.md",
+    "CLAUDE.md",
+    "CONTRIBUTING.md",
+    "Cargo.lock",
+    "Cargo.toml",
+    "LICENSE",
+    "LICENSES/AGPL-3.0-only.txt",
+    "LICENSES/GPL-3.0-only.txt",
+    "LICENSES/MIT.txt",
+    "NOTICE",
+    "README.md",
+    "rust-toolchain.toml",
+    "terrier",
+    "packages/package.json",
+    "packages/package-lock.json",
+    "package.json",
+    "package-lock.json"
+  ],
+  "directories": [
+    ".github",
+    "apps/parent-control",
+    "apps/device-display",
+    "crates",
+    "design-system",
+    "docs",
+    "e2e/fixtures",
+    "packages/agentkeys-dsh",
+    "packages/agent-terrier-runtime",
+    "presets",
+    "provisioner-scripts",
+    "scripts"
+  ]
+}

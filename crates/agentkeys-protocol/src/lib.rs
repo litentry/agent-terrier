@@ -1,0 +1,4060 @@
+//! Transport-free shared wire contracts for native and browser clients, brokers and workers.
+//! Capability schemas live in `capability`; enforcement remains independent at each service.
+
+pub mod auth;
+pub mod browser_origins;
+pub mod capability;
+pub mod chain_abi;
+pub mod model_config;
+pub mod model_relay;
+pub mod model_runtime;
+pub mod object_store;
+pub mod runtime_layout;
+
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+// #662 / #670 / #664 (epic #660) — the family-applications framework's wire
+// contracts: the app template manifest (schema, kind enums, validator,
+// compiler), the card document, and the two policy-class registry docs.
+mod app_template;
+mod capability_catalog;
+mod card;
+mod channel_doc;
+mod registries;
+pub mod sandbox_actions;
+mod session_window;
+mod systemone;
+mod worker_url;
+pub use app_template::*;
+pub use capability_catalog::*;
+pub use card::*;
+pub use channel_doc::*;
+pub use registries::*;
+pub use session_window::*;
+pub use systemone::*;
+pub use worker_url::*;
+
+/// Op discriminator that maps onto the four broker cap-mint endpoints. The
+/// route is the source of truth for the cap's `data_class` — the broker
+/// statically derives the `DataClass` variant from which endpoint was hit, so
+/// a `Memory` cap can never be minted from a `/v1/cap/cred-*` request (issue
+/// #90).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CapMintOp {
+    CredStore,
+    CredFetch,
+    MemoryPut,
+    MemoryGet,
+    MemoryInboxDelete,
+    /// #295 P1 — delegated READ of the master's CANONICAL memory (master-hub
+    /// distribution). Mints `CapOp::CanonicalFetch`/`DataClass::Memory` at
+    /// `/v1/cap/memory-canonical-get`; `op_str` is `"canonical_fetch"` so the
+    /// K10 cap-PoP preimage matches the worker's `check_op`. Distinct from
+    /// `MemoryGet` (own working memory).
+    MemoryCanonicalGet,
+    /// #339 P2 — delegated APPEND to the master's absorption INBOX (master-hub
+    /// absorption / "push"). Mints `CapOp::Append`/`DataClass::Memory` at
+    /// `/v1/cap/memory-append`; `op_str` is `"append"`. The delegate proposes a
+    /// learning into `bots/<operator>/inbox/<delegate>/…` (staging, NOT
+    /// canonical); the master curates it into canonical later. Gated by a
+    /// **distinct** on-chain `proposal:<ns>` grant — NEVER the `knowledge:<ns>` read
+    /// grant (`readOnly` does not distinguish these operations).
+    MemoryAppend,
+    /// #201 config data class — master-only taxonomy/config object. A third
+    /// `DataClass::Config` with its own bucket + IAM role (arch.md §17.2); the
+    /// cred + memory workers reject a Config cap via `verify::check_data_class`.
+    ConfigStore,
+    ConfigFetch,
+    /// #406 channels phase 1 — the `channel` data class (`docs/spec/agent-channel-decoupling.md`
+    /// D2/D7). PUBLISH an event into a channel feed. Mints `CapOp::ChannelPublish`/
+    /// `DataClass::Channel` at `/v1/cap/channel-pub`; `op_str` is `"channel_publish"`.
+    /// Direction is carried in the SIGNED op (and the `channel-pub:<id>` service),
+    /// so a publish cap can NEVER be redeemed at the subscribe endpoint (D2 — the
+    /// direction-denial isolation gate).
+    ChannelPublish,
+    ChannelTeardown,
+    /// #406 channels phase 1 — SUBSCRIBE (consume) events from a channel feed.
+    /// Mints `CapOp::ChannelSubscribe`/`DataClass::Channel` at `/v1/cap/channel-sub`;
+    /// `op_str` is `"channel_subscribe"`. Distinct on-chain grant (`channel-sub:<id>`)
+    /// from the publish grant — granting one never grants the other.
+    ChannelSubscribe,
+    /// Speech capability for an explicitly configured implementation.
+    /// The public runtime currently reports speech as unavailable.
+    SpeechUse,
+}
+
+impl CapMintOp {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "cred_store" => Some(Self::CredStore),
+            "cred_fetch" => Some(Self::CredFetch),
+            "memory_put" => Some(Self::MemoryPut),
+            "memory_get" => Some(Self::MemoryGet),
+            "memory_inbox_delete" => Some(Self::MemoryInboxDelete),
+            "memory_canonical_get" => Some(Self::MemoryCanonicalGet),
+            "memory_append" => Some(Self::MemoryAppend),
+            "config_store" => Some(Self::ConfigStore),
+            "config_fetch" => Some(Self::ConfigFetch),
+            "channel_publish" => Some(Self::ChannelPublish),
+            "channel_teardown" => Some(Self::ChannelTeardown),
+            "channel_subscribe" => Some(Self::ChannelSubscribe),
+            "speech_use" => Some(Self::SpeechUse),
+            _ => None,
+        }
+    }
+
+    pub fn broker_path(self) -> &'static str {
+        match self {
+            Self::CredStore => "/v1/cap/cred-store",
+            Self::CredFetch => "/v1/cap/cred-fetch",
+            Self::MemoryPut => "/v1/cap/memory-put",
+            Self::MemoryGet => "/v1/cap/memory-get",
+            Self::MemoryInboxDelete => "/v1/cap/memory-inbox-delete",
+            Self::MemoryCanonicalGet => "/v1/cap/memory-canonical-get",
+            Self::MemoryAppend => "/v1/cap/memory-append",
+            Self::ConfigStore => "/v1/cap/config-store",
+            Self::ConfigFetch => "/v1/cap/config-fetch",
+            Self::ChannelPublish => "/v1/cap/channel-pub",
+            Self::ChannelTeardown => "/v1/cap/channel-teardown",
+            Self::ChannelSubscribe => "/v1/cap/channel-sub",
+            Self::SpeechUse => "/v1/cap/speech",
+        }
+    }
+
+    pub fn data_class(self) -> &'static str {
+        self.data_class_kind().as_str()
+    }
+
+    pub fn data_class_kind(self) -> capability::DataClass {
+        use capability::DataClass;
+        match self {
+            Self::CredStore | Self::CredFetch => DataClass::Credentials,
+            Self::MemoryPut
+            | Self::MemoryGet
+            | Self::MemoryCanonicalGet
+            | Self::MemoryAppend
+            | Self::MemoryInboxDelete => DataClass::Memory,
+            Self::ConfigStore | Self::ConfigFetch => DataClass::Config,
+            Self::ChannelPublish | Self::ChannelSubscribe | Self::ChannelTeardown => {
+                DataClass::Channel
+            }
+            Self::SpeechUse => DataClass::Speech,
+        }
+    }
+
+    pub fn op_str(self) -> &'static str {
+        self.cap_op().as_str()
+    }
+
+    pub fn cap_op(self) -> capability::CapOp {
+        use capability::CapOp;
+        match self {
+            Self::CredStore | Self::MemoryPut | Self::ConfigStore => CapOp::Store,
+            Self::CredFetch | Self::MemoryGet | Self::ConfigFetch => CapOp::Fetch,
+            Self::MemoryCanonicalGet => CapOp::CanonicalFetch,
+            Self::MemoryAppend => CapOp::Append,
+            Self::MemoryInboxDelete | Self::ChannelTeardown => CapOp::Teardown,
+            Self::ChannelPublish => CapOp::ChannelPublish,
+            Self::ChannelSubscribe => CapOp::ChannelSubscribe,
+            Self::SpeechUse => CapOp::SpeechUse,
+        }
+    }
+}
+
+/// The cap-mint request as the *caller* constructs it (omni's, service,
+/// device hash, TTL). [`BrokerCapRequest`] is the on-the-wire serialization;
+/// they have the same fields today but stay distinct so a caller-side concept
+/// (e.g. a future client-only field) can't silently leak onto the wire.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CapMintRequest {
+    pub operator_omni: String,
+    pub actor_omni: String,
+    pub service: String,
+    pub device_key_hash: String,
+    pub ttl_seconds: u64,
+}
+
+/// A device→sandbox delegation (issue #369), carried alongside the cap-mint PoP
+/// when `client_sig` was produced by a sandbox's OWN ephemeral key rather than the
+/// device K10 directly. The **device** (not the broker) signs `delegation_sig`
+/// over `agentkeys_device_core::delegation_payload(device_key_hash, sandbox_key,
+/// scope, expires_at)`, so a compromised broker cannot forge it; the WORKER
+/// re-verifies it independently (`agentkeys_core::device_crypto::verify_delegation`)
+/// before any S3 touch. This is the single owner of the delegation wire shape —
+/// the broker echoes it into the minted cap-token and the worker deserializes the
+/// SAME type, so the two cannot drift (#203).
+///
+/// `sandbox_key` is deliberately NOT carried: it is the recovered cap-PoP signer,
+/// which binds the delegation to exactly the key that signed THIS cap (a
+/// delegation for key A cannot redeem a cap signed by key B).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DelegationPath {
+    /// Canonical scope the delegation is bounded to — space-delimited `data_class`
+    /// or `data_class:op` tokens (e.g. `"memory credentials:fetch"`). Carried in
+    /// cleartext (the worker needs it to rebuild the preimage + apply its policy)
+    /// but integrity-protected by `delegation_sig`.
+    pub scope: String,
+    /// Unix-seconds expiry — the device-signed TTL bound. The worker enforces
+    /// `now < expires_at` (the device-core crate is clock-free).
+    pub expires_at: u64,
+    /// The device's EIP-191 signature over the delegation preimage.
+    pub delegation_sig: String,
+}
+
+/// Broker cap-mint request body — the exact JSON
+/// `agentkeys_broker_server::handlers::cap` deserializes for all `/v1/cap/*`
+/// endpoints, AND the on-the-wire shape the browser host
+/// (`agentkeys-web-core`) serializes directly (it has no separate caller-side
+/// type — it aliases this as `CapRequest`).
+///
+/// Carries the K10 cap-mint **proof-of-possession** (issue #76):
+/// `client_sig` is an EIP-191 signature by the caller's K10 device key over
+/// `device_crypto::cap_pop_payload(operator, actor, service, op, data_class,
+/// client_nonce, client_ts)`. The broker validates it and the WORKER re-verifies
+/// it independently — so a compromised broker (which lacks the K10 private key)
+/// cannot mint a usable cap. Built by `BackendClient::cap_mint` (in
+/// `agentkeys-backend-client`) from an injected `DeviceKey`, NOT hand-set by
+/// callers.
+///
+/// Missing TTL selects the shared broker default; an explicit null is invalid.
+/// Native and browser clients serialize this type; the broker deserializes it directly.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BrokerCapRequest {
+    pub operator_omni: String,
+    pub actor_omni: String,
+    pub service: String,
+    pub device_key_hash: String,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "capability::deserialize_optional_ttl"
+    )]
+    pub ttl_seconds: Option<u64>,
+    // Workers require a fresh actor proof for every capability.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_sig: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_nonce: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_ts: Option<u64>,
+    /// Device→sandbox delegation (issue #369) — present only when `client_sig` was
+    /// produced by a sandbox's ephemeral key rather than the device K10 directly.
+    /// `skip_serializing_if` keeps the no-delegation body byte-identical to the
+    /// pre-#369 shape (so the #203 cap-mint fixture is unchanged).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delegation_path: Option<DelegationPath>,
+}
+
+/// Opaque client transport view. The signed schema is [`capability::CapToken`];
+/// forwarding clients do not deserialize or interpret its authority fields.
+pub type CapToken = Value;
+
+// ── memory worker (`/v1/memory/{put,get}`) ──────────────────────────────────
+
+/// Memory-worker `/v1/memory/put` request body. Mirrors
+/// `agentkeys_worker_memory::handlers::PutRequest`. `namespace` rides at the
+/// body level for Phase 1 (lifting it into a SIGNED CapPayload field is an M4
+/// follow-up per the wire-real-paths plan §8.2).
+///
+/// `object_key` (#594) selects a KEYED object under the SAME service grant
+/// (`…/memory/<service>.objects/<object_key>.enc`) instead of the legacy
+/// single slot (`…/memory/<service>.enc`). Absent keeps the pre-#594 body
+/// byte-identical, so the frozen fixtures and every old worker are unchanged.
+/// The authority is identical either way — the signed cap `service` — the key
+/// only subdivides storage WITHIN it (the sandbox-checkpoint use case).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryPutBody<T = CapToken> {
+    pub cap: T,
+    pub plaintext_b64: String,
+    pub namespace: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub object_key: Option<String>,
+    /// Compare-and-swap (D-K5, `plan/knowledge-repository.md` §6): the keccak-256
+    /// hex (`0x…`) of the plaintext the writer READ, or `""` to assert the object
+    /// does not exist yet. The worker refuses the put with 409 `stale_base` when
+    /// the stored plaintext hashes differently — git's "non-fast-forward".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_content_hash: Option<String>,
+}
+
+/// Memory-worker `/v1/memory/get` request body. Mirrors
+/// `agentkeys_worker_memory::handlers::GetRequest`. `object_key` as on
+/// [`MemoryPutBody`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryGetBody<T = CapToken> {
+    pub cap: T,
+    pub namespace: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub object_key: Option<String>,
+}
+
+/// #594 — the reserved keyed-object slot where a delegate sandbox persists its
+/// runtime CHECKPOINT (the #577 runtime-home export, wrapped in
+/// [`CheckpointEnvelope`]) inside its own `knowledge:<ns>` grant. ONE name shared
+/// by the writer (in-sandbox daemon checkpoint loop) and the reader (the
+/// restore-on-boot leg of the SAME daemon in the replacement instance).
+/// Since #621 (Hermes deprecation) there is exactly ONE runtime and ONE slot —
+/// `checkpoint/dsh-home`; the hermes-era `checkpoint/hermes-home` objects are
+/// orphaned data (a snapshot is a runtime-home byte image, never restored
+/// cross-runtime — a migrated delegate started from canonical memory).
+pub const CHECKPOINT_OBJECT_KEY: &str = "checkpoint/dsh-home";
+
+/// #594 — the durable checkpoint payload stored at [`CHECKPOINT_OBJECT_KEY`]:
+/// the bridge `session/export` snapshot plus the write time the bridge's
+/// newer-wins import guard compares (`saved_at`, unix seconds). Versioned so a
+/// future shape change fails loud instead of restoring garbage.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CheckpointEnvelope {
+    pub version: u32,
+    pub saved_at: u64,
+    /// #616 — which runtime's home this snapshot images. Observability only
+    /// (`dsh` since #621; absent or `hermes` = a pre-#621 envelope); the
+    /// restore path selects by object KEY, never by this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<String>,
+    /// The verbatim bridge export body (`{version, hermes_home, files, …}` —
+    /// the `hermes_home` FIELD NAME is the frozen wire shape, predating #621;
+    /// under dsh it carries the `DSH_HOME` path).
+    pub snapshot: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryPutResp {
+    pub ok: bool,
+    pub s3_key: String,
+    pub envelope_size: usize,
+    /// Durable-audit receipt (#229): the `AuditEnvelope` hash the worker
+    /// emitted for this op (`null`/absent on pre-#229 workers or when the
+    /// emit failed in best-effort mode).
+    #[serde(default)]
+    pub audit_envelope_hash: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryGetResp {
+    pub ok: bool,
+    pub plaintext_b64: String,
+    /// Durable-audit receipt (#229): the `AuditEnvelope` hash the worker
+    /// emitted for this op (`null`/absent on pre-#229 workers or when the
+    /// emit failed in best-effort mode).
+    #[serde(default)]
+    pub audit_envelope_hash: Option<String>,
+}
+
+// ── config worker (`/v1/config/{put,get}`) — #201 config data class ──────────
+
+/// Config-worker `/v1/config/put` request body. Mirrors
+/// `agentkeys_worker_config::handlers::PutRequest`. Config is a single
+/// master-only object (the memory-types taxonomy), so — unlike `MemoryPutBody`
+/// — there is NO `namespace` field; the object's identity is the signed cap
+/// `service` (`memory-taxonomy`).
+///
+/// EXACTLY ONE of `envelope_b64` / `plaintext_b64` (#372 item 2 / #91):
+/// - `envelope_b64` — the v3 path: a client-encrypted envelope (signer-derived
+///   per-actor KEK, `agentkeys-core::kek`) the worker stores VERBATIM; the
+///   worker never sees plaintext or any key that opens it.
+/// - `plaintext_b64` — the legacy stage-1 path: the worker encrypts under its
+///   explicitly supplied development key. Rejected when no key is configured.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConfigPutBody<T = CapToken> {
+    pub cap: T,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plaintext_b64: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub envelope_b64: Option<String>,
+    /// Empty means create-only; otherwise the exact revision returned by get.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_revision: Option<String>,
+}
+
+/// Config-worker `/v1/config/get` request body. Mirrors
+/// `agentkeys_worker_config::handlers::GetRequest`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConfigGetBody<T = CapToken> {
+    pub cap: T,
+}
+
+/// EXACTLY ONE of `envelope_b64` / `plaintext_b64` is set (#372 item 2):
+/// v3 blobs come back as the raw envelope for CLIENT-side decrypt under the
+/// signer-derived KEK; legacy v2 blobs come back worker-decrypted.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConfigGetResp {
+    pub ok: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plaintext_b64: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub envelope_b64: Option<String>,
+    /// Durable-audit receipt (#229): the `AuditEnvelope` hash the worker
+    /// emitted for this op (`null`/absent on pre-#229 workers or when the
+    /// emit failed in best-effort mode).
+    #[serde(default)]
+    pub audit_envelope_hash: Option<String>,
+    #[serde(default)]
+    pub revision: Option<String>,
+}
+
+pub type ConfigPutResp = CredStoreResp;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkerTeardownBody<T = CapToken> {
+    pub cap: T,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkerTeardownResp {
+    pub ok: bool,
+    pub keys_deleted: usize,
+    pub audit_envelope_hash: Option<String>,
+}
+
+// ── channel worker (`/v1/channel/{publish,poll,teardown}`) — #406 channels ───
+//
+// The `channel` data class (`docs/spec/agent-channel-decoupling.md` D7): a
+// durable, encrypted feed with independent publish/subscribe capabilities.
+// The worker notifies waiting local readers after an event is stored.
+// Session channels use direct transport and carry no durable feed.
+
+/// The transport shape of a channel (#408 §4/D1). **Feed-backed** channels are
+/// async + durable (camera → doorkeeper, weixin, UI feeds): the channel worker's
+/// S3 feed + the §14.12 NRT long-poll. **Session** channels stream direct to a
+/// live adapter endpoint (the console's chat to its delegate's sandbox bridge) —
+/// grant-gated the SAME (`channel-pub/sub:<id>` caps), but with **no durable
+/// feed** (latency). A `session` channel is the phase-3 replacement for the
+/// legacy #369 device→sandbox delegation for NEW device↔delegate binds. Wire
+/// spelling lowercase; absent = `feed_backed` (every pre-#408 channel is a feed).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChannelKind {
+    #[default]
+    FeedBacked,
+    Session,
+}
+
+impl ChannelKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ChannelKind::FeedBacked => "feed_backed",
+            ChannelKind::Session => "session",
+        }
+    }
+
+    /// Whether this kind persists events in a durable feed. `session` channels are
+    /// direct-transport (no feed) — a poll/subscribe against a session channel has
+    /// nothing to read; delivery is the live bridge.
+    pub fn has_feed(&self) -> bool {
+        matches!(self, ChannelKind::FeedBacked)
+    }
+}
+
+/// The direction an event flows relative to a keyed actor's grant. Carried on
+/// [`ChannelEvent`] for the subscriber's provenance display; the AUTHORIZATION
+/// direction is the SIGNED cap op (publish vs subscribe), never this field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ChannelDirection {
+    /// Toward the agent (contact/device → agent) — the inbound feed.
+    In,
+    /// Away from the agent (agent → contact/device) — the outbound feed.
+    Out,
+}
+
+/// The producer of a [`ChannelEvent`] — EXACTLY ONE of a keyed actor XOR an
+/// externally-authenticated contact (`docs/spec/agent-channel-decoupling.md`
+/// §4.1). **Stamped by the worker/adapter, NEVER self-attributed by the
+/// payload** (the absorption-inbox provenance rule): the channel worker sets
+/// `Actor` from the cap-signed `actor_omni`; the gateway sets `Contact` from
+/// the transport-verified identity. A delegate can label an event's `kind`,
+/// never its `producer`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChannelProducer {
+    /// A keyed actor (delegate or device) — the `0x`-omni the cap was signed by.
+    Actor { actor_omni: String },
+    /// An externally-authenticated, keyless contact (the family), verified at
+    /// the gateway. `contact_id` is the registry id; `tier` is the household
+    /// tier (D5). No keys, no omni — the transport authenticated them.
+    Contact { contact_id: String, tier: String },
+}
+
+/// The payload kind of a [`ChannelEvent`]. Continuous media (realtime
+/// speech/video) is deliberately NOT here — it stays on the §22d.3a gate path;
+/// channels carry text, commands, docs, discrete frames, and `audio-clip`s.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ts_rs::TS)]
+#[serde(rename_all = "kebab-case")]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub enum ChannelEventKind {
+    Text,
+    Image,
+    AudioClip,
+    Frame,
+    Command,
+    Doc,
+    /// #693 — a delegate's launch / pull lifecycle stage on its own feeds
+    /// (`direction: out`, body = JSON [`DelegateLifecycle`]). The console and
+    /// the contact gate READ it; nothing replies to it; a delegate never
+    /// treats it as a turn.
+    Lifecycle,
+}
+
+impl ChannelEventKind {
+    pub const ALL: [ChannelEventKind; 7] = [
+        ChannelEventKind::Text,
+        ChannelEventKind::Image,
+        ChannelEventKind::AudioClip,
+        ChannelEventKind::Frame,
+        ChannelEventKind::Command,
+        ChannelEventKind::Doc,
+        ChannelEventKind::Lifecycle,
+    ];
+
+    /// The wire spelling (matches the serde rename) — for hand-built bodies
+    /// and log lines, so nobody re-types the kebab-case word.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ChannelEventKind::Text => "text",
+            ChannelEventKind::Image => "image",
+            ChannelEventKind::AudioClip => "audio-clip",
+            ChannelEventKind::Frame => "frame",
+            ChannelEventKind::Command => "command",
+            ChannelEventKind::Doc => "doc",
+            ChannelEventKind::Lifecycle => "lifecycle",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        Self::ALL.iter().copied().find(|k| k.as_str() == s)
+    }
+}
+
+/// #693 — the launch / pull lifecycle a delegate publishes on its own feeds
+/// (`ChannelEventKind::Lifecycle`, JSON body): `booting` → `restoring` (checkpoint) → `syncing` (k of n namespaces)
+/// → `ready`; `degraded` when the engine is down or a pull failed (chat still
+/// answers — the mirror is never load-bearing); `pulling` while a periodic
+/// pass runs. Counts and milliseconds only — never a line of knowledge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+#[serde(rename_all = "lowercase")]
+pub enum LifecycleStage {
+    Booting,
+    Restoring,
+    Syncing,
+    Ready,
+    Degraded,
+    Pulling,
+}
+
+impl LifecycleStage {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            LifecycleStage::Booting => "booting",
+            LifecycleStage::Restoring => "restoring",
+            LifecycleStage::Syncing => "syncing",
+            LifecycleStage::Ready => "ready",
+            LifecycleStage::Degraded => "degraded",
+            LifecycleStage::Pulling => "pulling",
+        }
+    }
+
+    /// A turn may run: the knowledge is there (or a periodic pass is merely
+    /// refreshing it).
+    pub fn answers(&self) -> bool {
+        matches!(self, LifecycleStage::Ready | LifecycleStage::Pulling)
+    }
+}
+
+/// #693 — one lifecycle report (the body of a `lifecycle` event).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct DelegateLifecycle {
+    pub stage: LifecycleStage,
+    /// One human line: `"2 of 3 namespaces"`, `"engine unreachable"`.
+    pub detail: String,
+    /// Namespaces pulled so far / in total (a syncing pass).
+    pub done: u32,
+    pub total: u32,
+    /// Lines mirrored / deleted by the last pass.
+    #[ts(type = "number")]
+    pub mirrored: u64,
+    #[ts(type = "number")]
+    pub deleted: u64,
+    /// Milliseconds the last pass (or stage) took.
+    #[ts(type = "number")]
+    pub ms: u64,
+    /// Stage-tagged errors of the last pass (`"fetch travel: …"`).
+    pub errors: Vec<String>,
+    #[ts(type = "number")]
+    pub ts_millis: u64,
+    /// The receipt of the pass's durable audit row (op_kind 105): the
+    /// `envelope_hash` the audit worker answered, so a reader fetches the REAL
+    /// row by hash. Only on the report that ends a pull pass whose row landed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub audit_envelope_hash: Option<String>,
+}
+
+/// #694 — the reserved keyed object holding a checkpoint of the delegate's
+/// engine workspace (the OpenViking index + the mirror's ingest manifest),
+/// beside [`CHECKPOINT_OBJECT_KEY`]: a respawn restores it before the engine
+/// starts, so the first pull is a delta instead of a full re-embed.
+pub const OV_WORKSPACE_OBJECT_KEY: &str = "checkpoint/ov-workspace";
+
+/// #667 — the external principal a RELAYING actor (the gateway) declares an
+/// event was relayed for. Additive and copied verbatim from the publish body
+/// like `correlation`: the worker still stamps `producer` from the cap-signed
+/// actor (the gateway's own omni), so attribution of WHO PUBLISHED is never
+/// payload-supplied; consumers trust the stamp by the producer's identity (an
+/// app's `bound_channels` names the feed's relay actor). Carries the registry
+/// contact id + tier only — never the transport id (D13).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct ContactStamp {
+    pub contact_id: String,
+    pub tier: String,
+}
+
+/// #519/#522 — declared audio parameters riding an `audio-clip` turn. All
+/// optional + additive (absent = consumer defaults), producer-declared like
+/// `kind`: the device states which reply voice/rate it wants and what
+/// container its clip is in (replacing consumer magic-byte sniffing).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChannelAudioParams {
+    /// Doubao speaker id the REPLY should be synthesized with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub voice: Option<String>,
+    /// Doubao 语速 for the reply, [-50, 100] (consumer clamps).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speech_rate: Option<i32>,
+    /// The PAYLOAD clip's own container (wav/mp3/ogg).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format: Option<String>,
+}
+
+/// The one canonical channel event envelope (`docs/spec/agent-channel-decoupling.md`
+/// §4.1). This is the DECRYPTED shape the worker stores inside the standard
+/// envelope and hands back to authorized subscribers; `producer` is
+/// worker/gateway-stamped. `body` carries small inline payloads (text/command);
+/// `body_ref` is an S3 key into the feed for large payloads (frames/docs) —
+/// exactly one is set.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChannelEvent {
+    /// Worker-assigned unique id (also the tail of the feed S3 key), so a
+    /// subscriber can dedup and a producer cannot forge ordering.
+    pub event_id: String,
+    pub channel_id: String,
+    pub direction: ChannelDirection,
+    /// Worker/gateway-stamped — never a payload-supplied field (§4.1).
+    pub producer: ChannelProducer,
+    pub kind: ChannelEventKind,
+    /// Inline payload (base64) for small kinds. Exactly one of `body`/`body_ref`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+    /// S3 key into the feed for large payloads. Exactly one of `body`/`body_ref`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_ref: Option<String>,
+    /// Worker-stamped unix-millis — the feed ordering key + poll cursor source.
+    pub ts_millis: u64,
+    /// Optional conversation/turn correlation id (a reply threads to a prompt).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub correlation: Option<String>,
+    /// #522 — audio params for `audio-clip` turns (voice/rate/format).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio: Option<ChannelAudioParams>,
+    /// #563 — a STREAMED reply fragment: `true` on the incremental
+    /// `direction: out` DELTA events of one turn. The FINAL reply event omits
+    /// it and carries the FULL text — byte-identical to the pre-#563
+    /// single-shot shape — so an old consumer renders exactly what it always
+    /// did and a new consumer self-heals by replacing accumulated deltas.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub partial: Option<bool>,
+    /// #563 — delta order within one streamed reply (0-based per
+    /// `correlation`; consumers append in this order).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seq: Option<u32>,
+    /// #563 — consumer hint on an INBOUND turn: "I render partials — stream
+    /// the reply". Absent = the delegate answers single-shot, which is every
+    /// pre-#563 consumer (web, fleet TUI, devices). Copied verbatim from the
+    /// publish body like `correlation`, so old workers that drop it degrade
+    /// to single-shot rather than fragment-spamming an old UI.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream: Option<bool>,
+    /// #667 — the contact a relaying actor declares this event was relayed
+    /// for (see [`ContactStamp`]). Absent on every non-gateway event.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contact: Option<ContactStamp>,
+    /// #667 — the media's content type when the body (inline or by ref) is
+    /// not text (`image/jpeg`, `audio/ogg`); absent = the kind's default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_type: Option<String>,
+    /// #667 — the source slot / feed the event was RELAYED from when a relay
+    /// re-publishes (a caption's `text` beside its `image`) — informational.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_of: Option<String>,
+    /// The app this event is for, on a channel several apps are bound to
+    /// (the contact gate's router names it; `/alias` names it). An app runs
+    /// a turn only for events addressed to it, or unaddressed ones when it is
+    /// the channel's default app. Copied verbatim from the publish body.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub addressee: Option<String>,
+}
+
+/// Channel-worker `POST /v1/channel/publish` request body. The publish cap
+/// (`service = channel-pub:<id>`, SIGNED) authorizes the write; the worker
+/// stamps `producer`/`event_id`/`ts_millis` and appends the envelope-encrypted
+/// event to the feed, completing any held consumer long-poll in-process.
+/// `kind`/`direction`/`body`/`correlation` are the producer's declared content;
+/// `producer` is NEVER accepted from the body (worker-stamped from the cap).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChannelPublishBody<T = CapToken> {
+    pub cap: T,
+    pub kind: ChannelEventKind,
+    #[serde(default = "channel_direction_in")]
+    pub direction: ChannelDirection,
+    /// Inline base64 payload for small kinds (exactly one of body/body_ref).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_b64: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub correlation: Option<String>,
+    /// #522 — producer-declared audio params, copied verbatim onto the event.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio: Option<ChannelAudioParams>,
+    /// #563 — reply-delta marker (see [`ChannelEvent::partial`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub partial: Option<bool>,
+    /// #563 — delta order (see [`ChannelEvent::seq`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seq: Option<u32>,
+    /// #563 — inbound stream hint (see [`ChannelEvent::stream`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream: Option<bool>,
+    /// #667 — the relayed-for contact (see [`ChannelEvent::contact`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contact: Option<ContactStamp>,
+    /// #667 — media content type (see [`ChannelEvent::content_type`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_type: Option<String>,
+    /// #667 — see [`ChannelEvent::relay_of`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_of: Option<String>,
+    /// See [`ChannelEvent::addressee`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub addressee: Option<String>,
+}
+
+/// #667 — channel-worker `POST /v1/channel/blob-put`: store one media
+/// original UNCHANGED beside the feed (`bots/<owner>/channel/<id>.blob/<blob>`)
+/// under the same publish cap, returning the `body_ref` a later
+/// `/v1/channel/publish` names. Kept out of the feed's own prefix so the poll
+/// listing never sees it. Bytes ride base64 (JSON body; the worker caps the
+/// decoded size at the configured blob limit).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChannelBlobPutBody<T = CapToken> {
+    pub cap: T,
+    pub content_type: String,
+    pub bytes_b64: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChannelBlobPutResp {
+    pub ok: bool,
+    /// The `body_ref` to put on the event that references this blob.
+    pub body_ref: String,
+    pub bytes: u64,
+    /// `sha256` hex of the stored bytes — the consumer's dedup / "bytes
+    /// unchanged" proof.
+    pub sha256: String,
+}
+
+/// #667 — channel-worker `POST /v1/channel/blob-get`: fetch a blob by
+/// `body_ref` under the feed's SUBSCRIBE cap (the ref's channel must match the
+/// cap's).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChannelBlobGetBody<T = CapToken> {
+    pub cap: T,
+    pub body_ref: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChannelBlobGetResp {
+    pub ok: bool,
+    pub content_type: String,
+    pub bytes_b64: String,
+    pub sha256: String,
+}
+
+fn channel_direction_in() -> ChannelDirection {
+    ChannelDirection::In
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChannelPublishResp {
+    pub ok: bool,
+    /// The worker-assigned event id (feed key tail).
+    pub event_id: String,
+    /// The feed S3 key the encrypted event landed at (the durable record).
+    pub s3_key: String,
+    /// Durable-audit receipt (#229) — see [`MemoryPutResp::audit_envelope_hash`].
+    #[serde(default)]
+    pub audit_envelope_hash: Option<String>,
+}
+
+/// Channel-worker `POST /v1/channel/poll` request body — the NRT long-poll
+/// (§14.12). The subscribe cap (`service = channel-sub:<id>`, SIGNED) authorizes
+/// the read. Returns every event whose feed key sorts AFTER `after` (the cursor
+/// = the last `s3_key`/`event_id` seen, empty = from the start); if none are
+/// pending, the worker HOLDS the request up to `wait_seconds`, completing it the
+/// instant a matching publish lands (write-through wakeup), else returns empty.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChannelPollBody<T = CapToken> {
+    pub cap: T,
+    /// Cursor: return events strictly after this feed key. Empty = from start.
+    #[serde(default)]
+    pub after: String,
+    /// Max seconds to hold the connection when no event is immediately
+    /// available (0 = return immediately; worker clamps to its ceiling).
+    #[serde(default)]
+    pub wait_seconds: u64,
+    /// #693 — return only the LAST `tail` events of the window; absent / 0 =
+    /// every event after the cursor. A console reading a delegate's latest
+    /// lifecycle stage tails the feed instead of replaying its history.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tail: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChannelPollResp {
+    pub ok: bool,
+    /// Events after the cursor, oldest-first (each `body` is base64 plaintext).
+    pub events: Vec<ChannelEvent>,
+    /// The new cursor to pass as `after` on the next poll (the last event's
+    /// feed key, or the request's `after` unchanged when `events` is empty).
+    pub cursor: String,
+    /// Durable-audit receipt (#229) for the subscribe read.
+    #[serde(default)]
+    pub audit_envelope_hash: Option<String>,
+}
+
+/// Channel-worker `POST /v1/channel/teardown` — GC a channel's whole feed
+/// (master-self / owner-scoped). Mirrors the config/memory teardown shape.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChannelTeardownBody<T = CapToken> {
+    pub cap: T,
+    pub channel_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChannelTeardownResp {
+    pub ok: bool,
+    pub keys_deleted: usize,
+    #[serde(default)]
+    pub audit_envelope_hash: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChannelWakeRequest {
+    pub owner_omni: String,
+    pub channel_id: String,
+    #[serde(default)]
+    pub event_ts_ms: Option<u64>,
+}
+
+// ── gateway + contacts (#407 phase 2) — the WeChat gateway PEP ────────────────
+//
+// A `gateway` is the capability boundary between externally-authenticated
+// humans (`contact`s — the family) and agents (`docs/spec/agent-channel-decoupling.md`
+// D4/D5/§7). It custodies the ONE scarce transport credential (a WeChat bot per
+// KYC'd account — the #384 custody pattern, never in any agent env),
+// authenticates each contact via the transport identity (weixin openid),
+// enforces L3 audience policy BEFORE anything reaches an agent, and routes.
+// **A PEP, never an authority** — grants stay master-signed + chain-verified; a
+// contact holds NO keys and NO caps (`ChannelProducer::Contact`, §4.1).
+
+/// A household tier from the D5 template. Tiers are the master-editable POLICY
+/// vocabulary (not wire-frozen — the master may add household-specific tiers),
+/// but the template six are the defaults the bind ceremony proposes among.
+/// Serialized lowercase; unknown wire values are rejected so a typo can't
+/// silently create a phantom tier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+#[serde(rename_all = "lowercase")]
+pub enum ContactTier {
+    Owner,
+    Partner,
+    Elder,
+    Kid,
+    Helper,
+    Guest,
+}
+
+impl ContactTier {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ContactTier::Owner => "owner",
+            ContactTier::Partner => "partner",
+            ContactTier::Elder => "elder",
+            ContactTier::Kid => "kid",
+            ContactTier::Helper => "helper",
+            ContactTier::Guest => "guest",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "owner" => Some(ContactTier::Owner),
+            "partner" => Some(ContactTier::Partner),
+            "elder" => Some(ContactTier::Elder),
+            "kid" => Some(ContactTier::Kid),
+            "helper" => Some(ContactTier::Helper),
+            "guest" => Some(ContactTier::Guest),
+            _ => None,
+        }
+    }
+
+    /// The full household template, in descending trust order.
+    pub fn household_template() -> [ContactTier; 6] {
+        [
+            ContactTier::Owner,
+            ContactTier::Partner,
+            ContactTier::Elder,
+            ContactTier::Kid,
+            ContactTier::Helper,
+            ContactTier::Guest,
+        ]
+    }
+
+    /// Whether this tier may EVER be proposed operator-grade reach. Operator-grade
+    /// data (spend stats, audit) requires operator-grade auth (a session/K11),
+    /// NEVER a matching openid alone (L3 rule, §5) — so even `owner` gets the
+    /// parent-control deep-link, not the data, over the gateway. This flag is the
+    /// gateway's coarse guard that a NON-owner tier can't be granted an
+    /// operator-grade alias in its reach.
+    pub fn may_hold_operator_grade_reach(&self) -> bool {
+        matches!(self, ContactTier::Owner)
+    }
+}
+
+/// An externally-authenticated, KEYLESS principal in the master-curated registry
+/// (D5). The transport authenticates the human (weixin openid today); the master
+/// maps + tiers them. NEVER an actor: no omni, no keys, no caps; no feed-history
+/// visibility (D13). What they may address is their rows on the household's
+/// channel documents ([`ChannelDoc`]), never a list on the contact.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Contact {
+    pub contact_id: String,
+    /// The transport this identity is authenticated on (`"weixin"` today).
+    pub transport: String,
+    /// The transport-native id — the weixin openid. The gateway authenticates on
+    /// this; it never leaves the gateway/registry (contacts are addressed by
+    /// `contact_id` everywhere else).
+    pub transport_id: String,
+    pub display_name: String,
+    pub tier: ContactTier,
+    /// Pre-channel rows only (the `/alias` list the member could address):
+    /// migrated into channel documents on load
+    /// ([`ContactRegistry::migrate_legacy`]) and never written again — a
+    /// member's access is their rows on the household's channels.
+    #[serde(default, rename = "reach", skip_serializing_if = "Vec::is_empty")]
+    pub legacy_reach: Vec<String>,
+    /// The member has been told, in their own chat, that they are bound and
+    /// whom they can talk to (the «✅ 绑定成功» notice). Set when that send
+    /// succeeds — at bind/approve time when the transport can already reach
+    /// them, else with their FIRST inbound message (the gate replies to it
+    /// with the notice before anything else). Never true without a delivered
+    /// send; `default` keeps older registry rows parseable (they are welcomed
+    /// on their next message, once).
+    #[serde(default)]
+    pub welcomed: bool,
+}
+
+/// The master-curated contact registry (a `policy`/`config`-data-class document,
+/// §14.5 — master-authored, gateway-read; agents see only the worker-stamped
+/// `(contact_id, tier)` on events, never the registry). `bound` are live
+/// contacts; `pending` are openids that sent a bind code but await master
+/// approval (the bind ceremony, §7.2).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ContactRegistry {
+    #[serde(default)]
+    pub bound: Vec<Contact>,
+    #[serde(default)]
+    pub pending: Vec<PendingBind>,
+    /// Master-minted OPEN invites (#418 bind ceremony) — not yet echoed to the
+    /// bot. `default` keeps pre-#418 registry files parseable unchanged.
+    #[serde(default)]
+    pub invites: Vec<BindInvite>,
+    /// Pre-channel rows (`alias → channel + blurb`, #722): migrated into
+    /// `channels` on load, never written again.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub apps: Vec<AppFeed>,
+    /// The household's channel documents — the ONE record of what each
+    /// channel is for, who is in it and which apps are bound to it. The
+    /// console writes them (install / rebind / uninstall, the Channels page,
+    /// invites); the gate reads them for every turn.
+    #[serde(default)]
+    pub channels: Vec<ChannelDoc>,
+    /// The household's choice of decision model for the router, made in the
+    /// console's route tab. `None` = never chosen: the stack's default routes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub router: Option<RouterSettings>,
+}
+
+/// Which decision model routes this household's plain messages, and whether
+/// the others the contact gate offers answer every turn too, for comparison.
+/// Policy like the rest of the registry: written through the admin surface,
+/// synced to the master's Config doc with it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RouterSettings {
+    /// The model that routes; `None` = the stack's default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Every other offered model is asked the same question on every turn
+    /// the router consults a model; their answers are recorded, never acted on.
+    #[serde(default)]
+    pub compare: bool,
+    /// When the console last changed these (unix seconds).
+    #[serde(default)]
+    pub updated_at: u64,
+}
+
+/// One relayed app: the alias contacts address it by (its delegate label)
+/// and the channel its messaging slot binds.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct AppFeed {
+    pub alias: String,
+    pub channel_id: String,
+    /// #722 — what the app is for, in the words of its template: the router's
+    /// model (Jev) reads it as the option's description, so a plain message
+    /// («今晚吃什么») can find the right app without a `/alias`. Written by the
+    /// console at install / rebind; absent on rows from before #722 (the router
+    /// then describes the option by its alias alone).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub blurb: Option<AppBlurb>,
+}
+
+/// #722 — an app's one-paragraph identity for the router: its display names,
+/// a one-line purpose in both languages, and a few example messages. Built by
+/// `PresetSummary::router_blurb` from the template (name / description /
+/// `route_examples`), never free-typed by a contact.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct AppBlurb {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub name_zh: String,
+    #[serde(default)]
+    pub purpose: String,
+    #[serde(default)]
+    pub purpose_zh: String,
+    /// Example messages this app is the right destination for.
+    #[serde(default)]
+    pub examples: Vec<String>,
+    /// The event kinds the app's messaging slot takes (the template's
+    /// `event_kinds`): a photo or a voice clip is only offered to an app that
+    /// declared it — and so disclosed which model path it transits. Empty =
+    /// not declared (a row written before this field): takes every kind.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub event_kinds: Vec<ChannelEventKind>,
+}
+
+impl ContactRegistry {
+    /// Resolve a transport identity (openid) to a BOUND contact. Unknown ids
+    /// return `None` — the gateway DROPS them (never reaches an agent).
+    pub fn resolve(&self, transport: &str, transport_id: &str) -> Option<&Contact> {
+        self.bound
+            .iter()
+            .find(|c| c.transport == transport && c.transport_id == transport_id)
+    }
+
+    pub fn contact(&self, contact_id: &str) -> Option<&Contact> {
+        self.bound.iter().find(|c| c.contact_id == contact_id)
+    }
+
+    pub fn channel(&self, id: &str) -> Option<&ChannelDoc> {
+        self.channels.iter().find(|d| d.id == id.trim())
+    }
+
+    pub fn channel_mut(&mut self, id: &str) -> Option<&mut ChannelDoc> {
+        self.channels.iter_mut().find(|d| d.id == id.trim())
+    }
+
+    /// The document for `id`, created (named after its id) when absent.
+    pub fn channel_or_new(&mut self, id: &str) -> &mut ChannelDoc {
+        let id = id.trim().to_string();
+        if let Some(i) = self.channels.iter().position(|d| d.id == id) {
+            return &mut self.channels[i];
+        }
+        self.channels.push(ChannelDoc::new(&id, &id));
+        self.channels.last_mut().expect("just pushed")
+    }
+
+    pub fn remove_channel(&mut self, id: &str) -> bool {
+        let before = self.channels.len();
+        self.channels.retain(|d| d.id != id.trim());
+        self.channels.len() != before
+    }
+
+    /// The household default (`#general`), when one is marked.
+    pub fn household_default(&self) -> Option<&ChannelDoc> {
+        self.channels.iter().find(|d| d.household_default)
+    }
+
+    /// The channels this member may publish on — the router's options.
+    pub fn speak_channels(&self, contact_id: &str) -> Vec<&ChannelDoc> {
+        self.channels
+            .iter()
+            .filter(|d| d.speaks(contact_id))
+            .collect()
+    }
+
+    /// The channels this member receives — what their aggregating transport
+    /// folds into their thread.
+    pub fn read_channels(&self, contact_id: &str) -> Vec<&ChannelDoc> {
+        self.channels
+            .iter()
+            .filter(|d| d.reads(contact_id))
+            .collect()
+    }
+
+    /// Every channel `alias` is bound to.
+    pub fn app_channels(&self, alias: &str) -> Vec<&ChannelDoc> {
+        self.channels
+            .iter()
+            .filter(|d| d.app(alias).is_some())
+            .collect()
+    }
+
+    /// Where `/alias` from this member goes: a household channel they speak
+    /// on that lists the alias, else its operator channel when they speak
+    /// there. `None` = the alias is on no channel of theirs.
+    pub fn alias_channel_for(&self, contact_id: &str, alias: &str) -> Option<&ChannelDoc> {
+        let mine: Vec<&ChannelDoc> = self
+            .speak_channels(contact_id)
+            .into_iter()
+            .filter(|d| d.app(alias).is_some())
+            .collect();
+        mine.iter()
+            .find(|d| !d.is_operator())
+            .or_else(|| mine.first())
+            .copied()
+    }
+
+    /// A member's rows, channel by channel (household channels first).
+    pub fn contact_channels_view(&self, contact_id: &str) -> Vec<ContactChannelView> {
+        let mut rows: Vec<ContactChannelView> = self
+            .channels
+            .iter()
+            .filter_map(|d| {
+                let m = d.member(contact_id)?;
+                Some(ContactChannelView {
+                    channel_id: d.id.clone(),
+                    name: d.display_name().to_string(),
+                    speak: m.speak,
+                    read: m.read,
+                    operator_of: d.operator_of.clone(),
+                })
+            })
+            .collect();
+        rows.sort_by_key(|r| r.operator_of.is_some());
+        rows
+    }
+
+    /// The D13-safe view of a bound contact (no transport id, no history).
+    pub fn summary(&self, c: &Contact) -> ContactSummary {
+        ContactSummary {
+            contact_id: c.contact_id.clone(),
+            display_name: c.display_name.clone(),
+            tier: c.tier,
+            channels: self.contact_channels_view(&c.contact_id),
+            connected: false,
+            welcomed: c.welcomed,
+        }
+    }
+
+    /// Replace a member's rows with `grants` (a grant on an unknown channel
+    /// is skipped). Returns how many documents changed.
+    pub fn apply_grants(&mut self, contact_id: &str, grants: &[ChannelGrant]) -> usize {
+        let mut changed = 0;
+        for d in self.channels.iter_mut() {
+            let want = grants.iter().find(|g| g.channel_id.trim() == d.id);
+            let did = match want {
+                Some(g) => d.set_member(contact_id, g.speak, g.read),
+                None => d.remove_member(contact_id),
+            };
+            if did {
+                changed += 1;
+            }
+        }
+        changed
+    }
+
+    /// A member's rows as grants (what an update request would resend).
+    pub fn grants_of(&self, contact_id: &str) -> Vec<ChannelGrant> {
+        self.channels
+            .iter()
+            .filter_map(|d| {
+                let m = d.member(contact_id)?;
+                Some(ChannelGrant {
+                    channel_id: d.id.clone(),
+                    speak: m.speak,
+                    read: m.read,
+                })
+            })
+            .collect()
+    }
+
+    /// Drop a member from every channel. Returns how many documents changed.
+    pub fn remove_contact_rows(&mut self, contact_id: &str) -> usize {
+        let mut changed = 0;
+        for d in self.channels.iter_mut() {
+            if d.remove_member(contact_id) {
+                changed += 1;
+            }
+        }
+        changed
+    }
+
+    /// The channel ids the pre-channel `reach` aliases map to (every channel
+    /// that lists the app).
+    fn channels_of_aliases(&self, aliases: &[String]) -> Vec<String> {
+        let mut ids: Vec<String> = aliases
+            .iter()
+            .flat_map(|a| self.app_channels(a).into_iter().map(|d| d.id.clone()))
+            .collect();
+        ids.sort();
+        ids.dedup();
+        ids
+    }
+
+    /// Fold a registry written before channel documents into them: each
+    /// `alias → channel + blurb` row becomes the app's row on that channel
+    /// (its blurb line as the description, its declared kinds as `takes`, the
+    /// first app the default); each contact's `reach` becomes `speak + read`
+    /// rows on the channels those apps are bound to (an alias bound nowhere
+    /// was never deliverable and is dropped); an invite's `reach` becomes
+    /// grants the same way; the first household channel is the default when
+    /// none is marked. `now_secs` stamps the documents that changed. Returns
+    /// whether anything moved — the caller persists.
+    pub fn migrate_legacy(&mut self, now_secs: u64) -> bool {
+        let mut changed = false;
+        let legacy_apps = std::mem::take(&mut self.apps);
+        for feed in legacy_apps {
+            changed = true;
+            let alias = feed.alias.trim().to_lowercase();
+            let blurb = feed.blurb.unwrap_or_default();
+            let purpose = if blurb.purpose_zh.trim().is_empty() {
+                blurb.purpose.trim().to_string()
+            } else {
+                blurb.purpose_zh.trim().to_string()
+            };
+            let doc = self.channel_or_new(&feed.channel_id);
+            if doc.purpose.trim().is_empty() {
+                doc.purpose = purpose.clone();
+            }
+            doc.upsert_app(ChannelApp {
+                alias,
+                slot: String::new(),
+                description: purpose,
+                takes: blurb.event_kinds,
+                audience: Vec::new(),
+            });
+            doc.updated_at = now_secs;
+        }
+        let reaches: Vec<(String, Vec<String>)> = self
+            .bound
+            .iter_mut()
+            .filter(|c| !c.legacy_reach.is_empty())
+            .map(|c| (c.contact_id.clone(), std::mem::take(&mut c.legacy_reach)))
+            .collect();
+        for (contact_id, aliases) in reaches {
+            changed = true;
+            for id in self.channels_of_aliases(&aliases) {
+                if let Some(doc) = self.channel_mut(&id) {
+                    if doc.set_member(&contact_id, true, true) {
+                        doc.updated_at = now_secs;
+                    }
+                }
+            }
+        }
+        let invite_reaches: Vec<(String, Vec<String>)> = self
+            .invites
+            .iter_mut()
+            .filter(|i| !i.legacy_reach.is_empty())
+            .map(|i| (i.bind_code.clone(), std::mem::take(&mut i.legacy_reach)))
+            .collect();
+        for (code, aliases) in invite_reaches {
+            changed = true;
+            let grants: Vec<ChannelGrant> = self
+                .channels_of_aliases(&aliases)
+                .into_iter()
+                .map(|channel_id| ChannelGrant {
+                    channel_id,
+                    speak: true,
+                    read: true,
+                })
+                .collect();
+            if let Some(inv) = self.invites.iter_mut().find(|i| i.bind_code == code) {
+                inv.channels = grants;
+            }
+        }
+        if self.household_default().is_none() {
+            if let Some(first) = self.channels.iter_mut().find(|d| !d.is_operator()) {
+                first.household_default = true;
+                first.updated_at = now_secs;
+                changed = true;
+            }
+        }
+        changed
+    }
+}
+
+/// An openid that sent a valid bind code and awaits the master's tier+reach
+/// confirmation. The small model PROPOSES `proposal`; the registry gains a
+/// `Contact` ONLY when the master confirms (advisory-only, D10 — no registry
+/// write without the master-confirm call).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingBind {
+    pub transport: String,
+    pub transport_id: String,
+    /// The one-time bind code the master issued + the human echoed to the bot.
+    pub bind_code: String,
+    /// The model's ADVISORY proposal (never authoritative). `None` until the
+    /// tier-proposer runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proposal: Option<TierProposal>,
+}
+
+/// The tiny-model's ADVISORY tier+reach proposal for a pending bind (D5/D10).
+/// The master confirms every assignment; the confirm card shows the proposed
+/// `reach` diff (§9 threat 7 — the confirm must show reach, not just the tier
+/// name). This is data the master reviews, NEVER an authorization.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TierProposal {
+    pub tier: ContactTier,
+    #[serde(default)]
+    pub channels: Vec<ChannelGrant>,
+    /// One-line human-readable rationale (from the invite context) — shown on
+    /// the master's confirm card.
+    pub rationale: String,
+}
+
+/// The D13-safe view of a contact for the operator's parent-control surface
+/// (#410). The operator has global visibility, but even the operator's view
+/// carries **no transport_id (openid)** and **no history** — those never leave
+/// the gateway/registry. This is `(contact_id, display_name, tier, channels)`
+/// only: the routing policy the operator manages, not the third-party PII.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct ContactSummary {
+    pub contact_id: String,
+    pub display_name: String,
+    pub tier: ContactTier,
+    /// Their rows, channel by channel (`ContactRegistry::summary`).
+    #[serde(default)]
+    pub channels: Vec<ContactChannelView>,
+    /// This contact's own iLink bot holds a live token on the gate (one bot per
+    /// member, 2026-09-11) — false for code-bound contacts on other transports.
+    #[serde(default)]
+    pub connected: bool,
+    /// The bound notice reached them (see `Contact::welcomed`); false = it is
+    /// sent with their first message.
+    #[serde(default)]
+    pub welcomed: bool,
+}
+
+// ── gateway admin surface (#418) — operator-driven login + bind ceremony ─────
+//
+// The parent-control app drives the gateway THROUGH the daemon proxy
+// (`/v1/master/gateway/*` → the gateway's admin-bearer-gated `/v1/gateway/admin/*`).
+// These are the ONE-owner wire shapes for that surface (ts-rs-exported so the
+// React app compiles against them — a rename here is a frontend compile error).
+
+/// An OPEN bind invite the master minted (parent-control "邀请家人"). Registry-
+/// resident until an unknown sender echoes `bind_code` to the bot (→ a
+/// `PendingBind` claims it) and the master approves (→ a bound `Contact`).
+/// The invite carries the master's INTENDED identity/tier/channels — the model
+/// proposal (D10) may suggest, the master's invite + confirm decide.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BindInvite {
+    /// One-time short code the family member sends to the bot (e.g. `AK-7Q2M9X`).
+    pub bind_code: String,
+    pub contact_id: String,
+    pub display_name: String,
+    pub tier: ContactTier,
+    /// The rows the member gets on the household's channels once bound.
+    #[serde(default)]
+    pub channels: Vec<ChannelGrant>,
+    /// Pre-channel invites (aliases): migrated into `channels` on load.
+    #[serde(default, rename = "reach", skip_serializing_if = "Vec::is_empty")]
+    pub legacy_reach: Vec<String>,
+}
+
+/// `GET /v1/gateway/admin/status` — the parent-control gateway card.
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct GatewayStatusView {
+    pub ok: bool,
+    /// `oa` | `ilink`.
+    pub transport: String,
+    /// iLink: a bot token is loaded and the inbound loop is running.
+    pub online: bool,
+    /// The bound bot id (`…@im.bot`), when known (set by the login ceremony).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bot_id: Option<String>,
+    pub bound_contacts: u32,
+    /// Open invites not yet echoed to the bot.
+    pub open_invites: u32,
+    /// Claimed binds awaiting the master's approve.
+    pub pending_binds: u32,
+    /// Live iLink bots (one per connected member, 2026-09-11; the owner's counts).
+    #[serde(default)]
+    pub bots_online: u32,
+    /// Live bots whose token is NOT in the tokens file on disk — they drop at the
+    /// next gate restart (the file's path is unwritable: fix
+    /// `AGENTKEYS_WEIXIN_ILINK_TOKENS_FILE`). 0 is the only healthy value.
+    #[serde(default)]
+    pub bots_unpersisted: u32,
+    /// Millis of the iLink loop's last successful poll (`null` = never / OA).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub ilink_last_ok_ms: Option<u64>,
+    /// True when the TAMPER-PROOF on-chain audit is armed — the audit worker is
+    /// wired AND the operator omni is valid 32-byte hex (#419). False means
+    /// contact bind/reject/revoke are recorded in the local activity log but NOT
+    /// anchored on-chain; the operator must set AGENTKEYS_WEIXIN_OPERATOR_OMNI.
+    /// (Surfaced so the skip is LOUD, never a silent drop.)
+    #[serde(default)]
+    pub audit_on_chain: bool,
+    /// #667 — the gateway's OWN device actor (`0x`-omni) once enrolled: the
+    /// identity the feed hop mints channel caps as. Absent = decision-only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub actor_omni: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub device_key_hash: Option<String>,
+    /// #667 — an allowed turn LANDS on the app's feed (device enrolled +
+    /// channel worker configured); false = the turn is decided + audited only.
+    #[serde(default)]
+    pub feed_hop: bool,
+    /// #667 — the messaging feeds this gateway delivers from (reach-derived).
+    #[serde(default)]
+    pub feeds: Vec<String>,
+}
+
+/// #667 — `GET /v1/gateway/admin/device/status`: the gateway's OWN device
+/// actor (arch.md §6.4 — one machine ↔ one device actor).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct GatewayDeviceStatus {
+    pub ok: bool,
+    /// A broker + key file are configured (the enrollment can run).
+    pub configured: bool,
+    pub enrolled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub actor_omni: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub device_key_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub broker_url: Option<String>,
+    /// The registry-facing transport namespace (`weixin` | `telegram`) — the
+    /// feed id prefix and the channel-registry row id.
+    #[serde(default)]
+    pub transport: String,
+    pub feed_hop: bool,
+    /// Why the feed hop is idle (`None` = armed).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub blocker: Option<String>,
+    #[serde(default)]
+    pub feeds: Vec<String>,
+}
+
+/// #667 — `POST /v1/gateway/admin/device/pairing-request` response: the
+/// gateway's K10 minted a §10.2 pairing code; the daemon (master) claims it
+/// and builds the accept (`is_device`) for the ONE Touch ID.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GatewayDevicePairingStart {
+    pub ok: bool,
+    pub request_id: String,
+    pub pairing_code: String,
+    /// The K10 EVM address (`0x` + 40 hex).
+    pub device_pubkey: String,
+    pub device_key_hash: String,
+    /// The device's PoP (the accept build's `agent_pop_sig`).
+    pub pop_sig: String,
+}
+
+/// #667 — `POST /v1/gateway/admin/device/pairing-complete` request.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GatewayDevicePairingCompleteRequest {
+    pub request_id: String,
+}
+
+/// #667 — `POST /v1/gateway/admin/device/pairing-complete` response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GatewayDevicePairingDone {
+    pub ok: bool,
+    pub actor_omni: String,
+    pub device_key_hash: String,
+    pub device_pubkey: String,
+    /// The device-side poll returned a session (proven from this side).
+    pub session_proven: bool,
+}
+
+/// `POST /v1/gateway/admin/login/start` request (#502, plan T9 first step).
+/// `operator_omni` is filled SERVER-SIDE by the daemon from the master session
+/// — the browser sends an empty body and NEVER supplies it, so this shape is
+/// deliberately NOT ts-exported. The gateway records it at `connected` (the
+/// tenant identity arrives from the authenticated session, not an env stamp);
+/// absent (old daemon / CLI ceremony) keeps the env-stamp behavior.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct GatewayLoginStartRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operator_omni: Option<String>,
+    /// A MEMBER login (2026-09-11, one bot per member): mint the QR for this
+    /// contact's open invite — the scan binds the contact and custodies its own
+    /// bot token. Absent = the legacy owner login.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contact_id: Option<String>,
+}
+
+/// `POST /v1/gateway/admin/login/start` response — render `qrcode_url` as a QR
+/// in parent-control; the operator scans it with the SPARE personal-WeChat
+/// account (never a family member's daily account — that account BECOMES the bot).
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct GatewayLoginStartResponse {
+    pub ok: bool,
+    pub login_id: String,
+    pub qrcode_url: String,
+}
+
+/// `GET /v1/gateway/admin/login/status?login_id=` response. `status` ∈
+/// `wait | scaned | need_verifycode | verify_code_blocked | expired |
+/// already_bound | connected | failed`. One call = one server-held poll step
+/// (up to ~35 s), so the app just loops until a terminal status.
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct GatewayLoginStatusResponse {
+    pub ok: bool,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bot_id: Option<String>,
+    /// The scanning account's ilink user id (informational provenance).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scanned_by: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+/// `POST /v1/gateway/admin/login/verify` — the phone showed a pairing number;
+/// the operator types it in parent-control and the next status poll carries it.
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct GatewayLoginVerifyRequest {
+    pub login_id: String,
+    pub verify_code: String,
+}
+
+/// `POST /v1/gateway/admin/bind/invite` — mint a bind invite for a family member.
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct GatewayBindInviteRequest {
+    pub contact_id: String,
+    pub display_name: String,
+    pub tier: ContactTier,
+    /// The channels the member joins once bound (speak / read per channel).
+    #[serde(default)]
+    pub channels: Vec<ChannelGrant>,
+}
+
+/// The minted invite. `send_text` is the exact message the family member sends
+/// to the bot (parent-control renders it as a QR + copyable text).
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct GatewayBindInviteResponse {
+    pub ok: bool,
+    pub bind_code: String,
+    pub send_text: String,
+}
+
+/// `GET /v1/gateway/admin/bind/pending` — the master's approve queue, D13-SAFE:
+/// keyed by `bind_code`, NEVER carrying the claiming openid.
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct GatewayPendingBindView {
+    pub bind_code: String,
+    pub contact_id: String,
+    pub display_name: String,
+    pub tier: ContactTier,
+    #[serde(default)]
+    pub channels: Vec<ChannelGrant>,
+    /// True once an unknown sender echoed the code (an openid is attached
+    /// gateway-side); only a CLAIMED invite can be approved.
+    pub claimed: bool,
+}
+
+/// `POST /v1/gateway/admin/bind/approve` — the master's confirm (D5: the master
+/// CONFIRMS every bind; tier/channels here override the invite's when set).
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct GatewayApproveRequest {
+    pub bind_code: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier: Option<ContactTier>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channels: Option<Vec<ChannelGrant>>,
+}
+
+/// Approve response — the now-bound contact (D13-safe summary).
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct GatewayApproveResponse {
+    pub ok: bool,
+    pub contact: ContactSummary,
+}
+
+/// `POST /v1/gateway/admin/contacts/update` — the operator edits a BOUND
+/// contact's tier and rows (#3 parent-control). Fields left `None` are
+/// unchanged; `channels` REPLACES the member's rows (a channel left out drops
+/// them from it); a tier that may not speak on an operator-grade app's
+/// channel is rejected.
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct GatewayContactUpdateRequest {
+    pub contact_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier: Option<ContactTier>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channels: Option<Vec<ChannelGrant>>,
+}
+
+/// `POST /v1/gateway/admin/contacts/revoke` — the operator UNBINDS a contact;
+/// they can no longer reach any agent through the gateway.
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct GatewayContactRevokeRequest {
+    pub contact_id: String,
+}
+
+/// `POST /v1/gateway/admin/channels/update` — one write to a channel
+/// document: create it (absent = named after its id), change its words, its
+/// household-default / operator marks or its default app, insert or replace
+/// an app's row (`app`), drop one (`remove_app`), set a member's row
+/// (`member`; `speak == read == false` drops it), or delete the whole
+/// document (`remove`). Every field left out is untouched. The document's
+/// `updated_at` is stamped by the gate.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct GatewayChannelUpdateRequest {
+    pub channel_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub purpose: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub operator_of: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub household_default: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub default_app: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub app: Option<ChannelApp>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub remove_app: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub member: Option<ChannelMember>,
+    #[serde(default)]
+    pub remove: bool,
+}
+
+/// `GET /v1/gateway/admin/channels` — every channel document on this gate.
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct GatewayChannelsResponse {
+    pub ok: bool,
+    pub channels: Vec<ChannelDoc>,
+}
+
+/// `POST /v1/gateway/admin/contacts/welcome` — (re)send a bound contact's
+/// acknowledgement («✅ 绑定成功…»): delivered now when their bot already holds
+/// a reply token for them, else ARMED for their next message.
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct GatewayContactWelcomeRequest {
+    pub contact_id: String,
+}
+
+/// The welcome verdict: `sent` = it reached their chat now; false = it goes out
+/// with their next message (`detail` says why it could not go now).
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct GatewayContactWelcomeResponse {
+    pub ok: bool,
+    pub sent: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub detail: Option<String>,
+}
+
+/// `POST /v1/gateway/admin/bind/reject` — the master WITHDRAWS an invite (open
+/// or claimed) before it binds: the code dies immediately; a claimed sender gets
+/// silence from then on. The remove half of the D5 approve gate.
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct GatewayBindRejectRequest {
+    pub bind_code: String,
+}
+
+/// `GET /v1/gateway/admin/contacts` (proxied as `/v1/master/gateway/contacts`) —
+/// the typed contacts-view envelope (#410's endpoint, now a one-owner shape).
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct GatewayContactsResponse {
+    pub ok: bool,
+    pub contacts: Vec<ContactSummary>,
+    /// The household's channel documents, for the console's checks.
+    #[serde(default)]
+    pub channels: Vec<ChannelDoc>,
+}
+
+/// One line in the operator's LIVE message monitor (#1) — a single inbound turn
+/// and the L3 decision it produced. D13-safe: the SENDER is the resolved bound
+/// contact's `display_name` (or `"unknown"` for an unbound sender), NEVER the
+/// openid; `text` is a short truncated preview for the operator's household view.
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct GatewayMonitorEvent {
+    #[ts(type = "number")]
+    pub seq: u64,
+    #[ts(type = "number")]
+    pub ts_ms: u64,
+    pub contact: String,
+    pub tier: String,
+    pub text: String,
+    pub allowed: bool,
+    pub reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub target: Option<String>,
+    /// #722 — how the target was chosen (`jev` / `jev_follow_up` /
+    /// `advisory_router` / `ask_reply` / `single_reach` / …); absent = a typed
+    /// `/alias`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub routed_by: Option<String>,
+    /// #722 — what the decision model's threshold was compared with, 0…1: the
+    /// pick's probability, or the follow-up yes/no for `jev_follow_up` (only
+    /// when a model was consulted).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub confidence: Option<f64>,
+}
+
+/// `GET /v1/gateway/admin/monitor?after=<cursor>` — the poll response. `events`
+/// are those with `seq >= after`; poll again with `after = cursor`.
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct GatewayMonitorResponse {
+    pub ok: bool,
+    #[ts(type = "number")]
+    pub cursor: u64,
+    pub events: Vec<GatewayMonitorEvent>,
+}
+
+/// `GET /v1/gateway/admin/history?before=<ts_ms>&limit=<n>` — the owner's DURABLE
+/// message history (#419), newest-first, backward-paginated. Same D13-safe event
+/// shape as the live monitor, but read from the append-only log so it survives
+/// restarts. Page older by re-requesting with `before = next_before_ts`.
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct GatewayHistoryResponse {
+    pub ok: bool,
+    pub events: Vec<GatewayMonitorEvent>,
+    /// Oldest `ts_ms` in `events` — the next `before` to page older. Absent when
+    /// the page is empty (no older turns).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub next_before_ts: Option<u64>,
+}
+
+/// #722 — `GET /v1/gateway/admin/router`: the contact gate's router as the
+/// decision model (Kev / Jev) sees it — its settings, the models the household
+/// may switch between, the guidance each question carries, the options per
+/// bound contact, and the last turns that consulted a model. The turn log is
+/// RAM only: a restart empties it.
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct GatewayRouterView {
+    pub ok: bool,
+    /// `jev` (a System One model — Kev or Jev — routes plain messages) or
+    /// `deterministic`.
+    pub engine: String,
+    /// The model that routes now: the household's pick, else the stack's
+    /// default. The contact gate sends it; the audit records what answered.
+    pub model: String,
+    /// The stack's default (`AGENTKEYS_WEIXIN_ROUTER_MODEL`).
+    pub default_model: String,
+    /// Every other offered model answers each turn too (never acted on).
+    pub compare: bool,
+    /// The models the household may switch between, with each one's server.
+    pub models: Vec<RouterModelView>,
+    /// When the household last changed the choice (unix seconds); absent =
+    /// never — the stack's default routes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub chosen_at: Option<u64>,
+    /// Why the household's choice is not what routes (it names a model this
+    /// gate no longer offers), when it is not.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub notice: Option<String>,
+    /// Where the contact gate reaches the model: the model gate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub gate_url: Option<String>,
+    /// A pick routes at this probability or above, and above the runner-up.
+    pub threshold: f64,
+    /// A follow-up goes back to the previous app at this `continues` or above.
+    pub continue_threshold: f64,
+    /// How long a numbered ask waits for the member's answer.
+    #[ts(type = "number")]
+    pub ask_ttl_secs: u64,
+    pub describe_photos: bool,
+    /// The photo describer; absent = the model gate's default chat model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub describe_model: Option<String>,
+    pub describe_prompt: String,
+    pub guidance: RouterGuidance,
+    pub contacts: Vec<RouterContactView>,
+    /// The last turns that consulted a model, newest first.
+    pub recent: Vec<RouterExchange>,
+}
+
+/// One decision model the household may switch the router to.
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct RouterModelView {
+    /// The id the router sends (`kev-9b@2629c06`, `jev-1.13.0`).
+    pub model: String,
+    pub provider: DecisionProvider,
+    /// It routes now.
+    pub active: bool,
+    /// The stack's default.
+    pub stack_default: bool,
+    /// Its provider's server as the model gate reports it.
+    pub server: DecisionServerReport,
+}
+
+/// `POST /v1/gateway/admin/router/settings` — the household picks the model
+/// that routes (one the gate offers) and whether every other one answers too,
+/// for comparison. A field left out is unchanged.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct GatewayRouterSettingsRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub compare: Option<bool>,
+}
+
+/// The settings now in force.
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct GatewayRouterSettingsResponse {
+    pub ok: bool,
+    /// The model that routes.
+    pub model: String,
+    pub compare: bool,
+    /// Whether this write changed anything.
+    pub changed: bool,
+}
+
+/// The guidance each System One question carries — the decision model has no
+/// other prompt.
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct RouterGuidance {
+    /// The `destination` choice: which channel the message belongs on.
+    pub destination: String,
+    /// What the `unclear` option means.
+    pub unclear: String,
+    /// The `continues` yes/no, asked when the member has a previous channel.
+    pub continues: String,
+    pub continues_yes: String,
+    pub continues_no: String,
+    /// The `addressee` choice, asked for a channel several apps are bound to.
+    pub addressee: String,
+}
+
+/// One bound contact and the options the model picks among for their messages.
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct RouterContactView {
+    /// The display name (D13 — never the transport id).
+    pub contact: String,
+    pub tier: String,
+    pub options: Vec<RouterOptionView>,
+    /// The System One request a message from this member is sent as, with a
+    /// placeholder for the message — `state`, the `choice` question with its
+    /// `instructions` and per-option `criteria`, the `noul` follow-up when the
+    /// member has a previous channel, and an `addressee` choice per shared
+    /// channel.
+    #[ts(type = "unknown")]
+    pub request: Value,
+}
+
+/// One channel as an option: the exact line the model reads for it, rendered
+/// from its document alone.
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct RouterOptionView {
+    pub channel_id: String,
+    pub name: String,
+    /// The criterion sent for it.
+    pub line: String,
+    pub apps: Vec<RouterAppView>,
+    /// The other members' display names (D13 — never a transport id).
+    pub members: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub operator_of: Option<String>,
+    /// The document version the line was rendered from.
+    #[ts(type = "number")]
+    pub updated_at: u64,
+}
+
+/// One app bound to an option channel, as the model reads it.
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct RouterAppView {
+    pub alias: String,
+    pub description: String,
+    /// The event kinds its binding takes (what a photo can reach).
+    pub takes: Vec<String>,
+}
+
+/// One turn that consulted a model: what was sent, what came back, how long
+/// each step took — and, in compare mode, what the other models answered.
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct RouterExchange {
+    /// The turn's number in this gate's router log (restarts at 1).
+    #[serde(default)]
+    #[ts(type = "number")]
+    pub id: u64,
+    #[ts(type = "number")]
+    pub ts_ms: u64,
+    pub contact: String,
+    pub tier: String,
+    /// What the model read as `message` (a photo's description for a photo).
+    pub text: String,
+    pub photo: bool,
+    /// The channel of the member's previous turn (the follow-up anchor).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub last_channel: Option<String>,
+    /// The System One request body, exactly as sent.
+    #[ts(type = "unknown")]
+    pub request: Value,
+    /// The `destination` probabilities per option channel.
+    pub probabilities: std::collections::BTreeMap<String, f64>,
+    /// The `continues` answer, 0 (new request) … 1 (continues).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub continues: Option<f64>,
+    /// `route` / `follow_up` / `ask` / `malformed` / `unavailable`.
+    pub verdict: String,
+    /// The channel the turn went to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub routed_to: Option<String>,
+    /// The app addressed on it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub addressee: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub confidence: Option<f64>,
+    /// The model version that answered (empty when none did).
+    pub answered_by: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub describe_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub decide_ms: Option<u64>,
+    /// The decision's token usage as the model reported it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub input_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub output_tokens: Option<u64>,
+    /// From the gate receiving the turn to its reply, the delivery included.
+    #[ts(type = "number")]
+    pub total_ms: u64,
+    /// Whether the turn landed on an app's feed.
+    pub delivered: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub error: Option<String>,
+    /// Compare mode: the other models' answers to the same request. They
+    /// arrive off the turn's path, so a fresh turn may not carry them yet.
+    #[serde(default)]
+    pub compared: Vec<RouterAnswer>,
+}
+
+/// Another model's answer to a turn's request, asked only to compare: what
+/// the router WOULD have done on it, at the same thresholds. It routed nothing.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct RouterAnswer {
+    /// The model asked.
+    pub model: String,
+    /// The version that answered (empty when none did).
+    pub answered_by: String,
+    /// The `destination` probabilities per option.
+    pub probabilities: std::collections::BTreeMap<String, f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub continues: Option<f64>,
+    /// `route` / `follow_up` / `ask` / `malformed` / `unavailable`.
+    pub verdict: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub routed_to: Option<String>,
+    /// The app the pick named on a shared channel.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub addressee: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub confidence: Option<f64>,
+    #[ts(type = "number")]
+    pub decide_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub input_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub output_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub error: Option<String>,
+}
+
+/// One CONTROL-plane action on the gateway (#419) — the operator-facing audit
+/// trail of contact management, distinct from message turns (`GatewayMonitorEvent`)
+/// and durable (append-only log, survives restarts, unlike the daemon's ephemeral
+/// in-memory audit buffer). D13-safe: `contact` is the display_name, never an openid.
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct GatewayActivityEvent {
+    #[ts(type = "number")]
+    pub ts_ms: u64,
+    /// `invite` | `claim` | `bound` | `rejected` | `revoked` | `connected` | `disconnected`.
+    pub action: String,
+    /// The contact's display_name (or `—` for a gateway-level action).
+    pub contact: String,
+    /// Human-readable specifics (tier · reach count, the 6-digit code, the bot id…).
+    pub detail: String,
+    /// True when this action was ALSO anchored on-chain (operator omni armed).
+    pub on_chain: bool,
+}
+
+/// `GET /v1/gateway/admin/activity?before=<ts_ms>&limit=<n>` — the durable
+/// control-action audit trail, newest-first, backward-paginated.
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct GatewayActivityResponse {
+    pub ok: bool,
+    pub events: Vec<GatewayActivityEvent>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub next_before_ts: Option<u64>,
+}
+
+/// A normalized inbound message the gateway builds from a verified transport
+/// callback (the transport-specific parsing lives in each gateway worker; this
+/// is the canonical shape the L3/routing logic consumes). `alias` is the
+/// `/alias` deterministic-routing target when the message starts with one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GatewayInbound {
+    pub transport: String,
+    pub transport_id: String,
+    /// The message text with any leading `/alias ` stripped into `alias`.
+    pub text: String,
+    /// The `/alias` routing target, if the message began with `/<alias> `.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alias: Option<String>,
+    /// The channel the turn is for: set by a channel-native transport (the
+    /// member picked it) or by the aggregating transport's `resolve` (the
+    /// router, an answered ask, `/alias`). `None` = nowhere to publish.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel: Option<String>,
+}
+
+/// The L3 audience decision — may THIS contact reach THAT agent through this
+/// gateway, and at what grain (§5 L3). Computed BEFORE anything reaches an agent.
+/// `operator_grade_deeplink` is set when the contact asked for operator-grade
+/// data (spend stats/audit): the answer is the parent-control deep-link, never
+/// the data over the gateway (the L3 rule that operator-grade needs operator-grade
+/// auth).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct L3Decision {
+    pub allowed: bool,
+    /// The addressed app when `allowed`: the app row the turn is for on its
+    /// channel (the router's pick, `/alias`, or the channel's default app).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_alias: Option<String>,
+    /// The channel the turn goes to when `allowed`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel_id: Option<String>,
+    /// A stable reason code for audit + the (never-in-channel, D13) parent-control
+    /// view: `ok` / `unknown_contact` / `out_of_reach` / `rate_limited` /
+    /// `operator_grade_requires_session` / `no_alias`.
+    pub reason: String,
+    /// Set when the ask was operator-grade — the parent-control deep-link the
+    /// contact gets instead of the data.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operator_grade_deeplink: Option<String>,
+    /// #410 — how the target was chosen: absent = deterministic `/alias`;
+    /// `"advisory_router"` = the tiny-model/keyword router picked it (D10 — the
+    /// router is ADVISORY, so this is worker-stamped routing metadata for the
+    /// parent-control view; it NEVER widened authority, the pick is always within
+    /// the contact's reach).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routed_by: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CredListResp {
+    pub ok: bool,
+    pub services: Vec<String>,
+}
+
+// ── cred worker (`/v1/cred/fetch`) — #216 agent-side vaulted-key fetch ────────
+
+/// Canonical credential fetch request shared by the worker and its clients.
+/// The capability carries the credential service and selects the operator's vault.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CredFetchBody<T = CapToken> {
+    pub cap: T,
+}
+
+/// EXACTLY ONE of `envelope_b64` / `plaintext_b64` is set (the #372 config
+/// recipe applied to cred): v3 blobs come back as the raw envelope for
+/// CLIENT-side decrypt under the signer-derived KEK (the worker holds no key
+/// that opens them); legacy v2 blobs come back worker-decrypted.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CredFetchResp {
+    pub ok: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plaintext_b64: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub envelope_b64: Option<String>,
+    /// Durable-audit receipt (#229): the `AuditEnvelope` hash the worker
+    /// emitted for this op (`null`/absent on pre-#229 workers or when the
+    /// emit failed in best-effort mode).
+    #[serde(default)]
+    pub audit_envelope_hash: Option<String>,
+}
+
+/// Canonical `/v1/cred/store` request body used by the worker and its clients.
+/// The capability carries the credential service, alongside exactly one of:
+/// `plaintext_b64` (legacy — the worker encrypts under its static stage-1 K3
+/// KEK) or `envelope_b64` (a client-encrypted v3 envelope the worker stores
+/// VERBATIM, #372-recipe — nothing reaches the worker in plaintext).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CredStoreBody<T = CapToken> {
+    pub cap: T,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plaintext_b64: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub envelope_b64: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CredStoreResp {
+    pub ok: bool,
+    pub s3_key: String,
+    pub envelope_size: usize,
+    /// Durable-audit receipt (#229): the `AuditEnvelope` hash the worker
+    /// emitted for this op (`null`/absent on pre-#229 workers or when the
+    /// emit failed in best-effort mode).
+    #[serde(default)]
+    pub audit_envelope_hash: Option<String>,
+}
+
+// ── audit worker (`/v1/audit/append/v2`) ────────────────────────────────────
+
+/// Audit envelope version, pinned to `agentkeys_core::audit::ENVELOPE_VERSION`.
+/// If that constant changes this must change too — covered by the MCP server's
+/// integration smoke test.
+pub const ENVELOPE_VERSION: u8 = 1;
+
+/// Audit-worker `/v1/audit/append/v2` request body. Mirrors
+/// `agentkeys_worker_audit::handlers::AppendV2Request`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuditAppendV2 {
+    pub version: u8,
+    pub ts_unix: u64,
+    pub actor_omni: String,
+    pub operator_omni: String,
+    pub op_kind: u8,
+    pub op_body: Value,
+    pub result: u8,
+    pub intent_text: Option<String>,
+    pub intent_commitment: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct AuditAppendV2Resp {
+    pub ok: bool,
+    pub envelope_hash: String,
+}
+
+// ── high-level inputs / results (what the trait/callers pass + get back) ─────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryPutInput {
+    pub cap: CapToken,
+    pub namespace: String,
+    pub plaintext_b64: String,
+    /// #594 — keyed object under the same grant (see [`MemoryPutBody`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub object_key: Option<String>,
+    /// Compare-and-swap (D-K5, `plan/knowledge-repository.md` §6): the keccak-256
+    /// hex (`0x…`) of the plaintext the writer READ, or `""` to assert the object
+    /// does not exist yet. The worker refuses the put with 409 `stale_base` when
+    /// the stored plaintext hashes differently — git's "non-fast-forward".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_content_hash: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryGetInput {
+    pub cap: CapToken,
+    pub namespace: String,
+    /// #594 — keyed object under the same grant; own-memory reads only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub object_key: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryPutResult {
+    pub ok: bool,
+    pub s3_key: String,
+    pub envelope_size: usize,
+    pub namespace: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryGetResult {
+    pub ok: bool,
+    pub plaintext_b64: String,
+    pub namespace: String,
+}
+
+// ── #339 P2 — absorption inbox (master-hub "push" / curated merge) ────────────
+//
+// The mirror of P1's canonical READ, but for WRITE: a delegate proposes a
+// learning into the master's staging inbox; the master curates it into canonical
+// later. The on-chain authorization is a **distinct** `proposal:<ns>` grant (never
+// the `knowledge:<ns>` read grant — `readOnly` is a dead flag, master-hub-topology.md
+// §5/§6b). Like P1's A' model, the cross-actor WRITE runs SERVER-SIDE in the
+// worker after independent authorization. Provenance (`source_delegate_omni`)
+// is stamped by the WORKER from
+// the cap-signed `actor_omni`, NEVER from a delegate-supplied field (§8).
+
+/// The context TYPE of a context-system object (#390, master-hub-topology.md
+/// §16 / arch.md §5 "context system"). The lifecycle machinery is uniform; what
+/// varies per kind is the **adoption-gate strictness + runtime application**:
+/// `knowledge` = light curation, recalled/injected per turn (the original
+/// "memory"); `skill` = strict diff-review curation, delivered as files;
+/// `persona` = master-authored only (never inbox-adoptable), applied fresh each
+/// turn (`SOUL.md`); `resource` (#666, the fourth kind — arch.md §5
+/// `resource item`) = master-curated ONLY, distributed read-only by the
+/// mirror under an ordinary `knowledge:<ns>` grant (no inbox on that namespace),
+/// never inbox-adoptable. Wire spelling is the lowercase word; absent =
+/// `knowledge` (full back-compat — every pre-#390 object is knowledge).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[serde(rename_all = "lowercase")]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub enum ContextKind {
+    #[default]
+    Knowledge,
+    Skill,
+    Persona,
+    Resource,
+    /// The delegate's sealed context document (`DelegateContextDoc`) in the
+    /// app's own namespace — never a prompt section, never inbox-adoptable.
+    Context,
+}
+
+impl ContextKind {
+    /// Wire spelling (matches the serde rename) — for hand-built JSON bodies
+    /// and log lines, so nobody re-types the lowercase word.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ContextKind::Knowledge => "knowledge",
+            ContextKind::Skill => "skill",
+            ContextKind::Persona => "persona",
+            ContextKind::Resource => "resource",
+            ContextKind::Context => "context",
+        }
+    }
+
+    /// Parse the wire spelling (CLI flags, env) — the inverse of [`Self::as_str`].
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "knowledge" => Some(ContextKind::Knowledge),
+            "skill" => Some(ContextKind::Skill),
+            "persona" => Some(ContextKind::Persona),
+            "resource" => Some(ContextKind::Resource),
+            "context" => Some(ContextKind::Context),
+            _ => None,
+        }
+    }
+
+    /// Whether a delegate proposal of this kind may ever be adopted from the
+    /// inbox: persona and resources are master-authored only.
+    pub fn inbox_adoptable(&self) -> bool {
+        !matches!(
+            self,
+            ContextKind::Persona | ContextKind::Resource | ContextKind::Context
+        )
+    }
+}
+
+/// The RESERVED canonical namespace persona documents live in (#390). Written
+/// ONLY by the daemon's persona editor (master-authored); never granted to a
+/// delegate (`knowledge:persona` / `proposal:persona` are never offered), never
+/// reconciled into the recall taxonomy, and the master-memory plant rejects
+/// direct writes into it — the persona module is the single writer.
+pub const PERSONA_NAMESPACE: &str = "persona";
+
+/// Canonical persona-document key for one delegate within
+/// [`PERSONA_NAMESPACE`]: `soul:<0x-omni-lowercase>`. Version-history entries
+/// append `@<n>` (see the daemon persona module) — spell it through this
+/// helper so the key shape has one owner.
+pub fn persona_soul_key(delegate_omni: &str) -> String {
+    format!("soul:{}", normalize_omni_0x(delegate_omni).to_lowercase())
+}
+
+/// Delegate → worker `POST /v1/memory/inbox-append`. The Append cap carries
+/// `service = proposal:<ns>` (the SIGNED namespace); `key` is the delegate's
+/// proposed memory key within that namespace and `plaintext_b64` the proposed
+/// body. `kind` is the delegate's LABEL for what it proposes (a delegate can
+/// label its proposal's kind, never its authorship — provenance stays
+/// worker-stamped); absent = `knowledge`. The worker stamps provenance +
+/// content-hash and writes the envelope to
+/// `bots/<operator>/inbox/<delegate>/<ns>/<content_hash>.enc`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryInboxAppendBody<T = CapToken> {
+    pub cap: T,
+    pub key: String,
+    pub plaintext_b64: String,
+    #[serde(default)]
+    pub kind: ContextKind,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryInboxAppendResp {
+    pub ok: bool,
+    pub s3_key: String,
+    /// keccak256 over namespace, key and body separated by 0x7c.
+    pub content_hash: String,
+    /// Durable-audit receipt (#229) — see [`MemoryPutResp::audit_envelope_hash`].
+    #[serde(default)]
+    pub audit_envelope_hash: Option<String>,
+}
+
+/// The decrypted inbox proposal — what the worker stores (inside the envelope)
+/// and the master reads back to curate. `source_delegate_omni`, `ns`, `ts`, and
+/// `content_hash` are **worker-stamped** (the delegate controls only `key` +
+/// body bytes); the master must trust attribution, not the delegate (§8).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InboxItem {
+    pub source_delegate_omni: String,
+    pub ns: String,
+    pub key: String,
+    pub body_b64: String,
+    pub content_hash: String,
+    pub ts: u64,
+    /// #390 — the delegate-labeled context kind (validated + stored by the
+    /// worker; absent on pre-#390 envelopes = `knowledge`). Drives the per-kind
+    /// curate gate: `persona` is never inbox-adoptable, `skill` requires a
+    /// viewed-body confirmation + size cap.
+    #[serde(default)]
+    pub kind: ContextKind,
+}
+
+/// Per-item metadata for the master's inbox listing (the curate queue). Mirrors
+/// [`InboxItem`] minus the body; `s3_key` is the handle the master passes to
+/// `inbox-get` / `inbox-delete`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InboxItemMeta {
+    pub s3_key: String,
+    pub source_delegate_omni: String,
+    pub ns: String,
+    pub key: String,
+    pub content_hash: String,
+    pub bytes: u64,
+    pub ts: u64,
+    /// #390 — mirrors [`InboxItem::kind`] into the curate queue so the master's
+    /// list can gate per kind without decrypting bodies twice.
+    #[serde(default)]
+    pub kind: ContextKind,
+}
+
+/// Master → worker `POST /v1/memory/inbox-list`. Master-self cap (operator ==
+/// actor); the worker lists `bots/<operator>/inbox/**` and returns the curate
+/// queue. The handler rejects a non-master-self cap so no delegate can read
+/// another delegate's proposals (hub-and-spoke, never mesh — §7).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InboxListBody<T = CapToken> {
+    pub cap: T,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InboxListResp {
+    pub ok: bool,
+    pub items: Vec<InboxItemMeta>,
+}
+
+/// Master → worker `POST /v1/memory/inbox-get` — read one proposal to review.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InboxGetBody<T = CapToken> {
+    pub cap: T,
+    pub s3_key: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InboxGetResp {
+    pub ok: bool,
+    pub item: InboxItem,
+}
+
+/// Master → worker `POST /v1/memory/inbox-delete` — GC after curation
+/// (delete-on-accept / discard-on-reject). Master-self.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InboxDeleteBody<T = CapToken> {
+    pub cap: T,
+    pub s3_key: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InboxDeleteResp {
+    pub ok: bool,
+    pub deleted: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CredFetchInput {
+    pub cap: CapToken,
+}
+
+/// EXACTLY ONE of `plaintext_b64` / `envelope_b64` is set (mirrors
+/// [`CredFetchResp`]): `envelope_b64` = a v3 blob for client-side decrypt
+/// under the signer-derived KEK; consumers that need plaintext MUST fail
+/// loud on it until the #91 delegated KEK-release lands.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CredFetchResult {
+    pub ok: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plaintext_b64: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub envelope_b64: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CredStoreInput {
+    pub cap: CapToken,
+    pub plaintext_b64: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CredStoreResult {
+    pub ok: bool,
+    pub s3_key: String,
+    pub envelope_size: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuditAppendInput {
+    pub operator_omni: String,
+    pub actor_omni: String,
+    pub op_kind: u8,
+    pub op_body: Value,
+    pub result: u8,
+    pub intent_text: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuditAppendResult {
+    pub ok: bool,
+    pub envelope_hash: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RevokeResult {
+    pub ok: bool,
+    pub revocation: String,
+    /// Present when `revocation != "online_immediate"` — tells the caller what
+    /// kind of revocation actually happened.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+// ── #225 / #164 E7 — on-chain K11-gated agent accept (sponsored executeBatch) ─
+//
+// The accept becomes ONE P256Account.executeBatch UserOp that lands the device
+// binding (P.2) + the scope grant (P.3) atomically, gated by one master K11
+// signature. Two broker endpoints, J1_master-gated: `build` assembles + co-signs
+// the sponsored op and returns the userOpHash; the daemon K11-signs it; `submit`
+// relays the signed op to `EntryPoint.handleOps`. The broker mirrors these shapes
+// server-side (it doesn't depend on this crate); the frozen key-set tests in
+// `crate::fixtures` pin them so the two sides can't drift.
+
+/// Daemon → broker `POST /v1/accept/build`. The granted scope (`services` +
+/// caps) is what the master approved in the pairing UI; the register fields bind
+/// the agent device. `operator_omni`/`actor_omni` are `0x`-omni
+/// ([`normalize_omni_0x`]); the `u128` caps ride as decimal strings (wire-safe
+/// past 2^53; `"0"` = unset).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BuildAcceptUserOpRequest {
+    pub operator_omni: String,
+    pub actor_omni: String,
+    pub device_key_hash: String,
+    pub agent_pop_sig: String,
+    pub link_code_redemption: String,
+    pub services: Vec<String>,
+    pub read_only: bool,
+    pub max_per_call: String,
+    pub max_per_period: String,
+    pub max_total: String,
+    pub period_seconds: u32,
+    /// #408 — the actor being bound is a **device** (a channel endpoint), not a
+    /// runtime-hosting delegate. Set by the accept card when the claim is a
+    /// device pairing; the broker uses it to WARN when a device accept attaches
+    /// ZERO channel grants (§14.10 — a device claim must attach ≥1 channel; the
+    /// accept card hard-enforces, the broker warns — a grant-less device actor is
+    /// inert, not dangerous). `skip_serializing_if` keeps the pre-#408 body
+    /// byte-identical (the frozen key-set + fixtures are unchanged for delegates).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub is_device: bool,
+}
+
+pub(crate) fn is_false(b: &bool) -> bool {
+    !*b
+}
+
+/// Count the channel grants (`channel-pub:<id>` / `channel-sub:<id>`) in an
+/// accept/scope `services` list (#408). A DEVICE binds with ONLY channel grants
+/// (D6); this is what the §14.10 "≥1 channel" rule counts. Direction-agnostic —
+/// a device may be pub-only (camera), sub-only (display), or duplex (console).
+pub fn channel_grant_count(services: &[String]) -> usize {
+    services
+        .iter()
+        .filter(|s| {
+            let l = s.to_lowercase();
+            l.starts_with("channel-pub:") || l.starts_with("channel-sub:")
+        })
+        .count()
+}
+
+/// Whether a bind's `requested_scope` (space- OR comma-delimited service list)
+/// is a DEVICE bind — NON-EMPTY and every grant is a channel grant (D6). This is
+/// the signal the broker uses to enforce **"device pairing never spawns"** (#409
+/// D9): a device is a channel endpoint, so its §10.2 claim must NOT trigger the
+/// #377 create-on-pair sandbox spawn (only DELEGATE onboarding spawns). An EMPTY
+/// scope is NOT a device (an un-scoped delegate claim awaiting a grant still
+/// spawns) — only an explicitly channel-only bind suppresses the spawn.
+pub fn scope_is_device_only(requested_scope: &str) -> bool {
+    let services: Vec<&str> = requested_scope
+        .split([' ', ','])
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    !services.is_empty()
+        && services.iter().all(|s| {
+            let l = s.to_lowercase();
+            l.starts_with("channel-pub:") || l.starts_with("channel-sub:")
+        })
+}
+
+/// ERC-4337 v0.7 `PackedUserOperation`, hex-encoded for the wire. Mirrors
+/// `agentkeys_broker_server::sponsor::PackedUserOp`; the daemon fills `signature`
+/// with the master's K11 assertion over `user_op_hash`, then returns the whole op
+/// to `/v1/accept/submit`.
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct WireUserOp {
+    pub sender: String,
+    pub nonce: String,
+    pub init_code: String,
+    pub call_data: String,
+    pub account_gas_limits: String,
+    pub pre_verification_gas: String,
+    pub gas_fees: String,
+    pub paymaster_and_data: String,
+    pub signature: String,
+}
+
+/// Broker → daemon response to `/v1/accept/build`. The master signs
+/// `user_op_hash` (the `EntryPoint.getUserOpHash` of `user_op`) with K11.
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct BuildAcceptUserOpResponse {
+    pub user_op: WireUserOp,
+    pub user_op_hash: String,
+    pub entry_point: String,
+    #[ts(type = "number")]
+    pub chain_id: u64,
+}
+
+pub use hosted_signer::BrowserAssertion as AcceptAssertion;
+
+/// Daemon → broker `POST /v1/accept/submit` — the op from `build` + the master's
+/// browser WebAuthn `assertion` over `user_op_hash`. The broker encodes the
+/// assertion into `user_op.signature` using the live signer on the account
+/// bound to the verified J1 session, then relays to
+/// `EntryPoint.handleOps` (Stage B).
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct SubmitAcceptUserOpRequest {
+    pub user_op: WireUserOp,
+    pub assertion: AcceptAssertion,
+}
+
+/// Broker → daemon response to `/v1/accept/submit` (and its `/v1/scope/submit`
+/// and `/v1/revoke/submit` siblings — the daemon proxies relay it verbatim to
+/// the web frontend, which consumes the generated TS type). Two variants share the
+/// shape: confirmed (`tx_hash`/`block_number` set, #97 `audit_envelope_hashes`
+/// carrying the control-plane AuditEnvelope receipts) and receipt-timeout
+/// (`pending: true`, empty `tx_hash`/`block_number`, no envelopes — the op may
+/// still mine; the UI confirms on chain by `user_op_hash`).
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct SubmitAcceptUserOpResponse {
+    pub ok: bool,
+    pub tx_hash: String,
+    pub block_number: String,
+    /// The ERC-4337 userOpHash the bundler accepted (#97).
+    pub user_op_hash: String,
+    /// #97: control-plane audit receipts decoded from the confirmed
+    /// executeBatch. Absent on the pending variant / pre-#97 brokers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub audit_envelope_hashes: Option<Vec<String>>,
+    /// #230: broadcast but receipt-poll timed out — NOT an error.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub pending: Option<bool>,
+    /// #427: present when the confirmed batch was a spawn/archive ceremony —
+    /// the finalization summary (`spawned[]`/`archived[]`: gate provisioning
+    /// status, sandbox provision, `DelegateSpawn`/`DelegateArchive` anchor
+    /// hashes). Absent on plain accept/scope/revoke submits and pre-#427
+    /// brokers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "unknown")]
+    pub ceremony: Option<serde_json::Value>,
+}
+
+/// Per-device cleanup evidence in a confirmed ceremony's `runtime_teardown` list.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeTeardownOutcome {
+    pub device_key_hash: String,
+    pub context_removed: bool,
+    pub runtime_stopped: bool,
+    #[serde(default)]
+    pub relay_revoked: bool,
+    pub error: Option<String>,
+}
+
+// ── #248 — on-chain K11-gated scope re-grant for an ALREADY-bound agent ──────
+//
+// The permissions panel's setScope becomes ONE `P256Account.executeBatch([setScope])`
+// UserOp, gated by the master's K11 Touch ID — the scope-only sibling of the accept
+// batch (no register; the device binding already exists). Broker endpoints
+// `/v1/scope/build` + `/v1/scope/submit`, J1_master-gated; `build` returns the
+// `userOpHash` the master K11-signs, `submit` reuses the accept relay shape
+// ([`SubmitAcceptUserOpRequest`] → bundler → `EntryPoint.handleOps`). The response
+// to `build` is the same [`BuildAcceptUserOpResponse`].
+
+/// Daemon → broker `POST /v1/scope/build`. `services` is the FULL replacement
+/// list (`AgentKeysScope.setScope` is set-replace, not incremental); an empty
+/// list revokes every grant. `preserve_service_ids` are raw on-chain service
+/// ids (`0x`-hex keccak-32) echoed from the scope mirror — grants the panel
+/// can't name (e.g. `cred:<service>`) that must SURVIVE a memory-toggle commit;
+/// the broker unions them into the new grant. Field conventions match
+/// [`BuildAcceptUserOpRequest`] (`0x`-omnis, decimal-string `u128` caps).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BuildScopeUserOpRequest {
+    pub operator_omni: String,
+    pub actor_omni: String,
+    pub services: Vec<String>,
+    #[serde(default)]
+    pub preserve_service_ids: Vec<String>,
+    pub read_only: bool,
+    pub max_per_call: String,
+    pub max_per_period: String,
+    pub max_total: String,
+    pub period_seconds: u32,
+}
+
+/// Daemon → broker `POST /v1/revoke/build` — the Touch-ID **unpair** and the
+/// #260 master-reset **fleet teardown** (same endpoint, N hashes).
+/// `SidecarRegistry.revokeAgentDevice` requires `msg.sender ==
+/// operatorMasterWallet`, so for an account-master operator the revoke is a
+/// master-account UserOp (`executeBatch([revokeAgentDevice × N])`); no EOA —
+/// incl. the deployer script — can sign it. One hash = the single unpair; many
+/// = every paired agent revoked in ONE UserOp (one Touch ID) BEFORE the master
+/// unbind strands the bindings. The broker skips already-revoked/unregistered
+/// hashes (the contract would revert the whole batch on them) and rejects
+/// cross-operator ones. Response reuses [`BuildAcceptUserOpResponse`]; submit
+/// reuses [`SubmitAcceptUserOpRequest`] at `/v1/revoke/submit`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BuildRevokeUserOpRequest {
+    pub operator_omni: String,
+    /// The agents' on-chain `SidecarRegistry` device key hashes (`0x` + 64 hex
+    /// each).
+    pub device_key_hashes: Vec<String>,
+}
+
+/// Daemon → broker `POST /v1/register/build` — the #278 D6 ONE-op master
+/// register. Collapses the legacy 3-tx ceremony (deployer `createAccount` +
+/// `depositTo` + self-funded register UserOp) into a single paymaster-sponsored
+/// UserOp = `initCode` (counterfactual `P256AccountFactory.createAccount`) +
+/// `executeBatch([registerFirstMasterDevice])`, gated by ONE master K11 Touch ID.
+///
+/// The request carries ONLY what the broker cannot derive: the master P-256
+/// passkey coordinates (`owner_pubkey_x`/`owner_pubkey_y`, `0x`+64hex), the
+/// WebAuthn `rpid_hash` (deployment/domain-specific, `0x`+64hex), and the device
+/// `roles` bitmap. The broker derives everything omni-keyed from the verified J1
+/// session omni — `cred_id_hash` ([`agentkeys_core::erc4337::master_cred_id_hash`]),
+/// CREATE2 `salt` ([`master_account_salt`]), `device_key_hash`
+/// ([`master_device_key_hash`]), `actor_omni == operator_omni` (a first master IS
+/// the operator) — so a client cannot drift them. The predicted `sender` comes
+/// from `factory.getAddress(...)` and rides back in
+/// [`BuildAcceptUserOpResponse::user_op`]`.sender`; submit reuses
+/// [`SubmitAcceptUserOpRequest`] at `/v1/register/submit`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BuildRegisterUserOpRequest {
+    pub operator_omni: String,
+    pub owner_pubkey_x: String,
+    pub owner_pubkey_y: String,
+    pub rpid_hash: String,
+    pub roles: u8,
+}
+
+// ── #427 (epic #425) — the delegate SPAWN + ARCHIVE ceremonies ───────────────
+//
+// Spawn: ONE `P256Account.executeBatch([registerDelegate, setScope])` UserOp,
+// ONE master Touch ID — the D9 headless in-band claim as a first-class endpoint
+// (no pairing rendezvous). `registerDelegate` consumes an agent slot ATOMICALLY
+// (the on-chain business quota; `AgentSlotAllowanceExhausted` reverts the whole
+// batch, and the build pre-checks `agentSlots` for a loud early 409
+// `agent_slot_allowance_exhausted`). Archive: the revoke op for ONE delegate,
+// recording the keep-vs-delete resource choice (#425 O4); the slot frees
+// in-contract. Broker endpoints `/v1/agent/spawn/{build,submit}` +
+// `/v1/agent/archive/{build,submit}`; both submits reuse
+// [`SubmitAcceptUserOpRequest`] / [`SubmitAcceptUserOpResponse`] (the shared
+// relay), whose `ceremony` field carries the finalization summary.
+
+/// Daemon → broker `POST /v1/agent/spawn/build`. The broker derives the child
+/// omni (`HDKD(O_master, label)`), generates the delegate K10, and assembles
+/// the template grants (the delegate's duplex operator-chat channel pair + its
+/// `knowledge:<ns>`) — the caller supplies only the ceremony choices.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BuildSpawnUserOpRequest {
+    pub operator_omni: String,
+    /// The delegate's name — also the HDKD derivation label
+    /// (`^[a-z0-9-]{1,32}$`).
+    pub label: String,
+    /// Repo preset slug (#428 catalog); `""` = blank spawn. Recorded in the
+    /// `DelegateSpawn` anchor + the #424 binding manifest.
+    #[serde(default)]
+    pub preset_id: String,
+    /// The template `knowledge:<ns>` namespace. `None` ⇒ fresh, named after the
+    /// label; `Some` + `memory_inherited` ⇒ an archived delegate's KEPT
+    /// namespace (#425 O2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_ns: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub memory_inherited: bool,
+    /// #663 — the install wizard's choices for an app template (slots →
+    /// channels, resources → items, audience). Absent = a role-preset spawn
+    /// (today's fixed template). The broker compiles `preset_id` + bindings
+    /// into the sheet's `services[]` — always a FRESH delegate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bindings: Option<AppInstallBindings>,
+    /// #663 — the OTHER actors whose scope this ONE Touch ID also (re)writes:
+    /// the gateway that relays a messaging feed, the console that renders a
+    /// display feed. Each entry is that actor's FULL resulting set (set-replace
+    /// `setScope`), computed by the daemon from the compiler's endpoint deltas
+    /// + the actor's current grants.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub endpoint_scopes: Vec<EndpointScope>,
+    /// #663 — device actors REGISTERED in the same batch (`registerAgentDevice`
+    /// ahead of the delegate's `registerDelegate`): the channel gateway / the
+    /// console an install binds when not yet enrolled — the ONE Touch ID
+    /// enrolls them too (their grants ride `endpoint_scopes`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub endpoint_enrollments: Vec<EndpointEnrollment>,
+}
+
+/// #663 — one extra `setScope` the install / uninstall batch carries for an
+/// endpoint actor (gateway, console). `services` are NAMES (the broker
+/// keccaks them); `preserve_service_ids` are on-chain hashes the caller could
+/// not name (kept verbatim, like `/v1/scope/build`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct EndpointScope {
+    pub actor_omni: String,
+    pub services: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub preserve_service_ids: Vec<String>,
+}
+
+/// #663 — one device actor an install batch REGISTERS beside the delegate:
+/// the master's claim of the endpoint's §10.2 pairing produced `actor_omni`
+/// (the HDKD child for `label`) and the endpoint's K10 coordinates + PoP. The
+/// broker re-verifies lineage (child of the session omni) and the PoP before
+/// composing `registerAgentDevice` into the batch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct EndpointEnrollment {
+    pub actor_omni: String,
+    pub device_key_hash: String,
+    pub pop_sig: String,
+    /// The HDKD label (`gateway-<transport>` / `console-<host>`).
+    pub label: String,
+    /// Presentation kind: gateway, console, or local device/delegate.
+    #[serde(default)]
+    pub kind: String,
+    /// The gateway's transport namespace (`weixin` / `telegram`), when a gateway.
+    #[serde(default)]
+    pub transport: String,
+}
+
+/// Broker → daemon response to `/v1/agent/spawn/build`: the sponsored-UserOp
+/// build envelope ([`BuildAcceptUserOpResponse`] fields) plus the ceremony
+/// facts the client renders before the ONE Touch ID.
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct BuildSpawnUserOpResponse {
+    pub user_op: WireUserOp,
+    pub user_op_hash: String,
+    pub entry_point: String,
+    #[ts(type = "number")]
+    pub chain_id: u64,
+    /// The delegate's HDKD child omni.
+    pub actor_omni: String,
+    pub device_key_hash: String,
+    /// The duplex operator-chat channel id in the template grant (S4).
+    pub chat_channel_id: String,
+    pub memory_ns: String,
+    pub memory_inherited: bool,
+    /// The template grant NAMES (their keccak ids are what `setScope` signs).
+    pub services: Vec<String>,
+    /// Allowance state at build time (pre-consume) — the UI quota meter.
+    #[ts(type = "number")]
+    pub slots_used: u16,
+    #[ts(type = "number")]
+    pub slots_total: u16,
+    /// #663 — what each compiled grant line IS (the sheet's sections + the
+    /// Sensitive tier on resource lines). Empty on a role-preset spawn.
+    #[serde(default)]
+    pub annotations: Vec<ServiceAnnotation>,
+    /// #663 — the feeds the sandbox will poll / publish (R1 / R3).
+    #[serde(default)]
+    pub bound_channels: Vec<BoundChannel>,
+    /// #663 — the confirmed audience per messaging slot (→ contact `reach`).
+    #[serde(default)]
+    pub audience: Vec<SlotAudience>,
+    #[serde(default)]
+    pub availability: Availability,
+    /// #663 — the template the install compiled (empty for a blank spawn).
+    #[serde(default)]
+    pub template_id: String,
+    #[serde(default)]
+    pub template_version: String,
+    /// #663 — the endpoint actors this batch also re-scopes (echoed).
+    #[serde(default)]
+    pub endpoint_scopes: Vec<EndpointScope>,
+    /// #663 — the enrollments this batch registers (echoed for the sheet).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub endpoint_enrollments: Vec<EndpointEnrollment>,
+}
+
+/// Daemon → broker `POST /v1/agent/archive/build` — archive ONE delegate
+/// (`TIER_AGENT`; devices unbind via `/v1/revoke/build`, masters via the
+/// recovery flow). The slot returns in-contract; `resources_kept` records the
+/// #425 O4 keep-vs-delete choice (kept resources become inheritable; the
+/// data-plane teardown of deleted ones is the daemon's follow-through).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BuildArchiveUserOpRequest {
+    pub operator_omni: String,
+    pub device_key_hash: String,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub resources_kept: bool,
+    /// The delegate's `knowledge:<ns>` name when the caller knows it (grants are
+    /// keccak ids on-chain) — recorded for #425 O2 inheritance discovery.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_ns: Option<String>,
+    /// #663 — the endpoint actors' FULL resulting sets after this app's feed
+    /// grants are dropped (the install's mirror: the gateway / console stop
+    /// relaying + rendering a feed nobody serves).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub endpoint_scopes: Vec<EndpointScope>,
+}
+
+/// Broker → daemon response to `/v1/agent/archive/build`.
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct BuildArchiveUserOpResponse {
+    pub user_op: WireUserOp,
+    pub user_op_hash: String,
+    pub entry_point: String,
+    #[ts(type = "number")]
+    pub chain_id: u64,
+    pub device_key_hash: String,
+    pub resources_kept: bool,
+}
+
+// ── #428 (epic #425 S3/O3) — the broker-served preset catalog ────────────────
+//
+// A preset is the customization unit for a spawned delegate: persona
+// (`SOUL.md`, the #390 `persona` kind) + skills docs (`skills/*.md`) + a
+// manifest of SUGGESTIONS. **Content, never authority** — suggested channels /
+// context / schedules render as inert affordances; grants only ever come from
+// the phase-1 spawn template or an explicit later ceremony. Bundle sources are
+// repo-resident (`presets/<id>/`), compiled into the broker (`include_str!`,
+// versioned with the deployed ref), served at `GET /v1/presets` (summaries) +
+// `GET /v1/presets/:id` (full bundle). A marketplace later means new bundles
+// server-side under these SAME wire shapes — no client release.
+
+/// A preset's suggested channel — inert until the operator grants it.
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct PresetSuggestedChannel {
+    pub id: String,
+    #[serde(default)]
+    pub reason: String,
+    #[serde(default)]
+    pub reason_zh: String,
+}
+
+/// A preset's suggested context namespace — inert until granted.
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct PresetSuggestedContext {
+    pub ns: String,
+    #[serde(default)]
+    pub reason: String,
+    #[serde(default)]
+    pub reason_zh: String,
+}
+
+/// A preset's suggested schedule entry. Phase-2 renders it in the panel; the
+/// execution substrate (the #340 in-sandbox job harness) wires up later —
+/// the field is DATA, not a live cron.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct PresetSchedule {
+    pub cron: String,
+    pub label: String,
+    #[serde(default)]
+    pub label_zh: String,
+    pub prompt: String,
+    /// Typed sessions (2026-09-23): this entry's session policy when its runs
+    /// should share one (e.g. `conversation`, so a plan builds on the last
+    /// one). Absent = [`SCHEDULE_SESSION`]: every run starts clean.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub session: Option<SessionPolicy>,
+    /// DERIVED, never authored: the cron in plain words (English + 中文),
+    /// filled by [`PresetSummary::derive_display_fields`] when the broker
+    /// builds the catalog — the protocol's own cron grammar, so a console
+    /// shows it without parsing cron. Absent from an older broker's catalog:
+    /// a surface shows the raw cron.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub when: Option<CronPhrase>,
+}
+
+/// `preset.json` — the manifest half of a repo-resident bundle (also the
+/// catalog-list row). Names/descriptions are bilingual (EN + 中文).
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct PresetSummary {
+    pub id: String,
+    pub version: String,
+    pub name: String,
+    #[serde(default)]
+    pub name_zh: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub description_zh: String,
+    #[serde(default)]
+    pub suggested_channels: Vec<PresetSuggestedChannel>,
+    #[serde(default)]
+    pub suggested_context: Vec<PresetSuggestedContext>,
+    #[serde(default)]
+    pub schedule: Vec<PresetSchedule>,
+    /// #722 — a few short messages this app is the right destination for
+    /// («今晚吃什么»). The contact gate's router shows them to the decision
+    /// model beside the app's purpose; measured 2026-09-24 on Kev-9B with the
+    /// router eval (`router-eval --no-examples`) they lift automatic routing of
+    /// held-out messages from 68% to 84% and remove its one wrong route.
+    /// Bounded by `platform_caps::MAX_ROUTE_EXAMPLES` /
+    /// `MAX_ROUTE_EXAMPLE_CHARS`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub route_examples: Vec<String>,
+    /// #662 — the app template manifest half (schema, slots, resources,
+    /// tools, availability, budgets, disclosure, context pointers), flattened
+    /// into the same `preset.json`. Every field defaults, so a pre-#662 role
+    /// preset parses unchanged as a zero-slot template.
+    #[serde(flatten)]
+    #[ts(flatten)]
+    pub app: AppManifest,
+}
+
+impl PresetSummary {
+    /// #722 — the app's description for the contact gate's router, built from
+    /// the template (ONE builder: install and rebind both call it).
+    pub fn router_blurb(&self) -> AppBlurb {
+        AppBlurb {
+            name: self.name.clone(),
+            name_zh: self.name_zh.clone(),
+            purpose: self.description.clone(),
+            purpose_zh: self.description_zh.clone(),
+            examples: self.route_examples.clone(),
+            event_kinds: self.messaging_event_kinds(),
+        }
+    }
+}
+
+/// One skills doc of a bundle (`presets/<id>/skills/<filename>`).
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct PresetSkillDoc {
+    pub filename: String,
+    pub content: String,
+}
+
+/// `GET /v1/presets/:id` — the full bundle: manifest + persona + skills.
+/// `soul_md` is the persona LAYER only (the #390 locked base layer is appended
+/// by the system at apply time, never stored in a bundle).
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct PresetBundle {
+    pub manifest: PresetSummary,
+    pub soul_md: String,
+    #[serde(default)]
+    pub skills: Vec<PresetSkillDoc>,
+    /// #662 — knowledge docs (`presets/<id>/knowledge/*.md`), distributed as
+    /// `knowledge`-kind context alongside the skills.
+    #[serde(default)]
+    pub knowledge: Vec<PresetSkillDoc>,
+}
+
+impl PresetBundle {
+    pub fn skill_filenames(&self) -> Vec<String> {
+        self.skills.iter().map(|d| d.filename.clone()).collect()
+    }
+
+    pub fn knowledge_filenames(&self) -> Vec<String> {
+        self.knowledge.iter().map(|d| d.filename.clone()).collect()
+    }
+
+    /// The R2 perception prompt (`skills/perception.md`) when the template
+    /// ships one — template content, never framework code.
+    pub fn perception_prompt(&self) -> Option<&str> {
+        self.skills
+            .iter()
+            .find(|d| d.filename == PERCEPTION_SKILL_FILE)
+            .map(|d| d.content.as_str())
+    }
+}
+
+/// `GET /v1/presets` — the catalog. `catalog_version` is the deployed ref the
+/// bundles were compiled from (bundle edits ship as a broker redeploy).
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+pub struct PresetCatalogResponse {
+    pub catalog_version: String,
+    pub presets: Vec<PresetSummary>,
+}
+
+// ── the daemon's web-API plant contract (#275 tier-3) ───────────────────────
+
+/// The daemon's **web-API plant contract** — the frontend↔daemon surface, as
+/// opposed to the broker/worker chain above. It lives in this wasm-safe crate
+/// so the browser host (`agentkeys-web-core`) compiles the SAME types the
+/// daemon's `ui_bridge` serves: `daemon.ts` gets the route + body from a
+/// wasm-exported builder instead of hand-building them, which dissolves the
+/// old runtime parity check into the type system (#275, parity-ladder rung 3 —
+/// "one code path; violating parity is a compile error"). The contract is
+/// still pinned to `e2e/fixtures/web-api/master_memory_plant.json` by a
+/// `ui_bridge` unit test, and the REMAINING non-Rust consumer
+/// (`e2e/suite-6-web-parity.sh`) is gated against that fixture by
+/// `scripts/utils/check-web-api-drift.sh`.
+pub mod web_api {
+    use serde::{Deserialize, Serialize};
+
+    /// Canonical master-memory plant route — the single source of truth for
+    /// the path the React frontend (via the `agentkeys-web-core` wasm export)
+    /// and the harness web-parity demo both POST to.
+    pub const MASTER_MEMORY_PLANT_ROUTE: &str = "/v1/master/memory/plant";
+
+    /// A master-actor memory entry. `content_hash` is the dedup key —
+    /// keccak-free sha256 over (ns || key || body) so a re-plant of the same
+    /// content is detected and skipped (the "prevent duplicate plant" gate).
+    #[derive(Clone, Debug, Serialize, Deserialize, ts_rs::TS)]
+    #[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+    pub struct ApiMemoryEntry {
+        pub ns: String,
+        pub key: String,
+        pub title: String,
+        #[ts(type = "number")]
+        pub bytes: u64,
+        pub version: String,
+        pub updated: String,
+        pub preview: String,
+        pub body: String,
+        #[serde(default)]
+        pub content_hash: String,
+        /// #390 — the context kind (arch.md §5 "context system"); absent on
+        /// pre-#390 durable entries = `knowledge`. Canonical `persona` entries
+        /// are written only by the daemon persona module (the plant rejects the
+        /// reserved `persona` namespace).
+        #[serde(default)]
+        pub kind: crate::ContextKind,
+    }
+
+    /// `POST` body for [`MASTER_MEMORY_PLANT_ROUTE`].
+    #[derive(Clone, Debug, Serialize, Deserialize, ts_rs::TS)]
+    #[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+    pub struct MasterMemoryPlantRequest {
+        pub entries: Vec<ApiMemoryEntry>,
+    }
+
+    /// Plant outcome. `taxonomy_status` surfaces the durable category-index
+    /// write so a configured-Config store failure is NOT hidden behind an
+    /// otherwise-successful memory plant: `"ok"` (written), `"unconfigured"`
+    /// (Config not set up, cache-only), `"failed: <reason>"` (memory IS
+    /// durable but the category index is stale → retry), or
+    /// `"skipped: <reason>"` (config-context unavailable).
+    #[derive(Clone, Debug, Serialize, Deserialize, ts_rs::TS)]
+    #[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+    pub struct MasterMemoryPlantResponse {
+        #[ts(type = "number")]
+        pub planted: usize,
+        #[ts(type = "number")]
+        pub skipped: usize,
+        #[ts(type = "number")]
+        pub total: usize,
+        pub taxonomy_status: String,
+    }
+}
+
+// ── shared protocol helpers (the omni-normalization bug site, centralized) ───
+
+/// Build the signed cap **service** string for a memory namespace —
+/// `knowledge:<ns>`. The broker binds this into the cap's signed `service` field
+/// (issue #150), so every caller MUST spell it identically; hand-formatting
+/// `format!("knowledge:{ns}")` in a second place is exactly the per-namespace
+/// drift this crate exists to kill.
+pub fn service_knowledge(namespace: &str) -> String {
+    format!("knowledge:{namespace}")
+}
+
+/// Build the signed cap **service** string for an absorption-inbox APPEND —
+/// `proposal:<ns>` (#339 P2). This is a **distinct** on-chain service-id from
+/// [`service_knowledge`]'s `knowledge:<ns>` read grant: `keccak("proposal:travel") !=
+/// keccak("knowledge:travel")`, so granting a delegate read of `knowledge:travel`
+/// does NOT let it push to `proposal:travel` (and vice-versa). The asymmetry that
+/// `readOnly` should carry on-chain but doesn't is carried by this separate
+/// service name instead.
+pub fn service_proposal(namespace: &str) -> String {
+    format!("proposal:{namespace}")
+}
+
+/// Build the signed cap **service** string for a channel PUBLISH grant —
+/// `channel-pub:<id>` (#406, D2). This is a **distinct** on-chain service-id
+/// from [`service_channel_sub`]'s `channel-sub:<id>`: `keccak("channel-pub:cam") !=
+/// keccak("channel-sub:cam")`, so a device granted publish on a camera channel
+/// can NEVER subscribe to it (and vice-versa) — the direction-denial isolation
+/// gate lives in the service name, mirroring the #339 `knowledge:`/`proposal:` split.
+pub fn service_channel_pub(channel_id: &str) -> String {
+    format!("channel-pub:{channel_id}")
+}
+
+/// Build the signed cap **service** string for a channel SUBSCRIBE grant —
+/// `channel-sub:<id>` (#406, D2). Distinct from [`service_channel_pub`].
+pub fn service_channel_sub(channel_id: &str) -> String {
+    format!("channel-sub:{channel_id}")
+}
+
+/// Build the **capability-service** grant string for an action family —
+/// `tool:<class>` (e.g. `tool:web`, `tool:code`, `tool:schedule`; spec
+/// `docs/spec/delegate-runtime-dsh.md` §4.2). Capability services are consumed
+/// ONLY by the delegate runtime's preset compiler + in-loop tool guard (#614):
+/// granting one changes what the model may attempt, never what data a worker
+/// serves. See [`is_capability_service`] for the never-cap-mintable rule.
+pub fn service_tool(class: &str) -> String {
+    format!("tool:{class}")
+}
+
+/// Build the **capability-service** grant string for a runtime plugin mount —
+/// `plugin:<id>` (spec §4.2, #614): may this capability provider be mounted in
+/// the delegate's session at all. Minted with the install batch; consumed only
+/// by the runtime's preset compiler. Never cap-mintable ([`is_capability_service`]).
+pub fn service_plugin(id: &str) -> String {
+    format!("plugin:{id}")
+}
+
+/// True when `service` belongs to the **capability-service** family
+/// (`tool:<class>` / `plugin:<id>` — spec §4.2, #614): grant strings whose only
+/// consumers are the delegate runtime's tool guard and preset compiler. NO
+/// worker owns them, so **no cap may ever be minted for one** — the broker
+/// rejects at mint (`cap_capability_service_not_mintable`), the shared worker
+/// verify re-rejects (defence-in-depth; a granted `tool:web` would otherwise
+/// mint a memory-class cap and become scratch storage in the memory bucket),
+/// and the delegation-scope matcher treats them as inert. Case-insensitive to
+/// match the chain's `keccak256(lowercase(service))` grant hashing; leading
+/// whitespace tolerated to match that same trim.
+pub fn is_capability_service(service: &str) -> bool {
+    let s = service.trim();
+    let lower = s.to_ascii_lowercase();
+    lower.starts_with("tool:") || lower.starts_with("plugin:")
+}
+
+/// #715 — the console→broker body for `POST /v1/agent/bridge`: one bridge
+/// call to an OWNED delegate's in-sandbox bridge, forwarded by the broker
+/// (which checks ownership and supplies the delegate's bridge credential).
+/// ONE definition (D7): the broker deserializes it,
+/// the console daemon serializes it — a drift is a compile error, not a 4xx.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BridgeProxyBody {
+    /// The master's omni (must match the J1 session).
+    pub operator_omni: String,
+    /// The delegate's on-chain binding — chain-probed for ownership + tier.
+    pub device_key_hash: String,
+    /// The instance the console believes is current. When set it must be one
+    /// of the delegate's LIVE instances (a stale id is refused, never silently
+    /// redirected); absent = the live one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sandbox_id: Option<String>,
+    /// `GET` or `POST` (absent = `POST`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub method: Option<String>,
+    /// One of the broker's allowlisted bridge routes (`/healthz`, `/v1/chat`,
+    /// `/v1/jobs`, `/v1/agent/restart`, `/v1/context/files`,
+    /// `/v1/context/apply`) — never the mgmt surface.
+    pub path: String,
+    /// The JSON body to forward (absent for GETs / bodiless POSTs).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<serde_json::Value>,
+}
+
+/// The delegate-sandbox env contract (#430/#546) — the variable names the
+/// broker's spawn paths inject and the sandbox-resident daemon's chat loop
+/// consumes. ONE definition (the #203 discipline applied to env names): the
+/// #546 chat-silent-sandbox bug was exactly this set drifting between the
+/// injector (only the #427 ceremony injected it) and the consumer (which
+/// requires the full set); both sides now compile against these constants.
+pub mod sandbox_env {
+    /// The broker base URL (`https://broker.<zone>`) — where the sandbox
+    /// resolves its `J1_agent` and mints caps. Also the root every worker URL
+    /// is DERIVED from (`derive_worker_url` — worker URLs are never a
+    /// pre-composed env).
+    pub const BROKER_URL: &str = "AGENTKEYS_BROKER_URL";
+    /// The delegate's duplex operator-chat feed id (`opchat-<label>`, #425 S4).
+    pub const CHAT_CHANNEL_ID: &str = "AGENTKEYS_CHAT_CHANNEL_ID";
+    /// The delegate's HDKD child omni (`0x` + 64 hex).
+    pub const ACTOR_OMNI: &str = "AGENTKEYS_ACTOR_OMNI";
+    /// The owning operator's omni (`0x` + 64 hex).
+    pub const OPERATOR_OMNI: &str = "AGENTKEYS_OPERATOR_OMNI";
+    /// The delegate's K10 secret (hex) — proves possession on resolve + signs
+    /// the #76 cap-mint PoP. LEGACY custody (pre-#552 spawns): injected at
+    /// create, never readable back. Signer-custodied spawns inject
+    /// [`SESSION_JWT`] instead and no key ever enters the env.
+    pub const DEVICE_KEY_HEX: &str = "AGENTKEYS_DEVICE_KEY_HEX";
+    /// #552 — the broker-minted `J1_agent` injected at CREATE for a
+    /// signer-custodied delegate: the sandbox's bearer toward the signer's
+    /// device-domain endpoints until the first resolve rotates it. Exactly
+    /// one of this and [`DEVICE_KEY_HEX`] is injected per spawn.
+    pub const SESSION_JWT: &str = "AGENTKEYS_SESSION_JWT";
+    /// OPTIONAL override for the channel worker URL. Absent, the sandbox
+    /// DERIVES `channel.<zone>` from [`BROKER_URL`] (the `derive_worker_url`
+    /// convention) — never a required injection a spawn path could forget.
+    pub const CHANNEL_WORKER_URL: &str = "AGENTKEYS_CHANNEL_WORKER_URL";
+    /// OPTIONAL override for the signer URL (#552). Absent, the sandbox
+    /// DERIVES `signer.<zone>` from [`BROKER_URL`] — same convention.
+    pub const SIGNER_URL: &str = "AGENTKEYS_SIGNER_URL";
+    /// #577 — the per-delegate sandbox-management bearer, injected at CREATE.
+    /// Presence enables the in-sandbox daemon's session export/import surface
+    /// (the one-click image-update hand-off); the broker re-derives the same
+    /// value at call time (keyed on its session keypair + the delegate's
+    /// `device_key_hash`), so nothing new sits at rest. NOT a chat-contract
+    /// env — a sandbox without it simply cannot migrate its runtime home.
+    pub const MGMT_TOKEN: &str = "AGENTKEYS_SANDBOX_MGMT_TOKEN";
+    /// #715 — the per-delegate IN-POD bearer, injected at CREATE and derived
+    /// by the broker the same way as [`MGMT_TOKEN`] (session keypair +
+    /// `device_key_hash`; nothing at rest). It gates every in-pod server the
+    /// runtime owns: the dsh bridge's non-mgmt routes on :8090 (`/v1/chat`,
+    /// `/v1/context/*`, `/v1/jobs`, `/v1/agent/restart`) and the daemon's
+    /// `/v1/sandbox/self/*` surface on :3114 — and every in-pod client
+    /// presents it (the daemon's chat loop / scheduler / app runtime to the
+    /// bridge, the dsh suite plugins to the daemon). The broker presents it
+    /// through the gateway on the console's behalf (`/v1/agent/bridge`).
+    /// Before #715 a leaked instance name alone opened both surfaces.
+    pub const BRIDGE_TOKEN: &str = "AGENTKEYS_BRIDGE_TOKEN";
+    /// #594 — the delegate's OWN `knowledge:<ns>` namespace name (the spawn
+    /// template grant), injected at CREATE so the in-sandbox checkpoint loop
+    /// addresses the right grant even for an INHERITED namespace (#425 O2,
+    /// where ns ≠ label). OPTIONAL: absent, the daemon derives it from the
+    /// `opchat-<label>` channel id (the ceremony's ns-defaults-to-label rule).
+    /// NOT a chat-contract env.
+    pub const MEMORY_NS: &str = "AGENTKEYS_MEMORY_NS";
+    /// #665 (R1/R3) — the feeds the sandbox polls / publishes beyond opchat:
+    /// a JSON array of `BoundChannel` (the compiler's `bound_channels`),
+    /// injected at CREATE from the durable spawn context. OPTIONAL — absent
+    /// = a role-preset delegate with only its opchat feed.
+    pub const BOUND_CHANNELS: &str = "AGENTKEYS_BOUND_CHANNELS";
+    /// #669 (R4) / #668 (R2) — the app template id the delegate was installed
+    /// from; the in-sandbox daemon fetches the bundle from the broker catalog
+    /// for its `schedule[]` + `skills/perception.md`. OPTIONAL.
+    pub const APP_TEMPLATE: &str = "AGENTKEYS_APP_TEMPLATE";
+    /// #669 — the app's `availability` policy wire spelling (informational
+    /// in-sandbox; the broker's sweeper is the enforcer). OPTIONAL.
+    pub const APP_AVAILABILITY: &str = "AGENTKEYS_APP_AVAILABILITY";
+    /// #666 (R6) — the comma-separated namespace list the distribution mirror
+    /// probes (the app's own namespace + every bound resource namespace + the
+    /// household defaults). OPTIONAL — absent, the mirror probes its defaults.
+    pub const MEMORY_NAMESPACES: &str = "AGENTKEYS_MEMORY_NAMESPACES";
+    /// #669 — a cold-create by the WAKE path: the unix-ms the woken sandbox
+    /// replays its feeds from (the waking event, minus a margin). Absent on
+    /// every other create (the ceremony spawn, a resolve, the sweeper's
+    /// rotation), where the boot fast-forward stands — a restart never
+    /// replay-answers the transcript. OPTIONAL.
+    pub const WAKE_SINCE_MS: &str = "AGENTKEYS_WAKE_SINCE_MS";
+    /// #669 (R4) — the household's UTC offset in minutes for `schedule[]`
+    /// cron evaluation. OPTIONAL — absent = UTC.
+    pub const APP_TZ_OFFSET_MINUTES: &str = "AGENTKEYS_APP_TZ_OFFSET_MINUTES";
+
+    /// Runtime bridge port for chat, context, session transfer and job status.
+    pub const SANDBOX_BRIDGE_PORT: u16 = 8090;
+    /// Runtime daemon port for `/v1/sandbox/self/*` grants and live rebinding.
+    pub const SANDBOX_DAEMON_PORT: u16 = 3114;
+
+    /// The identity/link envs required in BOTH custody modes (#552).
+    pub const CHAT_COMMON: [&str; 4] = [BROKER_URL, CHAT_CHANNEL_ID, ACTOR_OMNI, OPERATOR_OMNI];
+    /// The per-mode credential — EXACTLY ONE present per spawn: the legacy
+    /// in-env K10, or the #552 session JWT (signer-custodied, no key in env).
+    pub const CHAT_CREDENTIAL_ANY: [&str; 2] = [DEVICE_KEY_HEX, SESSION_JWT];
+
+    /// The legacy-mode full set (#546; = [`CHAT_COMMON`] + [`DEVICE_KEY_HEX`]).
+    /// Kept for the pre-#552 injection paths and their pinned tests.
+    pub const CHAT_REQUIRED: [&str; 5] = [
+        BROKER_URL,
+        CHAT_CHANNEL_ID,
+        ACTOR_OMNI,
+        OPERATOR_OMNI,
+        DEVICE_KEY_HEX,
+    ];
+}
+
+/// Parse a leading `/alias ` deterministic-routing token from a gateway message
+/// (#407 §7.3 — `/alias` is the deterministic override; the advisory router is
+/// phase 5). Returns `(Some(alias), remaining_text)` for `"/chef 今晚吃什么"` →
+/// `(Some("chef"), "今晚吃什么")`; `(None, text)` when there is no leading slash
+/// token. The alias charset is `[a-z0-9_-]` (an agent alias), so a bare `/`
+/// or a slash mid-sentence is NOT treated as routing.
+pub fn parse_alias(text: &str) -> (Option<String>, String) {
+    let trimmed = text.trim_start();
+    let Some(rest) = trimmed.strip_prefix('/') else {
+        return (None, text.to_string());
+    };
+    let mut split = rest.splitn(2, char::is_whitespace);
+    let alias = split.next().unwrap_or("");
+    if alias.is_empty()
+        || !alias
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
+    {
+        return (None, text.to_string());
+    }
+    let remaining = split.next().unwrap_or("").trim_start().to_string();
+    (Some(alias.to_string()), remaining)
+}
+
+/// Normalize an omni to the broker's expected `0x`-prefixed lower-hex shape.
+///
+/// The broker cap-mint input-validates that `operator_omni`/`actor_omni` start
+/// with `0x`, but several upstream sources (the daemon onboarding session, JWT
+/// claims) store the omni **bare**. This was the `0x`/bare drift bug #200
+/// fixed by normalizing inline in the daemon — now there is ONE normalizer so
+/// the next caller can't reintroduce it. Already-`0x` input is returned
+/// unchanged (case preserved; the broker lower-cases on its side).
+pub fn normalize_omni_0x(omni: &str) -> String {
+    if omni.starts_with("0x") || omni.starts_with("0X") {
+        omni.to_string()
+    } else {
+        format!("0x{omni}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sandbox_env_chat_set_is_pinned() {
+        // #546 — the injector (broker spawn paths) and the consumer (in-sandbox
+        // chat loop) both compile against these names; this pins the VALUES so
+        // a rename can never silently strand deployed sandboxes mid-fleet.
+        assert_eq!(
+            sandbox_env::CHAT_REQUIRED,
+            [
+                "AGENTKEYS_BROKER_URL",
+                "AGENTKEYS_CHAT_CHANNEL_ID",
+                "AGENTKEYS_ACTOR_OMNI",
+                "AGENTKEYS_OPERATOR_OMNI",
+                "AGENTKEYS_DEVICE_KEY_HEX",
+            ]
+        );
+        assert_eq!(
+            sandbox_env::CHANNEL_WORKER_URL,
+            "AGENTKEYS_CHANNEL_WORKER_URL"
+        );
+        // #552 — the signer-custody additions, equally pinned.
+        assert_eq!(sandbox_env::SESSION_JWT, "AGENTKEYS_SESSION_JWT");
+        assert_eq!(sandbox_env::SIGNER_URL, "AGENTKEYS_SIGNER_URL");
+        assert_eq!(sandbox_env::CHAT_COMMON, sandbox_env::CHAT_REQUIRED[..4]);
+        assert_eq!(
+            sandbox_env::CHAT_CREDENTIAL_ANY,
+            ["AGENTKEYS_DEVICE_KEY_HEX", "AGENTKEYS_SESSION_JWT"]
+        );
+        // #594 — injector (broker create paths) and consumer (daemon checkpoint
+        // loop) pin the same name; optional, so NOT in CHAT_COMMON/REQUIRED.
+        assert_eq!(sandbox_env::MEMORY_NS, "AGENTKEYS_MEMORY_NS");
+        assert!(!sandbox_env::CHAT_REQUIRED.contains(&sandbox_env::MEMORY_NS));
+        // #660 stage 1 — the app-runtime envs, equally pinned + optional.
+        assert_eq!(sandbox_env::BOUND_CHANNELS, "AGENTKEYS_BOUND_CHANNELS");
+        assert_eq!(sandbox_env::APP_TEMPLATE, "AGENTKEYS_APP_TEMPLATE");
+        assert_eq!(sandbox_env::APP_AVAILABILITY, "AGENTKEYS_APP_AVAILABILITY");
+        assert_eq!(
+            sandbox_env::MEMORY_NAMESPACES,
+            "AGENTKEYS_MEMORY_NAMESPACES"
+        );
+        assert_eq!(
+            sandbox_env::APP_TZ_OFFSET_MINUTES,
+            "AGENTKEYS_APP_TZ_OFFSET_MINUTES"
+        );
+        for k in [
+            sandbox_env::BOUND_CHANNELS,
+            sandbox_env::APP_TEMPLATE,
+            sandbox_env::MEMORY_NAMESPACES,
+        ] {
+            assert!(!sandbox_env::CHAT_REQUIRED.contains(&k));
+        }
+    }
+
+    /// #594 — `object_key` is additive: an absent key keeps the pre-#594 wire
+    /// bytes EXACTLY (old workers + frozen fixtures unaffected), and the keyed
+    /// form round-trips. The reserved checkpoint slot name is pinned because
+    /// writer (checkpoint loop) and reader (restore-on-boot) live in different
+    /// processes on different instances.
+    #[test]
+    fn memory_object_key_is_additive_and_checkpoint_slot_is_pinned() {
+        let legacy = MemoryPutBody {
+            cap: serde_json::json!({"t":"cap"}),
+            plaintext_b64: "aGk=".into(),
+            namespace: "knowledge:watchdog".into(),
+            object_key: None,
+            expected_content_hash: None,
+        };
+        let wire = serde_json::to_value(&legacy).unwrap();
+        assert!(
+            wire.get("expected_content_hash").is_none(),
+            "D-K5 compare-and-swap is additive: absent unless the writer names a base"
+        );
+        assert!(
+            wire.get("object_key").is_none(),
+            "absent object_key must not appear on the wire: {wire}"
+        );
+        // Pre-#594 producers (no field at all) still deserialize.
+        let parsed: MemoryPutBody = serde_json::from_value(serde_json::json!({
+            "cap": {"t":"cap"}, "plaintext_b64": "aGk=", "namespace": "knowledge:watchdog"
+        }))
+        .unwrap();
+        assert_eq!(parsed.object_key, None);
+
+        let keyed = MemoryGetBody {
+            cap: serde_json::json!({"t":"cap"}),
+            namespace: "knowledge:watchdog".into(),
+            object_key: Some(CHECKPOINT_OBJECT_KEY.into()),
+        };
+        let round: MemoryGetBody =
+            serde_json::from_value(serde_json::to_value(&keyed).unwrap()).unwrap();
+        assert_eq!(round.object_key.as_deref(), Some("checkpoint/dsh-home"));
+
+        let env = CheckpointEnvelope {
+            version: 1,
+            runtime: Some("dsh".into()),
+            saved_at: 1_700_000_000,
+            snapshot: serde_json::json!({"version":1,"files":[]}),
+        };
+        let round: CheckpointEnvelope =
+            serde_json::from_value(serde_json::to_value(&env).unwrap()).unwrap();
+        assert_eq!(round.saved_at, 1_700_000_000);
+        assert_eq!(round.snapshot["version"], 1);
+    }
+
+    #[test]
+    fn cap_mint_op_roundtrips_paths_and_classes() {
+        for (s, path, class) in [
+            ("cred_store", "/v1/cap/cred-store", "credentials"),
+            ("cred_fetch", "/v1/cap/cred-fetch", "credentials"),
+            ("memory_put", "/v1/cap/memory-put", "memory"),
+            ("memory_get", "/v1/cap/memory-get", "memory"),
+            (
+                "memory_canonical_get",
+                "/v1/cap/memory-canonical-get",
+                "memory",
+            ),
+            ("memory_append", "/v1/cap/memory-append", "memory"),
+            ("config_store", "/v1/cap/config-store", "config"),
+            ("config_fetch", "/v1/cap/config-fetch", "config"),
+            ("channel_publish", "/v1/cap/channel-pub", "channel"),
+            ("channel_subscribe", "/v1/cap/channel-sub", "channel"),
+            ("speech_use", "/v1/cap/speech", "speech"),
+        ] {
+            let op = CapMintOp::parse(s).unwrap();
+            assert_eq!(op.broker_path(), path);
+            assert_eq!(op.data_class(), class);
+        }
+        assert!(CapMintOp::parse("bogus").is_none());
+    }
+
+    #[test]
+    fn channel_op_str_matches_worker_direction() {
+        // #406: the K10 cap-PoP preimage uses op_str; it MUST agree byte-for-byte
+        // with agentkeys_worker_creds::verify::CapOp::ChannelPublish/Subscribe.
+        // Publish and subscribe are DISTINCT signed ops (direction isolation).
+        assert_eq!(CapMintOp::ChannelPublish.op_str(), "channel_publish");
+        assert_eq!(CapMintOp::ChannelSubscribe.op_str(), "channel_subscribe");
+        assert_eq!(CapMintOp::SpeechUse.op_str(), "speech_use");
+        assert_ne!(
+            CapMintOp::ChannelPublish.op_str(),
+            CapMintOp::ChannelSubscribe.op_str()
+        );
+    }
+
+    #[test]
+    fn capability_services_are_recognized_and_data_services_are_not() {
+        // #614: the family predicate is the ONE owner of the never-cap-mintable
+        // rule — the broker gate, the worker re-reject and the delegation-scope
+        // matcher all call it, so they cannot diverge on what "capability" means.
+        assert_eq!(service_tool("web"), "tool:web");
+        assert_eq!(
+            service_plugin("openviking-memory"),
+            "plugin:openviking-memory"
+        );
+        for cap in ["tool:web", "plugin:x", "TOOL:Web", "  tool:schedule"] {
+            assert!(is_capability_service(cap), "{cap} must be capability");
+        }
+        for data in [
+            "knowledge:travel",
+            "proposal:travel",
+            "channel-pub:cam",
+            "channel-sub:cam",
+            "cred:openrouter",
+            "openrouter",
+            "config",
+            "speech",
+            "toolbox", // prefix near-miss: no colon family
+            "tooling:web",
+            "plugins:web",
+        ] {
+            assert!(
+                !is_capability_service(data),
+                "{data} must NOT be capability"
+            );
+        }
+    }
+
+    #[test]
+    fn capability_grant_never_classifies_a_bind_as_device_only() {
+        // #614 ∩ #409 D9: a capability grant is a DELEGATE grant — a bind
+        // carrying one must keep its sandbox, whether alone or mixed with
+        // channel grants.
+        assert!(!scope_is_device_only("tool:web"));
+        assert!(!scope_is_device_only("channel-pub:cam, tool:web"));
+        assert!(!scope_is_device_only(
+            "channel-pub:cam channel-sub:cam plugin:openviking"
+        ));
+    }
+
+    #[test]
+    fn service_channel_pub_sub_are_distinct_grants() {
+        // #406 D2: pub and sub are distinct on-chain service-ids for the SAME
+        // channel, so a publish grant can never authorize a subscribe (and
+        // vice-versa) — keccak(channel-pub:id) != keccak(channel-sub:id).
+        assert_eq!(
+            service_channel_pub("cam-frontdoor"),
+            "channel-pub:cam-frontdoor"
+        );
+        assert_eq!(
+            service_channel_sub("cam-frontdoor"),
+            "channel-sub:cam-frontdoor"
+        );
+        assert_ne!(
+            service_channel_pub("cam-frontdoor"),
+            service_channel_sub("cam-frontdoor")
+        );
+    }
+
+    #[test]
+    fn channel_grant_count_counts_only_channel_services() {
+        // #408 §14.10: a device binds with ONLY channel grants; count them
+        // direction-agnostically. Memory/cred grants don't count.
+        let camera = vec!["channel-pub:cam-frontdoor".to_string()];
+        assert_eq!(channel_grant_count(&camera), 1);
+        let duplex = vec![
+            "channel-pub:console".to_string(),
+            "channel-sub:console".to_string(),
+        ];
+        assert_eq!(channel_grant_count(&duplex), 2);
+        let delegate = vec![
+            "knowledge:travel".to_string(),
+            "cred:openrouter".to_string(),
+        ];
+        assert_eq!(channel_grant_count(&delegate), 0);
+        assert_eq!(channel_grant_count(&[]), 0);
+    }
+
+    #[test]
+    fn scope_is_device_only_gates_the_spawn() {
+        // #409 D9: a channel-only scope is a device (never spawns); a scope with
+        // any memory/cred grant is a delegate (spawns); empty is a delegate.
+        assert!(scope_is_device_only("channel-pub:cam-frontdoor"));
+        assert!(scope_is_device_only(
+            "channel-pub:console channel-sub:console"
+        ));
+        assert!(scope_is_device_only(
+            "channel-sub:display,channel-pub:touch"
+        ));
+        assert!(!scope_is_device_only("knowledge:travel"));
+        assert!(!scope_is_device_only("channel-pub:cam knowledge:travel")); // mixed = delegate
+        assert!(!scope_is_device_only("")); // un-scoped delegate claim still spawns
+        assert!(!scope_is_device_only("   "));
+    }
+
+    #[test]
+    fn channel_kind_wire_and_feed_semantics() {
+        assert_eq!(ChannelKind::default(), ChannelKind::FeedBacked);
+        assert_eq!(
+            serde_json::to_string(&ChannelKind::Session).unwrap(),
+            "\"session\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ChannelKind::FeedBacked).unwrap(),
+            "\"feed_backed\""
+        );
+        assert!(ChannelKind::FeedBacked.has_feed());
+        assert!(
+            !ChannelKind::Session.has_feed(),
+            "session channels have no durable feed"
+        );
+        // Absent = feed_backed (back-compat: every pre-#408 channel is a feed).
+        let old: ChannelKind = serde_json::from_str("\"feed_backed\"").unwrap();
+        assert_eq!(old, ChannelKind::FeedBacked);
+    }
+
+    #[test]
+    fn build_accept_is_device_defaults_false_and_skips() {
+        // #408: is_device is back-compat — absent on the wire = false, and a
+        // false value is skipped so the pre-#408 accept body is byte-identical.
+        let json = serde_json::to_value(BuildAcceptUserOpRequest {
+            operator_omni: "0xop".into(),
+            actor_omni: "0xactor".into(),
+            device_key_hash: "0xdkh".into(),
+            agent_pop_sig: "0xsig".into(),
+            link_code_redemption: "0xred".into(),
+            services: vec!["channel-pub:cam".into()],
+            read_only: true,
+            max_per_call: "0".into(),
+            max_per_period: "0".into(),
+            max_total: "0".into(),
+            period_seconds: 0,
+            is_device: false,
+        })
+        .unwrap();
+        assert!(
+            json.get("is_device").is_none(),
+            "false is_device must be skipped"
+        );
+        // A device accept round-trips true.
+        let dev: BuildAcceptUserOpRequest = serde_json::from_value(serde_json::json!({
+            "operator_omni":"0xop","actor_omni":"0xa","device_key_hash":"0xd",
+            "agent_pop_sig":"0xs","link_code_redemption":"0xr","services":["channel-sub:display"],
+            "read_only":true,"max_per_call":"0","max_per_period":"0","max_total":"0",
+            "period_seconds":0,"is_device":true
+        }))
+        .unwrap();
+        assert!(dev.is_device);
+    }
+
+    #[test]
+    fn contact_tier_wire_roundtrip_and_template() {
+        for t in ContactTier::household_template() {
+            assert_eq!(ContactTier::parse(t.as_str()), Some(t));
+            assert_eq!(
+                serde_json::to_string(&t).unwrap(),
+                format!("\"{}\"", t.as_str())
+            );
+        }
+        assert!(
+            ContactTier::parse("sovereign").is_none(),
+            "phantom tier rejected"
+        );
+        // Only owner may hold operator-grade reach (the L3 guard).
+        assert!(ContactTier::Owner.may_hold_operator_grade_reach());
+        assert!(!ContactTier::Kid.may_hold_operator_grade_reach());
+        assert!(!ContactTier::Guest.may_hold_operator_grade_reach());
+    }
+
+    #[test]
+    fn contact_registry_resolves_only_bound_ids() {
+        let reg = ContactRegistry {
+            bound: vec![Contact {
+                contact_id: "c-kid-1".into(),
+                transport: "weixin".into(),
+                transport_id: "openid-abc".into(),
+                display_name: "小明".into(),
+                tier: ContactTier::Kid,
+                legacy_reach: vec![],
+                welcomed: true,
+            }],
+            ..Default::default()
+        };
+        assert_eq!(
+            reg.resolve("weixin", "openid-abc").unwrap().contact_id,
+            "c-kid-1"
+        );
+        // Unknown openid → None (the gateway DROPS it, never reaches an agent).
+        assert!(reg.resolve("weixin", "openid-stranger").is_none());
+        // Right id on the wrong transport → None.
+        assert!(reg.resolve("telegram", "openid-abc").is_none());
+    }
+
+    // A registry file from before channel documents: each contact's `reach`
+    // becomes their rows on the channels those apps were bound to, an invite's
+    // reach becomes grants, an alias bound nowhere is dropped, and the file
+    // never carries `reach` again.
+    #[test]
+    fn a_pre_channel_registry_migrates_reach_into_channel_rows() {
+        let mut reg: ContactRegistry = serde_json::from_str(
+            r#"{
+              "bound": [
+                {"contact_id":"c-owner","transport":"weixin","transport_id":"o1",
+                 "display_name":"妈妈","tier":"owner","reach":["chef","agent-i"]},
+                {"contact_id":"c-kid","transport":"weixin","transport_id":"o2",
+                 "display_name":"小明","tier":"kid","reach":["storyteller"]}
+              ],
+              "pending": [],
+              "invites": [{"bind_code":"AK-1","contact_id":"c-new","display_name":"奶奶",
+                           "tier":"elder","reach":["chef"]}],
+              "apps": [
+                {"alias":"chef","channel_id":"family-chat"},
+                {"alias":"storyteller","channel_id":"stories"}
+              ]
+            }"#,
+        )
+        .unwrap();
+        assert!(reg.migrate_legacy(9));
+        let family = reg.channel("family-chat").unwrap();
+        assert!(family.speaks("c-owner") && family.reads("c-owner"));
+        assert!(family.member("c-kid").is_none());
+        assert!(reg.channel("stories").unwrap().speaks("c-kid"));
+        assert!(reg.app_channels("agent-i").is_empty());
+        assert_eq!(reg.speak_channels("c-owner").len(), 1);
+        assert_eq!(reg.invites[0].channels[0].channel_id, "family-chat");
+        assert!(reg.invites[0].channels[0].speak);
+        let json = serde_json::to_string(&reg).unwrap();
+        assert!(!json.contains("\"reach\""));
+        let top: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(
+            top.get("apps").is_none(),
+            "the legacy table is gone: {json}"
+        );
+        // A second load has nothing left to move.
+        let mut again: ContactRegistry = serde_json::from_str(&json).unwrap();
+        assert!(!again.migrate_legacy(10));
+        // The member view and the grant round-trip.
+        let view = reg.contact_channels_view("c-owner");
+        assert_eq!(view.len(), 1);
+        assert_eq!(view[0].name, "family-chat");
+        let grants = reg.grants_of("c-owner");
+        assert_eq!(reg.apply_grants("c-owner", &grants), 0);
+        assert_eq!(reg.apply_grants("c-owner", &[]), 1);
+        assert!(reg.speak_channels("c-owner").is_empty());
+    }
+
+    #[test]
+    fn parse_alias_deterministic_routing() {
+        assert_eq!(
+            parse_alias("/chef 今晚吃什么"),
+            (Some("chef".into()), "今晚吃什么".into())
+        );
+        assert_eq!(
+            parse_alias("  /doorkeeper hi"),
+            (Some("doorkeeper".into()), "hi".into())
+        );
+        // No leading slash → no alias.
+        assert_eq!(
+            parse_alias("just a message"),
+            (None, "just a message".into())
+        );
+        // A slash mid-sentence is not routing.
+        assert_eq!(parse_alias("and/or this"), (None, "and/or this".into()));
+        // A bare slash or an invalid alias charset is not routing.
+        assert_eq!(parse_alias("/ hello"), (None, "/ hello".into()));
+        assert_eq!(parse_alias("/CHEF loud"), (None, "/CHEF loud".into()));
+        // Alias with no body.
+        assert_eq!(parse_alias("/chef"), (Some("chef".into()), "".into()));
+    }
+
+    #[test]
+    fn channel_event_producer_is_actor_xor_contact() {
+        // §4.1: producer is EXACTLY ONE of a keyed actor XOR a contact — the
+        // serde tag makes a two-producer envelope impossible to represent.
+        let actor = ChannelEvent {
+            event_id: "e1".into(),
+            channel_id: "cam-frontdoor".into(),
+            direction: ChannelDirection::In,
+            producer: ChannelProducer::Actor {
+                actor_omni: "0xcam".into(),
+            },
+            kind: ChannelEventKind::Frame,
+            body: None,
+            body_ref: Some("bots/0xop/channel/cam-frontdoor/1.bin".into()),
+            ts_millis: 1,
+            correlation: None,
+            audio: None,
+            partial: None,
+            seq: None,
+            stream: None,
+            contact: None,
+            content_type: None,
+            relay_of: None,
+            addressee: None,
+        };
+        let json = serde_json::to_value(&actor).unwrap();
+        assert_eq!(json["producer"]["actor"]["actor_omni"], "0xcam");
+        // A contact-produced inbound text event round-trips.
+        let contact: ChannelEvent = serde_json::from_value(serde_json::json!({
+            "event_id": "e2",
+            "channel_id": "family-weixin",
+            "direction": "in",
+            "producer": {"contact": {"contact_id": "c-kid-1", "tier": "kid"}},
+            "kind": "text",
+            "body": "d2d1bg==",
+            "ts_millis": 2,
+        }))
+        .unwrap();
+        assert!(matches!(contact.producer, ChannelProducer::Contact { .. }));
+    }
+
+    #[test]
+    fn memory_append_op_str_matches_worker_append() {
+        // #339 P2: the K10 cap-PoP preimage uses op_str; it MUST agree byte-for-byte
+        // with agentkeys_worker_creds::verify::CapOp::Append.as_str() ("append").
+        assert_eq!(CapMintOp::MemoryAppend.op_str(), "append");
+        assert_eq!(CapMintOp::MemoryCanonicalGet.op_str(), "canonical_fetch");
+        assert_eq!(CapMintOp::MemoryInboxDelete.op_str(), "teardown");
+        assert_eq!(CapMintOp::MemoryInboxDelete.data_class(), "memory");
+        assert_eq!(
+            CapMintOp::parse("memory_inbox_delete"),
+            Some(CapMintOp::MemoryInboxDelete)
+        );
+    }
+
+    #[test]
+    fn channel_audio_params_are_additive_and_backcompat() {
+        // #522: absent on the wire = None (every pre-#522 event/publish body
+        // still parses); None serializes to NOTHING (fixtures stay byte-stable).
+        let old_event: ChannelEvent = serde_json::from_value(serde_json::json!({
+            "event_id": "e3",
+            "channel_id": "opchat-cook",
+            "direction": "in",
+            "producer": {"actor": {"actor_omni": "0xdev"}},
+            "kind": "audio-clip",
+            "body": "AAAA",
+            "ts_millis": 3,
+        }))
+        .unwrap();
+        assert!(old_event.audio.is_none());
+        let json = serde_json::to_value(&old_event).unwrap();
+        assert!(json.get("audio").is_none(), "None must not serialize");
+        // Params round-trip, partial fields allowed.
+        let with: ChannelEvent = serde_json::from_value(serde_json::json!({
+            "event_id": "e4",
+            "channel_id": "opchat-cook",
+            "direction": "in",
+            "producer": {"actor": {"actor_omni": "0xdev"}},
+            "kind": "audio-clip",
+            "body": "AAAA",
+            "ts_millis": 4,
+            "audio": {"voice": "zh_female_meilinvyou_moon_bigtts", "speech_rate": 30},
+        }))
+        .unwrap();
+        let p = with.audio.as_ref().unwrap();
+        assert_eq!(p.voice.as_deref(), Some("zh_female_meilinvyou_moon_bigtts"));
+        assert_eq!(p.speech_rate, Some(30));
+        assert!(p.format.is_none());
+        let rt = serde_json::to_value(&with).unwrap();
+        assert_eq!(rt["audio"]["speech_rate"], 30);
+        assert!(rt["audio"].get("format").is_none());
+    }
+
+    #[test]
+    fn context_kind_wire_spelling_and_default() {
+        // §16.2 item 1: wire values are the lowercase words; absent = knowledge
+        // (full back-compat — every pre-#390 object is knowledge).
+        for (kind, wire) in [
+            (ContextKind::Knowledge, "\"knowledge\""),
+            (ContextKind::Skill, "\"skill\""),
+            (ContextKind::Persona, "\"persona\""),
+        ] {
+            assert_eq!(serde_json::to_string(&kind).unwrap(), wire);
+            assert_eq!(kind.as_str(), wire.trim_matches('"'));
+        }
+        // A pre-#390 InboxItem (no `kind` key) deserializes as knowledge.
+        let old: InboxItem = serde_json::from_str(
+            r#"{"source_delegate_omni":"0xabc","ns":"travel","key":"k","body_b64":"","content_hash":"h","ts":1}"#,
+        )
+        .unwrap();
+        assert_eq!(old.kind, ContextKind::Knowledge);
+        // #666 — the fourth kind joined the enum with its gate policy
+        // (master-authored only, never inbox-adoptable).
+        let res: ContextKind = serde_json::from_str("\"resource\"").unwrap();
+        assert_eq!(res, ContextKind::Resource);
+        assert_eq!(res.as_str(), "resource");
+        assert!(!ContextKind::Resource.inbox_adoptable());
+        assert!(!ContextKind::Persona.inbox_adoptable());
+        assert!(ContextKind::Knowledge.inbox_adoptable());
+        assert!(ContextKind::Skill.inbox_adoptable());
+        let bad: Result<ContextKind, _> = serde_json::from_str("\"resources\"");
+        assert!(bad.is_err(), "the plural is not a wire spelling");
+    }
+
+    #[test]
+    fn persona_soul_key_normalizes_omni() {
+        // One key shape: 0x-prefixed, lowercased — bare and 0X inputs converge.
+        assert_eq!(persona_soul_key("0xAbC1"), "soul:0xabc1");
+        assert_eq!(persona_soul_key("abc1"), "soul:0xabc1");
+        assert_eq!(PERSONA_NAMESPACE, "persona");
+    }
+
+    #[test]
+    fn service_memory_is_namespace_prefixed() {
+        assert_eq!(service_knowledge("travel"), "knowledge:travel");
+        assert_eq!(service_knowledge("webparity"), "knowledge:webparity");
+    }
+
+    #[test]
+    fn service_inbox_is_distinct_from_memory_read_grant() {
+        // #339 P2 §5/§6b: the append grant is a DISTINCT on-chain service-id from
+        // the read grant, so a `knowledge:<ns>` read can never authorize an
+        // `proposal:<ns>` push (keccak(proposal:ns) != keccak(knowledge:ns)).
+        assert_eq!(service_proposal("travel"), "proposal:travel");
+        assert_ne!(service_proposal("travel"), service_knowledge("travel"));
+    }
+
+    #[test]
+    fn normalize_omni_adds_prefix_once() {
+        assert_eq!(normalize_omni_0x("abcd"), "0xabcd");
+        assert_eq!(normalize_omni_0x("0xabcd"), "0xabcd");
+        assert_eq!(normalize_omni_0x("0Xabcd"), "0Xabcd");
+    }
+
+    #[test]
+    fn broker_cap_request_ttl_is_optional_on_the_wire() {
+        // Mirrors the broker's `#[serde(default)]`: `None` omits ttl_seconds (the
+        // broker then applies its default), `Some` emits a bare number. This is
+        // why the single on-wire type uses `Option` + skip rather than a required
+        // `u64` — the divergence web-core and backend-client used to carry.
+        let base = BrokerCapRequest {
+            operator_omni: "0xop".into(),
+            actor_omni: "0xactor".into(),
+            service: "knowledge:travel".into(),
+            device_key_hash: "0xdkh".into(),
+            ttl_seconds: None,
+            client_sig: None,
+            client_nonce: None,
+            client_ts: None,
+            delegation_path: None,
+        };
+        let omitted = serde_json::to_value(&base).unwrap();
+        assert!(
+            omitted.get("ttl_seconds").is_none(),
+            "None must omit ttl_seconds so the broker applies its default"
+        );
+        assert!(
+            omitted.get("delegation_path").is_none(),
+            "None must omit delegation_path so the pre-#369 cap body is byte-identical"
+        );
+        let present = serde_json::to_value(BrokerCapRequest {
+            ttl_seconds: Some(900),
+            ..base
+        })
+        .unwrap();
+        assert_eq!(present["ttl_seconds"], 900);
+    }
+}
+
+pub mod hosted_signer;
+
+pub mod hosted_gateway;
+
+pub mod console;
+
+pub mod console_chain;
+
+pub mod knowledge_history;
+
+pub mod presets;
+
+pub mod classify;
+
+pub mod console_apps;
+
+pub mod console_audit;

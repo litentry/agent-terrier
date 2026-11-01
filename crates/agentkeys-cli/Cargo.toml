@@ -1,0 +1,77 @@
+[package]
+license.workspace = true
+name = "agentkeys-cli"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "agentkeys"
+path = "src/main.rs"
+
+[lib]
+name = "agentkeys_cli"
+path = "src/lib.rs"
+
+[dependencies]
+agentkeys-types = { workspace = true }
+agentkeys-core = { workspace = true }
+agentkeys-provisioner = { path = "../agentkeys-provisioner" }
+agentkeys-backend-client = { workspace = true } # #216 cred-fetch primitive (agent vaulted-key)
+agentkeys-web-core = { workspace = true }
+clap = { version = "4", features = ["derive", "env"] }
+tokio = { workspace = true }
+serde_json = { workspace = true }
+serde = { workspace = true }
+anyhow = { workspace = true }
+reqwest = { version = "0.12", features = ["json"] }
+
+# K11 stub helpers (deterministic — for CI / no-authenticator environments).
+sha2 = "0.10"
+hex = "0.4"
+thiserror = { workspace = true }
+zeroize = { workspace = true }
+# `agentkeys agent device-session` — in-sandbox secp256k1 device keygen +
+# EIP-191 wallet_sig session minting (interim §10.2; full ceremony = issue #144).
+# Same versions as agentkeys-core / broker so the workspace lock is unchanged.
+k256 = { version = "0.13", features = ["ecdsa", "sha2"] }
+sha3 = "0.10"
+
+# Real WebAuthn ceremony (--webauthn flag on `agentkeys k11 enroll/assert`).
+# Brings up a localhost axum server that serves the JS calling
+# navigator.credentials.create/.get; macOS Touch ID via the platform
+# authenticator. Manual ceremony (no webauthn-rs) so the assert path can
+# bind to an application-level message hash as the WebAuthn challenge.
+axum = { version = "0.7", features = ["json"] }
+tower-service = "0.3"
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["server", "tokio"] }
+ciborium = "0.2"  # CBOR decode for attestationObject + COSE pubkey
+base64 = "0.22"
+p256 = { version = "0.13", features = ["pkcs8", "ecdsa"] }
+rand_core = { version = "0.6", features = ["std"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+assert_cmd = "2"
+predicates = "3"
+agentkeys-mock-server = { path = "../agentkeys-mock-server" }
+agentkeys-provisioner = { path = "../agentkeys-provisioner" }
+agentkeys-types = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+reqwest = { version = "0.12", features = ["json"] }
+# axum is now in runtime deps above (webauthn ceremony); tests inherit.
+rusqlite = { version = "0.31", features = ["bundled"] }
+serde_json = { workspace = true }
+tempfile = "3"
+
+# #597 — see agentkeys-daemon's twin: vendored OpenSSL for the zigbuild
+# cross-compile only; OFF for every native build.
+[features]
+vendored-openssl = ["dep:openssl", "openssl/vendored"]
+
+[dependencies.openssl]
+version = "0.10"
+optional = true

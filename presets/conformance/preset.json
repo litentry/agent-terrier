@@ -1,0 +1,59 @@
+{
+  "id": "conformance",
+  "version": "1.0.0",
+  "schema": 1,
+  "publisher": "agentkeys",
+  "hidden": true,
+  "name": "Conformance probe",
+  "name_zh": "一致性探针",
+  "description": "The synthetic template the framework's conformance suite installs (#671): one messaging slot, one display slot, one resource, a schedule, and both tool classes — no household meaning.",
+  "description_zh": "框架一致性测试安装的合成模板（#671）：一个消息槽、一个显示槽、一个资源、一个日程、两类工具——没有任何家庭含义。",
+  "slots": [
+    {
+      "slot": "probe_chat",
+      "kind": "messaging",
+      "direction": "duplex",
+      "required": true,
+      "event_kinds": ["text", "image", "audio-clip"],
+      "audience": ["owner"],
+      "reason": "R1/R2/R3: an inbound text, image and clip arrive here; a text reply goes back.",
+      "reason_zh": "R1/R2/R3：文本、图片、音频从这里进入；文本回复从这里回去。"
+    },
+    {
+      "slot": "probe_display",
+      "kind": "display",
+      "direction": "pub",
+      "required": false,
+      "event_kinds": ["doc"],
+      "reason": "R3: a card document is published here; a command comes back.",
+      "reason_zh": "R3：卡片文档发布到这里；指令回传。"
+    }
+  ],
+  "resources": [
+    {
+      "name": "probe-doc",
+      "kind": "document",
+      "tags": ["conformance", "probe"],
+      "required": false,
+      "reason": "R6: a read-only resource the suite binds and reads back.",
+      "reason_zh": "R6：套件绑定并读回的只读资源。"
+    }
+  ],
+  "tools": ["schedule", "web"],
+  "availability": "always-on",
+  "budgets": { "gate_tokens_per_day": 50000, "gate_turns_per_hour": 30, "feed_events_per_day": 200 },
+  "schedule": [
+    {
+      "cron": "*/5 * * * *",
+      "label": "Conformance tick",
+      "label_zh": "一致性心跳",
+      "prompt": "Reply with the single word CONFORMANCE-TICK and the current minute."
+    }
+  ],
+  "disclosure": [
+    { "data": "Probe images and clips", "data_zh": "探针图片与音频", "path": "gate → vision / ASR model", "path_zh": "网关 → 视觉 / 语音模型" }
+  ],
+  "context": { "persona": "SOUL.md", "skills": ["perception.md"], "knowledge": ["probe.md"] },
+  "suggested_channels": [],
+  "suggested_context": []
+}

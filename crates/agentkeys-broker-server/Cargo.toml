@@ -1,0 +1,98 @@
+[package]
+license.workspace = true
+name = "agentkeys-broker-server"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "agentkeys-broker-server"
+path = "src/main.rs"
+
+[lib]
+name = "agentkeys_broker_server"
+path = "src/lib.rs"
+
+[dependencies]
+futures-util = "0.3"
+agentkeys-types = { workspace = true }
+# Issue #144 — shared device_crypto (EIP-191 ecrecover for link-code redeem
+# pop_sig verify) + HDKD child_omni derivation. One source of truth across
+# daemon/CLI/broker.
+agentkeys-core = { workspace = true }
+agentkeys-runtime = { workspace = true }
+zeroize = { workspace = true }
+# #369 — the shared DelegationPath wire type echoed into the minted cap-token
+# (one owner; the worker deserializes the SAME type).
+agentkeys-protocol = { workspace = true }
+agentkeys-web-core = { workspace = true }
+axum = { version = "0.7", features = ["json"] }
+# #675 — browser-origin CORS for the device-mode web app (opt-in allowlist; cors.rs).
+tower-http = { version = "0.5", features = ["cors"] }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+reqwest = { version = "0.12", features = ["json"] }
+rusqlite = { version = "0.31", features = ["bundled"] }
+clap = { version = "4", features = ["derive", "env"] }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+sha2 = "0.10"
+hex = "0.4"
+jsonwebtoken = "9"
+p256 = { version = "0.13", features = ["pkcs8", "pem", "ecdsa"] }
+pkcs8 = { version = "0.10", features = ["pem"] }
+base64 = "0.22"
+rand_core = { version = "0.6", features = ["std"] }
+getrandom = "0.2"
+# k256 + sha3 are gated via the `auth-wallet-sig` feature; they're declared as
+# optional here and hard-required by the feature in [features]. Phase 0 default
+# enables `auth-wallet-sig`, so these compile in by default.
+k256 = { version = "0.13", features = ["ecdsa", "sha2"], optional = true }
+# sha3 (Keccak256) was previously gated by `auth-wallet-sig` only — the
+# v2 stage-1 cap-mint handler in `handlers/cap.rs` now needs it
+# unconditionally (function-selector + service-name keccak), so the
+# dep is mandatory. The `auth-wallet-sig` feature still pulls it via
+# the explicit feature dep below; this just removes the optional gate.
+sha3 = "0.10"
+# OAuth2 state authentication.
+hmac = "0.12"
+url = { version = "2", optional = true }
+# Runtime lease and schedule timestamps.
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+
+[features]
+# Plan §3 / §3.5 — pluggable trait surface, feature-gated per layer.
+# v0 default ships the WalletSig + ClientSideKeystore + SqliteAnchor combination.
+# v0 testnet adds auth-email-link + auth-oauth2-google + audit-evm.
+# Heima/Solana/Passkey/Apple/GitHub deferred to v1+.
+default              = ["auth-wallet-sig", "wallet-keystore", "audit-sqlite"]
+
+auth-wallet-sig      = ["dep:k256"]
+auth-email-link      = []
+auth-oauth2          = ["dep:url"]
+auth-oauth2-google   = ["auth-oauth2"]
+auth-oauth2-github   = ["auth-oauth2"]            # v1+
+auth-oauth2-apple    = ["auth-oauth2"]            # v1+
+
+# Wallet provisioners.
+wallet-keystore      = []                          # v0; ClientSideKeystore (no extra deps)
+
+# Audit anchors.
+audit-sqlite         = []                          # default; uses unconditional rusqlite
+audit-evm            = []                          # Phase C; alloy deps land in US-031
+audit-solana         = []                          # v1; deferred
+
+# Test infrastructure.
+test-stub            = []                          # existing — injected transport fixtures for offline tests
+
+[dev-dependencies]
+agentkeys-web-core = { workspace = true }
+agentkeys-broker-server = { path = ".", features = ["test-stub", "auth-email-link", "auth-oauth2-google"] }
+agentkeys-mock-server = { path = "../agentkeys-mock-server" }
+tower = { version = "0.4", features = ["util"] }
+http-body-util = "0.1"
+tempfile = "3"
+uuid = { version = "1", features = ["v4"] }

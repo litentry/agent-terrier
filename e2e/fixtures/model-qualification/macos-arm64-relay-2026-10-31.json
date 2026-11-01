@@ -1,0 +1,58 @@
+{
+  "qualification": "local-model-capabilities",
+  "external_network_denied": true,
+  "operating_system": "15.7.4",
+  "architecture": "arm64",
+  "hardware": "Apple M3 Pro",
+  "physical_memory_bytes": 19327352832,
+  "runtime_version": "0.34.4",
+  "recipe": {
+    "base_url": "http://127.0.0.1:11434/v1",
+    "chat": {
+      "digest": "8f68893c685c3ddff2aa3fffce2aa60a30bb2da65ca488b61fff134a4d1730e7",
+      "model": "qwen3:1.7b"
+    },
+    "embedding": {
+      "digest": "0a109f422b47e3a30ba2b10eca18548e944e8a23073ee3f3e947efcf3c45e59f",
+      "model": "nomic-embed-text:v1.5"
+    },
+    "runtime": {
+      "context_length": 4096,
+      "max_loaded_models": 1,
+      "name": "ollama",
+      "parallel_requests": 1,
+      "version": "0.34.4"
+    }
+  },
+  "model_bytes": 1633595894,
+  "runner_startup_seconds": 0.243,
+  "probe_seconds": 3.344,
+  "peak_runner_process_rss_kib": 1965792,
+  "capabilities": {
+    "loopback_endpoint": true,
+    "chat_model": "qwen3:1.7b",
+    "embedding_model": "nomic-embed-text:v1.5",
+    "chat_ms": 1369,
+    "stream_ms": 471,
+    "tool_roundtrip_ms": 902,
+    "embedding_ms": 571,
+    "stream_events": 29,
+    "embedding_dimensions": 768,
+    "retrieved_document": 0,
+    "executed_tool_result": 42
+  },
+  "authenticated_relay": {
+    "loopback_endpoint": true,
+    "chat_model": "qwen3:1.7b",
+    "embedding_model": "nomic-embed-text:v1.5",
+    "chat_ms": 844,
+    "stream_ms": 381,
+    "tool_roundtrip_ms": 783,
+    "embedding_ms": 304,
+    "stream_events": 30,
+    "embedding_dimensions": 768,
+    "retrieved_document": 0,
+    "executed_tool_result": 42
+  },
+  "relay_probe_seconds": 2.809
+}
