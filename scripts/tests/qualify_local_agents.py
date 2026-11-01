@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import uuid
 
 from qualify_local_chain import REPOSITORY, available_port
 from qualify_local_login import request
@@ -28,6 +29,9 @@ class LocalAgentQualification(LocalOwnerFixture):
         namespace = None
         completed = False
         secrets = []
+        qualify_model = os.environ.get("AGENT_TERRIER_TEST_MODEL_CHAT") == "1"
+        conversation_marker = "terrier" + uuid.uuid4().hex[:8]
+        image_identity = None
 
         def docker(*arguments):
             environment = contracts.tool_environment()
@@ -122,13 +126,13 @@ class LocalAgentQualification(LocalOwnerFixture):
             created = command("spawn", "--label", "local-agent")
             device = created["device_key_hash"]
             self.assertEqual(len(created["actor_omni"]), 66)
-            def bridge(path, method="GET", body=None, name="alice", denial=None):
+            def bridge(path, method="GET", body=None, name="alice", denial=None, timeout=30):
                 arguments = [sys.executable, str(REPOSITORY / "terrier"), "agent", "bridge", "--name", name,
                     "--device-key-hash", device, "--path", path, "--method", method]
                 if body is not None:
                     arguments.append("--json-stdin")
                 result = subprocess.run(arguments, input=json.dumps(body) if body is not None else None,
-                    env=environment, capture_output=True, text=True, timeout=30)
+                    env=environment, capture_output=True, text=True, timeout=timeout)
                 self.assertTrue(all(secret not in result.stdout + result.stderr for secret in secrets))
                 if denial:
                     self.assertNotEqual(result.returncode, 0)
@@ -147,6 +151,18 @@ class LocalAgentQualification(LocalOwnerFixture):
             self.assertEqual(bridge("/v1/jobs", "POST", {"jobs": jobs})["jobs"], jobs)
             self.assertEqual(bridge("/v1/jobs")["jobs"], jobs)
             bridge("/v1/jobs", "POST", {"jobs": []})
+            if qualify_model:
+                relay_key = next(row for row in local_state.read_json(registry)["keys"] if row["key_id"] == device)
+                secrets.append(relay_key["key"])
+                relay = running["services"]["model_relay"]["url"]
+                original_usage = request(relay + "/v1/usage", bearer=relay_key["key"])
+                bridge("/v1/chat", "POST", {"text": "must not run", "stream": False}, name="bob", denial="HTTP 409")
+                self.assertEqual(request(relay + "/v1/usage", bearer=relay_key["key"]), original_usage,
+                    "denied foreign chat consumed model usage")
+                reply = bridge("/v1/chat", "POST", {"text": f"The test word for this conversation is {conversation_marker}. Reply with exactly that word. /no_think", "stream": False}, timeout=210)
+                self.assertIn(conversation_marker, reply.get("reply", ""), "real local model did not return the supplied conversation word")
+                self.assertNotEqual(request(relay + "/v1/usage", bearer=relay_key["key"]), original_usage,
+                    "authorized model chat did not record relay usage")
             operation_path = state / "owners/alice/operations" / (created["user_op_hash"] + ".json")
             operation = local_state.read_json(operation_path)
             self.assertEqual(operation_path.stat().st_mode & 0o777, 0o600)
@@ -185,6 +201,7 @@ class LocalAgentQualification(LocalOwnerFixture):
             containers = owned("container")
             self.assertEqual(len(containers), 1)
             container = json.loads(docker("inspect", containers[0]))[0]
+            image_identity = container["Image"]
             self.assertEqual(container["HostConfig"]["NetworkMode"], "none")
             self.assertTrue(all(secret not in json.dumps(container["Config"]["Env"]) for secret in secrets),
                 "Docker metadata exposed owner credentials")
@@ -214,6 +231,9 @@ class LocalAgentQualification(LocalOwnerFixture):
             containers = owned("container")
             self.assertEqual(len(containers), 1)
             container = json.loads(docker("inspect", containers[0]))[0]
+            if qualify_model:
+                reply = bridge("/v1/chat", "POST", {"text": "What is the test word from the first message? Reply with exactly that word. /no_think", "stream": False}, timeout=210)
+                self.assertIn(conversation_marker, reply.get("reply", ""), "recreated agent lost its model conversation")
             mounts = container["Mounts"]
             self.assertEqual(len(mounts), 1)
             self.assertEqual(mounts[0]["Type"], "volume")
@@ -278,6 +298,13 @@ class LocalAgentQualification(LocalOwnerFixture):
                 "--mount", "type=volume,src=" + volume + ",dst=/state,readonly", "--entrypoint", "node", image,
                 "-e", "process.stdout.write(require('node:fs').readFileSync('/state/qualification-marker'))")
             self.assertEqual(retained, "synthetic-retained-state")
+            if qualify_model:
+                print(json.dumps({"qualification": "local-agent-application", "real_chain": True,
+                    "protected_owner_login": True, "signer_custody": True, "managed_docker": True,
+                    "image_id": image_identity, "container_network": "none", "real_model_chat": True,
+                    "restart_recall": True, "foreign_chat_denied": True, "denied_chat_usage_unchanged": True,
+                    "revocation": True, "retained_data": True,
+                    "not_qualified": ["channel conversation", "application tool authority", "browser", "independent clean install"]}))
             completed = True
         finally:
             self.services(state, "stop")

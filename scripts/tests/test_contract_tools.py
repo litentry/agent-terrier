@@ -133,3 +133,32 @@ class ContractToolsTests(unittest.TestCase):
                 self.assertNotIn("PRIVATE_KEY", environment)
                 self.assertNotIn("AGENTKEYS_CHAIN", environment)
                 self.assertNotIn("FOUNDRY_PROFILE", environment)
+
+    def test_explicit_compiler_is_shared_by_builds_and_matches_the_source_pin(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            project = Path(temporary)
+            (project / "foundry.toml").write_text('[profile.default]\nsolc_version = "0.8.20"\n')
+            compiler = project / "local-solc"
+            compiler.write_text("synthetic compiler fixture")
+            compiler.chmod(0o700)
+            with mock.patch.dict(contracts.os.environ, {"AGENT_TERRIER_SOLC": str(compiler)}):
+                with mock.patch.object(contracts.subprocess, "run") as execute:
+                    execute.return_value.returncode = 0
+                    execute.return_value.stdout = "solc compiler\nVersion: 0.8.20+synthetic\n"
+                    self.assertEqual(contracts.compiler_arguments(project), ["--use", str(compiler.resolve())])
+                    self.assertEqual(contracts.run_forge(project, "test", True, None), 0)
+                    command = execute.call_args.args[0]
+                    self.assertEqual(command[command.index("--use") + 1], str(compiler.resolve()))
+                    execute.reset_mock()
+                    execute.return_value.stdout = "Version: 0.8.21+synthetic\n"
+                    with self.assertRaisesRegex(ValueError, "differs from the version pinned"):
+                        contracts.run_forge(project, "test", True, None)
+                    self.assertEqual(execute.call_count, 1, "mismatched compiler reached the build")
+                    execute.return_value.stdout = "Version: 0.8.20+synthetic\n"
+                    execute.return_value.returncode = 1
+                    with self.assertRaises(ValueError):
+                        contracts.compiler_arguments(project)
+                    execute.return_value.returncode = 0
+                    (project / "foundry.toml").write_text('[profile.default]\n')
+                    with self.assertRaises(ValueError):
+                        contracts.compiler_arguments(project)

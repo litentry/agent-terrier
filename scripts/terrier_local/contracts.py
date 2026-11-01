@@ -5,6 +5,7 @@ import io
 import json
 import os
 from pathlib import Path, PurePosixPath
+import re
 import shutil
 import subprocess
 import tarfile
@@ -198,12 +199,33 @@ def tool_environment():
     }}
 
 
+def validate_compiler(project, selected):
+    configured = re.findall(r'^\s*solc_version\s*=\s*"(\d+\.\d+\.\d+)"\s*(?:#.*)?$',
+        (project / "foundry.toml").read_text(), re.MULTILINE)
+    if len(configured) != 1:
+        raise ValueError("Contract source must pin exactly one Solidity compiler version")
+    compiler = Path(selected).expanduser().resolve(strict=True)
+    if not compiler.is_file() or not os.access(compiler, os.X_OK):
+        raise ValueError("Explicit Solidity compiler must be an executable file")
+    result = subprocess.run([str(compiler), "--version"], env=tool_environment(),
+        capture_output=True, text=True, timeout=10)
+    observed = re.findall(r'^Version:\s*(\d+\.\d+\.\d+)(?:\+|\s|$)', result.stdout, re.MULTILINE)
+    if result.returncode or observed != configured:
+        raise ValueError("Explicit Solidity compiler differs from the version pinned in foundry.toml")
+    return compiler
+
+
+def compiler_arguments(project):
+    selected = os.environ.get("AGENT_TERRIER_SOLC")
+    return ["--use", str(validate_compiler(project, selected))] if selected else []
+
+
 def run_forge(project, action, offline, match_test):
     if action == "setup":
         print("Pinned contract dependency verified and local build cache prepared.")
         return 0
     forge = foundry_binary("forge")
-    command = [forge, action, "--root", ".", "--remappings", "forge-std/=lib/forge-std/src/"]
+    command = [forge, action, "--root", ".", "--remappings", "forge-std/=lib/forge-std/src/", *compiler_arguments(project)]
     if offline:
         command.append("--offline")
     if match_test:

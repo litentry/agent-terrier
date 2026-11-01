@@ -1,4 +1,4 @@
-**Status:** Protected creation and archive pass the real local-chain and Docker qualifier, including foreign-owner denial, revoked relay access and retained application data. Full model/browser journeys and recovery of missing creation context remain under development.
+**Status:** Protected creation and archive pass the real local-chain and Docker qualifier, including foreign-owner denial, revoked relay access and retained application data. Actual model chat and persisted conversation recall after runtime recreation also pass with external connections denied. Channel/tool-authority/browser acceptance and recovery of missing creation context remain under development.
 
 ## Prepare
 
@@ -94,3 +94,5 @@ python3 scripts/tests/qualify_local_agents.py
 ```
 
 The qualifier creates disposable owners, contracts and services. It checks session/file/owner denials for unchanged chain, relay and container state, then creates and archives an actual Docker runtime and verifies retained volume data and disabled relay access. It checks receipt recovery without the passkey, foreign and altered records, unchanged chain state on confirmation, and archive cleanup after a broker restart. A controlled local admin fixture provisions a leftover relay credential: it remains usable after a foreign-owner recovery denial and becomes unusable after the rightful owner recovers the confirmed revocation. Older records without retention evidence remain incomplete. A separate fast HTTP fixture simulates a lost submission response and proves recovery makes no second submission. It removes only its own labeled Docker resources. Failed runs retain a private diagnostic directory and report its path; review those files before sharing them. This heavier qualification is separate from ordinary CLI unit and HTTP checks.
+
+For actual model-backed chat under external network denial, use the [managed application qualification](./local-models.md#managed-application-qualification). It calls this same lifecycle qualifier; there is no second service or Docker supervisor.
