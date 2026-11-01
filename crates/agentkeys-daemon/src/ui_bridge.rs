@@ -4503,13 +4503,6 @@ async fn update_payment_cap(
 pub struct RevokeDeviceRequest {
     pub intent_text: String,
     pub intent_fields: Vec<(String, String)>,
-    /// `true` ⇒ the browser already landed `revokeAgentDevice` ON CHAIN via the
-    /// Touch-ID UserOp (`/v1/revoke/{build,submit}`); the daemon VERIFIES the
-    /// device entry reads `revoked` from the registry and only then flips local
-    /// state — no script shell-out. `false` (default) ⇒ legacy script path
-    /// (works only when `operatorMasterWallet` is the script's EOA).
-    #[serde(default)]
-    pub onchain: bool,
     /// The submit's tx hash (audit trail only; the chain re-read is the proof).
     #[serde(default)]
     pub onchain_tx_hash: Option<String>,
@@ -4525,109 +4518,64 @@ async fn revoke_device(
     Path(id): Path<String>,
     Json(req): Json<RevokeDeviceRequest>,
 ) -> Result<Json<ApiActor>, (StatusCode, Json<ErrorBody>)> {
-    // Read the actor's on-chain device key hash + label first. The revoke must land
-    // ON CHAIN before we flip local state — a binding is not gone until
-    // SidecarRegistry.revokeAgentDevice says so (the "also need on-chain" rule).
-    let (label, device_key_hash) = {
+    let device_key_hash = {
         let guard = state.actors.read().await;
         let actor = guard
             .get(&id)
             .ok_or_else(|| err(StatusCode::NOT_FOUND, "no such actor", "actor-not-found"))?;
-        (actor.label.clone(), actor.device_key_hash.clone())
+        actor.device_key_hash.clone()
     };
 
-    let tx = if req.onchain {
-        // The browser already executed revokeAgentDevice as the master-account
-        // Touch-ID UserOp (/v1/revoke/{build,submit}) — the only signer the
-        // registry accepts for an account-master operator. Don't trust the
-        // client: re-read the device entry and require `revoked` before
-        // flipping local state.
-        let hash = device_key_hash.clone().ok_or_else(|| {
+    let hash = device_key_hash.ok_or_else(|| {
+        err(
+            StatusCode::CONFLICT,
+            "actor has no on-chain device_key_hash to verify the revoke against",
+            "device-hash-missing",
+        )
+    })?;
+    let registry = registry_address(&state).ok_or_else(|| {
+        err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "chain profile carries no SidecarRegistry — cannot verify the revoke",
+            "chain-unconfigured",
+        )
+    })?;
+    let rpc = state.chain_profile.rpc.http.clone();
+    let bare = hash.trim_start_matches("0x").to_lowercase();
+    let hash32: [u8; 32] = hex::decode(&bare)
+        .ok()
+        .and_then(|b| b.try_into().ok())
+        .ok_or_else(|| {
             err(
                 StatusCode::CONFLICT,
-                "actor has no on-chain device_key_hash to verify the revoke against",
-                "device-hash-missing",
+                "actor device_key_hash is not 32-byte hex",
+                "device-hash-malformed",
             )
         })?;
-        let registry = registry_address(&state).ok_or_else(|| {
-            err(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "chain profile carries no SidecarRegistry — cannot verify the revoke",
-                "chain-unconfigured",
-            )
-        })?;
-        let rpc = state.chain_profile.rpc.http.clone();
-        let bare = hash.trim_start_matches("0x").to_lowercase();
-        let hash32: [u8; 32] = hex::decode(&bare)
-            .ok()
-            .and_then(|b| b.try_into().ok())
-            .ok_or_else(|| {
-                err(
-                    StatusCode::CONFLICT,
-                    "actor device_key_hash is not 32-byte hex",
-                    "device-hash-malformed",
-                )
-            })?;
-        let data = format!("0x{}{bare}", chain_selector("getDevice(bytes32)"));
-        let raw = daemon_eth_call(&rpc, &registry, &data).await.map_err(|e| {
-            err(
-                StatusCode::BAD_GATEWAY,
-                format!("revoke verify read failed: {e}"),
-                "revoke-verify-failed",
-            )
-        })?;
-        let entry = parse_device_entry(&raw, &hash32).map_err(|e| {
-            err(
-                StatusCode::BAD_GATEWAY,
-                format!("revoke verify parse failed: {e}"),
-                "revoke-verify-failed",
-            )
-        })?;
-        if !entry.revoked {
-            return Err(err(
-                StatusCode::CONFLICT,
-                "chain says the device is still active — the revoke UserOp did not land",
-                "revoke-not-onchain",
-            ));
-        }
-        req.onchain_tx_hash.clone()
-    } else {
-        // Legacy script path (heima-device-revoke.sh, EOA-signed) — works only
-        // when operatorMasterWallet IS the script's EOA (pre-#225 operators).
-        let master_script = state.register_master_script.clone().ok_or_else(|| {
-            err(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "chain not configured (no --register-master-script) — cannot revoke on chain",
-                "chain-unconfigured",
-            )
-        })?;
-        let revoke_script =
-            resolve_repo_script(&master_script, "heima-device-revoke.sh").ok_or_else(|| {
-                err(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "heima-device-revoke.sh not found (looked next to --register-master-script and in <repo>/scripts/)",
-                    "revoke-script-missing",
-                )
-            })?;
-        // Prefer the on-chain device key hash — it works for chain-reconstructed
-        // actors (#233) that never had a ~/.agentkeys/agents/<label>.json record
-        // on this machine (the label-file path died with "no agent file" — real
-        // 2026-06-11 unpair incident). Label fallback covers legacy rows only.
-        // Same selection as the #243 master-reset fleet teardown.
-        match &device_key_hash {
-            Some(hash) => revoke_agent_device_by_hash(&revoke_script, hash).await,
-            None => revoke_agent_device(&revoke_script, &label).await,
-        }
-        .map_err(|e| {
-            err(
-                StatusCode::BAD_GATEWAY,
-                format!("on-chain revoke failed: {e}"),
-                "revoke-onchain-failed",
-            )
-        })?
-    };
+    let data = format!("0x{}{bare}", chain_selector("getDevice(bytes32)"));
+    let raw = daemon_eth_call(&rpc, &registry, &data).await.map_err(|e| {
+        err(
+            StatusCode::BAD_GATEWAY,
+            format!("revoke verify read failed: {e}"),
+            "revoke-verify-failed",
+        )
+    })?;
+    let entry = parse_device_entry(&raw, &hash32).map_err(|e| {
+        err(
+            StatusCode::BAD_GATEWAY,
+            format!("revoke verify parse failed: {e}"),
+            "revoke-verify-failed",
+        )
+    })?;
+    if !entry.revoked {
+        return Err(err(
+            StatusCode::CONFLICT,
+            "chain says the device is still active — the revoke UserOp did not land",
+            "revoke-not-onchain",
+        ));
+    }
+    let tx = req.onchain_tx_hash.clone();
 
-    // On-chain revoke landed (or idempotent-skip) → flip local state + drop caps.
     let snapshot = {
         let mut guard = state.actors.write().await;
         let actor = guard
@@ -15263,110 +15211,103 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn revoke_device_flips_status_and_clears_caps() {
-        // revoke_device now goes ON CHAIN (heima-device-revoke.sh, resolved as a
-        // sibling of register_master_script). Point at a tempdir with a fake script
-        // that exits 0 so the test exercises the on-chain-then-local-flip path.
-        let tmp = tempfile::tempdir().unwrap();
+    async fn revoke_confirmation_ignores_legacy_script_selection_and_preserves_active_state() {
+        let directory = tempfile::tempdir().unwrap();
+        let marker = directory.path().join("unexpected-helper-call");
         std::fs::write(
-            tmp.path().join("heima-device-revoke.sh"),
-            "#!/usr/bin/env bash\necho '{\"ok\":true,\"skipped\":\"already-revoked\"}'\n",
-        )
-        .unwrap();
-        let state =
-            make_state_with_script(tmp.path().join("master.sh").to_string_lossy().into_owned());
-        seed_actor_async(&state).await;
-        // Pre-seed some caps so we can verify they're cleared.
-        state.caps.write().await.insert(
-            "agent-folotoy".into(),
-            vec![ApiCapToken {
-                id: "cap-1".into(),
-                cap: "memory:read".into(),
-                scope: "family".into(),
-                ttl: "900s".into(),
-                minted: "now".into(),
-                danger: None,
-            }],
+            directory.path().join("heima-device-revoke.sh"),
+            format!("#!/bin/sh\ntouch '{}'\nprintf '%s\\n' '{{\"ok\":true,\"skipped\":\"already-revoked\"}}'\n", marker.display()),
+        ).unwrap();
+        let endpoint = spawn_chain_stub().await;
+        let mut state = make_state_real(None);
+        set_chain_rpc(&mut state, &format!("http://{endpoint}"));
+        std::sync::Arc::get_mut(&mut state)
+            .unwrap()
+            .register_master_script = Some(
+            directory
+                .path()
+                .join("master.sh")
+                .to_string_lossy()
+                .into_owned(),
         );
-
-        let resp = revoke_device(
-            State(state.clone()),
-            Path("agent-folotoy".into()),
-            Json(RevokeDeviceRequest {
-                intent_text: "Revoke FoloToy".into(),
-                intent_fields: vec![("actor".into(), "agent-folotoy".into())],
-                onchain: false,
-                onchain_tx_hash: None,
-                audit_envelope_hashes: None,
-            }),
-        )
-        .await
-        .unwrap();
-        assert_eq!(resp.0.status, "bad");
-        assert!(resp.0.label.ends_with("(revoked)"));
-        assert!(state.caps.read().await.get("agent-folotoy").is_none());
-        let audit = state.audit.read().await;
-        assert!(audit.iter().any(|e| e.kind == "device.revoked"));
-    }
-
-    #[tokio::test]
-    async fn revoke_device_prefers_the_onchain_hash_over_the_label_file() {
-        // Chain-reconstructed actors (#233) have NO ~/.agentkeys/agents/<label>.json,
-        // so the label path dies with "no agent file" (real 2026-06-11 unpair
-        // incident). When device_key_hash is known, the revoke must shell
-        // `--device-key-hash <hash>` — never `--agent <label>`.
-        let tmp = tempfile::tempdir().unwrap();
-        let args_file = tmp.path().join("revoke-args.txt");
-        std::fs::write(
-            tmp.path().join("heima-device-revoke.sh"),
-            format!(
-                "#!/usr/bin/env bash\necho \"$@\" > {}\necho '{{\"ok\":true,\"tx_hash\":\"0xrevoketx\"}}'\n",
-                args_file.display()
-            ),
-        )
-        .unwrap();
-        let state =
-            make_state_with_script(tmp.path().join("master.sh").to_string_lossy().into_owned());
         seed_actor_async(&state).await;
-        let hash = format!("0x{}", "ab".repeat(32));
         state
             .actors
             .write()
             .await
             .get_mut("agent-folotoy")
             .unwrap()
-            .device_key_hash = Some(hash.clone());
-
-        let resp = revoke_device(
+            .device_key_hash = Some(format!("0x{}", T233_AGENT_HASH.repeat(32)));
+        state.caps.write().await.insert(
+            "agent-folotoy".into(),
+            vec![ApiCapToken {
+                id: "retained-cap".into(),
+                cap: "memory:read".into(),
+                scope: "test".into(),
+                ttl: "900s".into(),
+                minted: "now".into(),
+                danger: None,
+            }],
+        );
+        let before_actor = serde_json::to_value(&*state.actors.read().await).unwrap();
+        let before_caps = serde_json::to_value(&*state.caps.read().await).unwrap();
+        let before_audit = serde_json::to_value(&*state.audit.read().await).unwrap();
+        let request = || {
+            serde_json::from_value::<RevokeDeviceRequest>(serde_json::json!({
+                "intent_text": "Confirm revocation", "intent_fields": [], "onchain": false,
+            }))
+            .unwrap()
+        };
+        let denied = revoke_device(
             State(state.clone()),
             Path("agent-folotoy".into()),
-            Json(RevokeDeviceRequest {
-                intent_text: "Revoke FoloToy".into(),
-                intent_fields: vec![],
-                onchain: false,
-                onchain_tx_hash: None,
-                audit_envelope_hashes: None,
-            }),
+            Json(request()),
+        )
+        .await
+        .expect_err("An active device must not be cleared through a helper");
+        assert_eq!(denied.0, StatusCode::CONFLICT);
+        assert_eq!(denied.1 .0.reason, "revoke-not-onchain");
+        assert!(!marker.exists());
+        assert_eq!(
+            serde_json::to_value(&*state.actors.read().await).unwrap(),
+            before_actor
+        );
+        assert_eq!(
+            serde_json::to_value(&*state.caps.read().await).unwrap(),
+            before_caps
+        );
+        assert_eq!(
+            serde_json::to_value(&*state.audit.read().await).unwrap(),
+            before_audit
+        );
+        state
+            .actors
+            .write()
+            .await
+            .get_mut("agent-folotoy")
+            .unwrap()
+            .device_key_hash = Some(format!("0x{}", T233_REVOKED_HASH.repeat(32)));
+        let confirmed = revoke_device(
+            State(state.clone()),
+            Path("agent-folotoy".into()),
+            Json(request()),
         )
         .await
         .unwrap();
-        assert_eq!(resp.0.status, "bad");
-
-        let recorded = std::fs::read_to_string(&args_file).unwrap();
-        assert!(
-            recorded.contains("--device-key-hash") && recorded.contains(&hash),
-            "expected by-hash revoke, got: {recorded}"
-        );
-        assert!(!recorded.contains("--agent"), "got: {recorded}");
+        assert_eq!(confirmed.0.status, "bad");
+        assert!(confirmed.0.label.ends_with(" (revoked)"));
+        assert!(state
+            .audit
+            .read()
+            .await
+            .iter()
+            .any(|event| event.kind == "device.revoked"));
+        assert!(!state.caps.read().await.contains_key("agent-folotoy"));
+        assert!(!marker.exists());
     }
 
     #[tokio::test]
-    async fn revoke_device_onchain_mode_verifies_the_registry_and_skips_the_script() {
-        // The Touch-ID unpair: the browser already landed the revoke UserOp
-        // (/v1/revoke/{build,submit}); the daemon must VERIFY the device reads
-        // `revoked` from SidecarRegistry (never trust the client), flip local
-        // state WITHOUT shelling heima-device-revoke.sh, and 409 when the chain
-        // still says active.
+    async fn revoke_device_verifies_chain_authority_and_records_the_receipt() {
         let addr = spawn_chain_stub().await;
         let mut state = make_state_real(None);
         set_chain_rpc(&mut state, &format!("http://{addr}"));
@@ -15386,7 +15327,6 @@ mod tests {
             Json(RevokeDeviceRequest {
                 intent_text: "Unpair".into(),
                 intent_fields: vec![],
-                onchain: true,
                 onchain_tx_hash: Some("0xdeadbeef".into()),
                 audit_envelope_hashes: None,
             }),
@@ -15415,7 +15355,6 @@ mod tests {
             Json(RevokeDeviceRequest {
                 intent_text: "Unpair".into(),
                 intent_fields: vec![],
-                onchain: true,
                 onchain_tx_hash: None,
                 audit_envelope_hashes: None,
             }),

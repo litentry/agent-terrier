@@ -359,9 +359,6 @@ export class MappedBackend implements AgentKeysClient {
     const r = await this.postJson<unknown>(`/v1/actors/${encodeURIComponent(actorId)}/revoke`, {
       intent_text: intent.text,
       intent_fields: intent.fields,
-      // Touch-ID path: the revoke UserOp already landed; the daemon verifies the
-      // registry reads `revoked` and flips local state without the script.
-      onchain: !!onchain,
       onchain_tx_hash: onchain?.txHash ?? null,
       // #97: the DeviceRevoke envelope receipts from the submit — attached to
       // the daemon's feed event so the decode view fetches the real envelope.
