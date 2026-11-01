@@ -48,7 +48,7 @@ const DISCONNECTED: DisconnectedStatus = {
   kind: 'disconnected',
   reason: 'no-backend-configured',
   detail:
-    'Set NEXT_PUBLIC_AGENTKEYS_BACKEND=daemon and AGENTKEYS_DAEMON_URL to a running agentkeys-daemon to populate this view.',
+    'No backend is configured for this console.',
 };
 
 export class EmptyBackend implements AgentKeysClient {

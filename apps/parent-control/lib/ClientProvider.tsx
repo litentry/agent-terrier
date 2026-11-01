@@ -2,20 +2,21 @@
 
 import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { selectBackend } from './client';
+import type { BackendConfiguration } from './backendConfiguration';
 import type { AgentKeysClient, ConnectionStatus } from './client/types';
 
 const INITIAL_STATUS: ConnectionStatus = {
   kind: 'disconnected',
   reason: 'no-backend-configured',
   detail:
-    'Set NEXT_PUBLIC_AGENTKEYS_BACKEND=daemon and AGENTKEYS_DAEMON_URL to a running agentkeys-daemon to populate this view.',
+    'Connecting to the configured local services.',
 };
 
 const ClientContext = createContext<AgentKeysClient | null>(null);
 const StatusContext = createContext<ConnectionStatus>(INITIAL_STATUS);
 
-export function ClientProvider({ children }: { children: ReactNode }) {
-  const client = useMemo(() => selectBackend(), []);
+export function ClientProvider({ children, configuration }: { children: ReactNode; configuration: BackendConfiguration }) {
+  const client = useMemo(() => selectBackend(configuration), [configuration.kind, configuration.url]);
   const [status, setStatus] = useState<ConnectionStatus>(INITIAL_STATUS);
 
   useEffect(() => {

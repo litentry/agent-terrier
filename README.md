@@ -25,6 +25,8 @@ npm --prefix apps/parent-control test
 
 The component suite runs without a browser. Use `--release` when building the browser client for distribution. Both build modes remove personal source paths from the binary; run the privacy check again after generating artifacts.
 
+The [local website guide](docs/wiki/local-website.md) covers building and serving the console with runtime backend selection and its remaining browser-acceptance limits.
+
 Start with the [public wiki](https://github.com/litentry/agent-terrier/wiki) or its [canonical Home source](docs/wiki/Home.md).
 
 See [architecture and ownership](docs/arch.md) and [contributing](CONTRIBUTING.md). Never use production wallet keys or credentials in development examples.

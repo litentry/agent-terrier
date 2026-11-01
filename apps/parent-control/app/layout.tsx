@@ -1,4 +1,6 @@
 import type { Metadata, Viewport } from 'next';
+import { connection } from 'next/server';
+import { BACKEND_CONFIGURATION_ID, serverBackendConfiguration, serializeBackendConfiguration } from '@/lib/backendConfiguration';
 import '@agentkeys/design-system/css/tokens.css';
 import { ClientProvider } from '@/lib/ClientProvider';
 import { ChainBadge } from './_components/ChainBadge';
@@ -16,11 +18,14 @@ export const viewport: Viewport = {
   themeColor: '#ffffff',
 };
 
-export default function RootLayout({ children }: { children: React.ReactNode }) {
+export default async function RootLayout({ children }: { children: React.ReactNode }) {
+  await connection();
+  const configuration = serverBackendConfiguration(process.env);
   return (
     <html lang="en" data-theme="github">
       <body>
-        <ClientProvider>
+        <script id={BACKEND_CONFIGURATION_ID} type="application/json" dangerouslySetInnerHTML={{ __html: serializeBackendConfiguration(configuration) }} />
+        <ClientProvider configuration={configuration}>
           <ChainBadge />
           {children}
         </ClientProvider>

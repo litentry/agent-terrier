@@ -1,5 +1,12 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { gatewayClient, gatewayNotConfigured, isTerminalLoginStatus, setHostedGatewayAccess, type HostedGatewayAccess, type GatewayResult } from '../gatewayClient';
+import { browserBackendConfiguration, DEFAULT_DAEMON_URL } from '../backendConfiguration';
+
+vi.mock('../backendConfiguration', async (original) => ({
+  ...await original<typeof import('../backendConfiguration')>(), browserBackendConfiguration: vi.fn(),
+}));
+beforeEach(() => vi.mocked(browserBackendConfiguration).mockReturnValue({ kind: 'daemon', url: DEFAULT_DAEMON_URL }));
+
 import type { HostedGatewayRequest } from '../generated/HostedGatewayRequest';
 import { normalizeRouterView } from '../routerView';
 
@@ -26,8 +33,22 @@ afterEach(() => {
 });
 
 describe('gatewayClient', () => {
+  it('uses the runtime native origin and refuses missing configuration without a request', async () => {
+    vi.mocked(browserBackendConfiguration).mockReturnValue({ kind: 'daemon', url: 'http://127.0.0.1:23456' });
+    const fetch = mockFetch(200, { ok: true });
+    vi.stubGlobal('fetch', fetch);
+    expect((await gatewayClient.status()).ok).toBe(true);
+    expect(fetch.mock.calls[0][0]).toBe('http://127.0.0.1:23456/v1/master/gateway/status');
+    fetch.mockClear();
+    vi.mocked(browserBackendConfiguration).mockImplementation(() => { throw new Error('synthetic invalid page configuration'); });
+    expect(await gatewayClient.status()).toMatchObject({ ok: false, reason: 'backend_configuration_invalid' });
+    expect(fetch).not.toHaveBeenCalled();
+    vi.mocked(browserBackendConfiguration).mockReturnValue({ kind: 'empty', url: null });
+    expect(await gatewayClient.status()).toMatchObject({ ok: false, reason: 'backend_not_configured' });
+    expect(fetch).not.toHaveBeenCalled();
+  });
   it('never contacts a local daemon from the hosted console', async () => {
-    vi.stubEnv('NEXT_PUBLIC_AGENTKEYS_BACKEND', 'core');
+    vi.mocked(browserBackendConfiguration).mockReturnValue({ kind: 'core', url: 'https://broker.example.test' });
     const fetch = vi.fn();
     vi.stubGlobal('fetch', fetch);
     expect(await gatewayClient.status()).toMatchObject({ ok: false, reason: 'master_session_required' });
@@ -303,7 +324,7 @@ function hostedAccess(registry: unknown = { bound: [], pending: [], invites: [],
     }),
   };
   setHostedGatewayAccess(access);
-  vi.stubEnv('NEXT_PUBLIC_AGENTKEYS_BACKEND', 'core');
+  vi.mocked(browserBackendConfiguration).mockReturnValue({ kind: 'core', url: 'https://broker.example.test' });
   const fetch = vi.fn();
   vi.stubGlobal('fetch', fetch);
   return { access, operations, writes, fetch };
