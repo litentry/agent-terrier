@@ -63,11 +63,12 @@ class TestLaneExecutionTests(unittest.TestCase):
         self.assertEqual(result["tests"], {"passed": 2, "failed": 0, "ignored": 1})
 
     def test_qualification_selection_is_explicit_and_reuses_canonical_scenarios(self):
-        for components in ([], ["cli"], ["storage", "ui"]):
+        for components in ([], ["cli"], ["storage", "cli"]):
             with self.assertRaises(ValueError):
                 test_lanes.selection("qualification", components)
         plan, status = test_lanes.run(Path("."), "qualification", ["storage"], plan=True)
         self.assertEqual(status, 0)
+        self.assertIn("qualify_public_web", test_lanes.run(Path("."), "qualification", ["ui"], plan=True)[0]["selected"])
         self.assertIn("worker-authority", plan["selected"])
         self.assertIn("qualify_local_broker_storage", plan["selected"])
         self.assertIn("qualify_local_channel", plan["selected"])
