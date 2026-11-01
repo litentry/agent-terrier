@@ -1,35 +1,5 @@
 #!/usr/bin/env bash
-# check-bash-grep-count-fallback.sh — the `grep -c` capture double-count trap.
-#
-# THE BUG (real, 2026-09-23): `grep -c` PRINTS its count and EXITS 1 when the
-# count is zero, so a fallback INSIDE the capture fires on the zero case too and
-# appends a second value:
-#
-#     n="$(grep -c pat file || echo 0)"     # no match → n = "0" newline "0"
-#     [ "$n" -gt 1 ]                        # → "[: 0\n0: integer expression expected"
-#
-# `[` then returns 2, which an `if`/`||` reads as false, so the branch goes the
-# right way by accident and the only symptom is log noise. That is how it sat in
-# lib/host-common.sh's cargo-config guard, logging in the VE broker converge
-# (PR #724's ve-e2e run), and how #728 re-introduced it in the dsh image smoke
-# the next day. `docker exec … grep -c` passes grep's exit status through, so
-# it is the same trap.
-#
-# THE FIX — make the capture a single value:
-#
-#     n="$(grep -c pat file)" || n=0        # assign first; fall back only on failure
-#     "… $(grep -c pat file || true) …"     # in a message: the count, empty on a read error
-#
-# WHAT THIS GATE FLAGS — a `grep … -c`/`--count` whose `$(…)` capture carries an
-# `|| echo` / `|| printf` fallback, in every tracked *.sh and workflow file. It
-# reads one logical line (backslash continuations joined) and needs no `)`
-# between the `$(` and the fallback, so it stays quiet on the fix above (whose
-# fallback sits OUTSIDE the capture). Full-line comments are skipped (they can't
-# run, and this header would self-flag). Moving the fallback out of the capture
-# is always correct, so there is no allowlist.
-#
-#   bash scripts/utils/check-bash-grep-count-fallback.sh            # repo default set
-#   bash scripts/utils/check-bash-grep-count-fallback.sh path.sh …  # explicit files (repo-relative or absolute)
+# Keep count fallbacks outside command substitutions so a zero count is not duplicated.
 set -euo pipefail
 
 cd "$(dirname "$0")/../.."

@@ -2,8 +2,6 @@ import { describe, expect, it } from 'vitest';
 
 import { parseSandboxExpiry, sandboxExpiryLabel } from '../client/sandboxExpiry';
 
-// The instant under test throughout: the lease MEASURED on the live VE broker
-// 2026-08-14 — `2026-08-15 15:50:54 +0800` = 2026-08-15T07:50:54Z.
 const EXPIRY_UTC_MS = Date.parse('2026-08-15T07:50:54Z');
 // "now" one hour before it, so a correct renderer says ~1h.
 const NOW = EXPIRY_UTC_MS - 60 * 60 * 1000;

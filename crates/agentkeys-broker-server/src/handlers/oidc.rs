@@ -342,19 +342,21 @@ mod tests {
 
     #[test]
     fn aud_claim_is_config_driven_and_changes_nothing_else() {
-        // #510: the audience is BrokerConfig-driven (BROKER_STS_AUDIENCE) so
-        // the VE stack can register its own audience (port follow-up 2)
-        // without a code constant; the historical value stays the default.
         let omni = "c".repeat(64);
         let (aws, _n, _e) =
             build_oidc_jwt_claims("https://issuer", &omni, "", 300, "sts.amazonaws.com");
         assert_eq!(aws["aud"], "sts.amazonaws.com");
-        let (ve, _n, _e) =
-            build_oidc_jwt_claims("https://issuer", &omni, "", 300, "agentkeys-ve-sts");
-        assert_eq!(ve["aud"], "agentkeys-ve-sts");
+        let (secondary_broker, _n, _e) = build_oidc_jwt_claims(
+            "https://issuer",
+            &omni,
+            "",
+            300,
+            "agentkeys-secondary_broker-sts",
+        );
+        assert_eq!(secondary_broker["aud"], "agentkeys-secondary_broker-sts");
         // The audience changes NOTHING else in the claim set (timestamps
         // zeroed — the two calls may straddle a second boundary).
-        let (mut a, mut v) = (aws, ve);
+        let (mut a, mut v) = (aws, secondary_broker);
         for c in [&mut a, &mut v] {
             c["aud"] = serde_json::Value::Null;
             c["iat"] = 0.into();

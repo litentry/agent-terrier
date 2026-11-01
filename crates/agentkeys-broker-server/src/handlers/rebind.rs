@@ -26,10 +26,6 @@ use crate::state::SharedState;
 
 pub use agentkeys_protocol::console_apps::RebindBuildRequest;
 
-/// Same shape as the spawn / archive builds: the UserOp envelope FLATTENED
-/// (`user_op`, `user_op_hash`, … at the top level — what the daemon, the CLI
-/// and the web client read), then the rebind facts. The VE gate caught the
-/// nested first cut ("rebind/build carried no user_op_hash").
 #[derive(Debug, Serialize)]
 pub struct RebindBuildResponse {
     #[serde(flatten)]

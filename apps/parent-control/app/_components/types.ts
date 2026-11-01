@@ -314,16 +314,6 @@ export const knowledgeGrantCommit = (
  *  done through this daemon session); after a daemon restart a chain-reconstructed
  *  device falls back to the pairing page's delegate grid with hash-only grants. */
 export const actorIsChannelEndpoint = (a: Actor): boolean => {
-  // `kind` is the CHAIN's answer: the daemon reads SidecarRegistry's tier
-  // (TIER_AGENT=2 ⇒ delegate, TIER_DEVICE=3 ⇒ device) — see `tier_kind` in
-  // ui_bridge.rs. No heuristic here on purpose.
-  //
-  // There used to be a scope-shape fallback ("every grant is a channel grant
-  // ⇒ device"). It is DELETED because it is wrong in both directions: a
-  // delegate whose only grants are channel grants read as a device (the live
-  // VE case — a delegate and a device both showed as "device"), and a device
-  // stripped of its grants read as a delegate. Shape describes what an actor
-  // may currently do; it never describes what the actor IS.
   return a.kind === 'device';
 };
 

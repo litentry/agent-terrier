@@ -1,31 +1,4 @@
-// Stack-scoped browser store for the master identity pointers.
-//
-// The daemon/broker/chain stack switches between (chain, broker) pairs — the
-// fleet `c` stack picker injects AGENTKEYS_CHAIN + AGENTKEYS_BROKER_URL →
-// dev.sh sources the matching scripts/operator-workstation*.env. The browser's
-// master pointers must switch WITH it: a Base master's credentialId/omni must
-// never be offered while the daemon is on Heima (#313), and — since #373 the
-// stack axis has a CLOUD dimension — a Heima-AWS session's pointers must never
-// leak into Heima-VE either: SAME chain, DIFFERENT broker/data plane, so
-// re-login + onboarding state are per-(chain, broker), not per-chain.
-//
-// Keys are `<base>:<chain>@<broker-host>` once both are known (from the
-// daemon's /v1/chain/list `daemonChain` + `daemonBroker`), `<base>:<chain>`
-// while the broker is unknown/absent (brokerless dev daemon — the pre-#373
-// behavior), and the bare `<base>` before the first bind ever happens.
-// `ak_active_chain` / `ak_active_broker` mirror the live daemon binding to
-// localStorage so the keys resolve synchronously across reloads;
-// `ensureActiveStack()` refreshes them from the daemon on each load (a stack
-// switch is a full reload, which re-derives them).
-//
-// Migration is one-shot and generation-ordered: bare pre-#313 keys and
-// chain-only pre-#373 keys are adopted into the first (chain, broker) the
-// daemon reports, then removed. Pre-#373 pointers were created against the
-// AWS brokers (the VE broker didn't exist), and the daemon they load under
-// first is overwhelmingly that same stack; a mis-attributed legacy identity
-// is harmless — the omni-match guard rejects a pointer whose omni ≠ the
-// daemon's master (#242).
-
+// Identity pointers are scoped to both chain and broker.
 const ACTIVE_CHAIN_KEY = 'ak_active_chain';
 const ACTIVE_BROKER_KEY = 'ak_active_broker';
 const CRED_ID = 'ak_master_cred_id';

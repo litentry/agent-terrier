@@ -416,7 +416,6 @@ mod tests {
         assert_eq!(parse_expire_at(""), None);
         assert_eq!(parse_expire_at("?"), None);
         assert_eq!(parse_expire_at("not-a-date"), None);
-        // Unix-epoch digits are NOT a documented VE shape — refuse to guess.
         assert_eq!(parse_expire_at("1783353600"), None);
     }
 

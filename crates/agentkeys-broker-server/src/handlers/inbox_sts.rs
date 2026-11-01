@@ -138,10 +138,6 @@ pub async fn mint_inbox_sts(
         p.service.to_lowercase(),
     );
     let policy_string;
-    // #582: VE refuses AWS-dialect inline session policies (#510 guard) — the
-    // channel-sts posture: provider-side scope-down via the #511 memory-class
-    // role. Worker-held creds, same trust envelope as its other class paths;
-    // the exact-sub-prefix VE rendering is the #512-style intent follow-up.
     let policy = if state.sts.supports_inline_session_policy() {
         policy_string = serde_json::json!({
             "Version": "2012-10-17",

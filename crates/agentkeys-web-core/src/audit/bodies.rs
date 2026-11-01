@@ -334,12 +334,6 @@ pub struct GateTurnBody {
     pub reasoning_tokens: u64,
 }
 
-// #519 — the gate speech relay (the VE #386 gate-held app-token posture; the
-// AWS twin is the #441 cap→STS speech plane). Same attribution model as
-// GateTurn: envelope omnis carry the OWNING USER; device/api-key ride here.
-// Bodies carry SIZES and coordinates only — never transcript or audio content
-// (the D13 posture the gateway bodies follow).
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SpeechAsrBody {
     /// Device the transcription is attributed to (from the relay key record).

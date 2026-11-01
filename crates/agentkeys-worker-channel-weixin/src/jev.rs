@@ -802,13 +802,6 @@ pub fn joins_photo_batch(ask: &PendingAsk, now_secs: u64) -> bool {
         && now_secs.saturating_sub(ask.asked_at_secs) <= PHOTO_BATCH_WINDOW_SECS
 }
 
-/// #722 — what a photo is routed by: one line from the stack's vision model.
-/// Measured 2026-09-25 on the VE stack's chat endpoint (Doubao-Seed-2.0-mini)
-/// with reasoning off: 1.0–1.6 s, ~1,400 tokens in, ~25 out; with reasoning
-/// on, 4.5 s and ~480 out — hence `thinking: disabled`. `temperature: 0`
-/// narrows the wording's spread (it does not make it repeatable). DeepSeek
-/// V4.1 Flash through Ark (2026-09-25): the same routing on every test photo,
-/// identical wording run to run, ~919 tokens in per photo against ~1,377.
 pub const DESCRIBE_PROMPT: &str = "这张照片是家里人发给家庭助手的。用一句中文说清楚照片拍的是什么：在哪里、有哪些主要东西（不超过40个字）。只写看得到的内容，不要推测用途，不要加前缀。";
 pub const DESCRIBE_MAX_CHARS: usize = 120;
 

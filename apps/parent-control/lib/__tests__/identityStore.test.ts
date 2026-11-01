@@ -1,9 +1,3 @@
-// #373 stack-isolation negative tests: the master identity pointers must be
-// namespaced per (chain, broker) — the SAME chain behind a DIFFERENT broker
-// (Heima-AWS vs Heima-VE) must never see the other stack's credId / omni /
-// onboarded flag. Plus the one-shot migration ladder: bare pre-#313 keys and
-// chain-only pre-#373 keys adopt into the first (chain, broker) bound, then
-// disappear.
 import { beforeEach, describe, expect, it } from 'vitest';
 import {
   brokerScope,
@@ -34,8 +28,8 @@ function freshStorage(): Storage {
   } as Storage;
 }
 
-const AWS = 'https://broker.primary.example';
-const VE = 'https://broker.secondary.example';
+const PRIMARY_BROKER = 'https://broker.primary.example';
+const SECONDARY_BROKER = 'https://broker.secondary.example';
 
 beforeEach(() => {
   (globalThis as { localStorage?: Storage }).localStorage = freshStorage();
@@ -43,50 +37,48 @@ beforeEach(() => {
 });
 
 describe('stack-scoped identity isolation (#373)', () => {
-  it('same chain, different broker: pointers never leak across (Heima-AWS ↔ Heima-VE)', () => {
-    setActiveStack('heima', AWS);
-    setMasterCredId('cred-aws');
+  it('same chain, different broker: pointers never leak across (two independent brokers)', () => {
+    setActiveStack('heima', PRIMARY_BROKER);
+    setMasterCredId('cred-primary');
     setMasterOmni('0xaaa');
     setOnboardedFlag(true);
 
-    // reload onto the VE stack (a stack switch is a full reload)
     resetActiveStackForTests();
-    setActiveStack('heima', VE);
+    setActiveStack('heima', SECONDARY_BROKER);
     expect(getMasterCredId()).toBe('');
     expect(getMasterOmni()).toBe('');
     expect(getOnboardedFlag()).toBe(false);
 
-    setMasterCredId('cred-ve');
+    setMasterCredId('cred-secondary');
     setMasterOmni('0xbbb');
 
-    // back to AWS: its identity is intact, not overwritten by the VE one
     resetActiveStackForTests();
-    setActiveStack('heima', AWS);
-    expect(getMasterCredId()).toBe('cred-aws');
+    setActiveStack('heima', PRIMARY_BROKER);
+    expect(getMasterCredId()).toBe('cred-primary');
     expect(getMasterOmni()).toBe('0xaaa');
     expect(getOnboardedFlag()).toBe(true);
   });
 
   it('reset wipes only the active stack, not the same chain on another broker', () => {
-    setActiveStack('heima', AWS);
-    setMasterCredId('cred-aws');
+    setActiveStack('heima', PRIMARY_BROKER);
+    setMasterCredId('cred-primary');
     resetActiveStackForTests();
-    setActiveStack('heima', VE);
-    setMasterCredId('cred-ve');
+    setActiveStack('heima', SECONDARY_BROKER);
+    setMasterCredId('cred-secondary');
 
-    clearMasterIdentity(); // active = Heima-VE
+    clearMasterIdentity(); // active broker only
 
     expect(getMasterCredId()).toBe('');
     resetActiveStackForTests();
-    setActiveStack('heima', AWS);
-    expect(getMasterCredId()).toBe('cred-aws');
+    setActiveStack('heima', PRIMARY_BROKER);
+    expect(getMasterCredId()).toBe('cred-primary');
   });
 
   it('different chains stay isolated regardless of broker (the #313 guarantee holds)', () => {
-    setActiveStack('heima', AWS);
+    setActiveStack('heima', PRIMARY_BROKER);
     setMasterCredId('cred-heima');
     resetActiveStackForTests();
-    setActiveStack('base', AWS);
+    setActiveStack('base', PRIMARY_BROKER);
     expect(getMasterCredId()).toBe('');
   });
 });
@@ -95,20 +87,19 @@ describe('one-shot migration ladder', () => {
   it('adopts a chain-only pre-#373 pointer into the first (chain, broker), then removes it', () => {
     localStorage.setItem('ak_master_cred_id:heima', 'legacy-chain-scoped');
 
-    setActiveStack('heima', AWS);
+    setActiveStack('heima', PRIMARY_BROKER);
     expect(getMasterCredId()).toBe('legacy-chain-scoped');
     expect(localStorage.getItem('ak_master_cred_id:heima')).toBeNull();
 
-    // a LATER bind to the VE stack cannot re-adopt it
     resetActiveStackForTests();
-    setActiveStack('heima', VE);
+    setActiveStack('heima', SECONDARY_BROKER);
     expect(getMasterCredId()).toBe('');
   });
 
   it('adopts a bare pre-#313 pointer and removes every older generation', () => {
     localStorage.setItem('ak_master_omni', '0xlegacy');
 
-    setActiveStack('heima', AWS);
+    setActiveStack('heima', PRIMARY_BROKER);
     expect(getMasterOmni()).toBe('0xlegacy');
     expect(localStorage.getItem('ak_master_omni')).toBeNull();
   });
@@ -117,7 +108,7 @@ describe('one-shot migration ladder', () => {
     localStorage.setItem('ak_master_cred_id', 'bare');
     localStorage.setItem('ak_master_cred_id:heima', 'chain-scoped');
 
-    setActiveStack('heima', AWS);
+    setActiveStack('heima', PRIMARY_BROKER);
     expect(getMasterCredId()).toBe('chain-scoped');
     expect(localStorage.getItem('ak_master_cred_id')).toBeNull();
     expect(localStorage.getItem('ak_master_cred_id:heima')).toBeNull();
@@ -127,7 +118,7 @@ describe('one-shot migration ladder', () => {
     localStorage.setItem(`ak_master_cred_id:heima@broker.primary.example`, 'current');
     localStorage.setItem('ak_master_cred_id:heima', 'stale-legacy');
 
-    setActiveStack('heima', AWS);
+    setActiveStack('heima', PRIMARY_BROKER);
     expect(getMasterCredId()).toBe('current');
   });
 });

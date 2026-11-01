@@ -185,14 +185,9 @@ pub struct ResourceRegistryDoc {
     pub version: u32,
     #[serde(default)]
     pub items: Vec<ResourceItemRow>,
-    /// Rows a reader could not parse — a kind or field shape a NEWER build
-    /// minted (measured 2026-09-13: two stacked branches sharing the VE test
-    /// stack, the older one refusing the whole registry over one `note` row).
-    /// Carried verbatim so an older daemon never erases them on its next
-    /// write, and promoted back into `items` by a build that can read them.
-    /// Never on the wire to the console.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[ts(skip)]
+    /// Unrecognized rows retained across read/write cycles.
     pub opaque: Vec<serde_json::Value>,
 }
 

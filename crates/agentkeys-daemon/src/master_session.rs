@@ -53,13 +53,6 @@ pub struct PersistedMasterSession {
     /// The verified operator email (shown after restore; never a credential).
     #[serde(default)]
     pub email: String,
-    /// The broker URL this session was minted against (#373 stack scoping).
-    /// Two side-by-side stacks (Heima-AWS / Heima-VE) share `~/.agentkeys`, and
-    /// under per-stack identity namespaces (#464) a foreign-stack record is a
-    /// DIFFERENT identity — rehydrating it poisons every broker call (the
-    /// 2026-07-16 incident: the AWS daemon rehydrated a VE-minted record and
-    /// every cap-mint 401'd `InvalidSignature`). Empty on legacy records,
-    /// which therefore match only a broker-less daemon.
     #[serde(default)]
     pub broker_url: String,
     /// The EVM `operator_omni` (master-self ⇒ operator == actor). Normalized
@@ -339,10 +332,6 @@ mod tests {
 
     #[test]
     fn load_latest_skips_records_from_another_stack() {
-        // #373 scoping: the NEWEST record belongs to another stack (a different
-        // broker) — it must never shadow this stack's own (older) record. This
-        // is the 2026-07-16 bleed: the AWS daemon rehydrated a newer VE-minted
-        // record and every broker call 401'd InvalidSignature.
         let (store, _tmp) = temp_store();
         store.save(&sample("0xMINE", 100, 5)).expect("save mine");
         let mut foreign = sample("0xTHEIRS", 200, 5);

@@ -1,32 +1,4 @@
-//! `POST /v1/cap/speech-sts` — broker-brokered scoped STS for the speech
-//! plane (#441, epic #439 stack ②: ASR/TTS through the SAME cap→STS relay
-//! every other endpoint uses — no server-held speech token, no gate-custody
-//! special case like the VE stack's #386 app-token posture).
-//!
-//! ## Shape (the canonical_sts.rs pattern, compute-plane edition)
-//!
-//! 1. The delegate authenticates with its OWN session JWT.
-//! 2. It presents the `SpeechUse`/`Speech` cap the broker minted at
-//!    `/v1/cap/speech` — which the broker only mints AFTER the on-chain
-//!    `speech` grant check (master-self rides the #195 skip).
-//! 3. The broker re-verifies the cap (broker_sig, op, data class, freshness,
-//!    actor == session — a delegate can only redeem ITS OWN cap; #369
-//!    delegation re-check when present), mints an ACTOR-tagged OIDC JWT
-//!    internally (never handed out), and AssumeRoles the SPEECH role with an
-//!    inline session policy pinning the exact speech actions.
-//! 4. The delegate receives ONLY short-TTL creds whose effective permissions
-//!    are `transcribe:StartStreamTranscription*` + `polly:SynthesizeSpeech` —
-//!    the AWS intersection of the role's identity policy and the inline
-//!    policy. No storage action, no re-AssumeRole, no operator bearer.
-//!
-//! ## Why no `${aws:PrincipalTag}` resource scoping here
-//!
-//! Transcribe streaming + Polly synthesis have no per-actor resources (the
-//! calls are account-level compute, `Resource: *` by necessity), so the
-//! layer-3 IAM pattern the storage roles use does not apply. The per-actor
-//! gate is layers 1+2: the on-chain `speech` grant checked at cap-mint and
-//! the actor==session check here. The session is still tagged with the
-//! actor omni so CloudTrail attributes every speech call to the actor.
+//! Actor-authenticated speech credential exchange.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 

@@ -47,11 +47,6 @@ describe('actor type comes from the BINDING, not the current scope', () => {
   });
 
   it('NEVER infers a device from the shape of its grants', () => {
-    // The deleted heuristic said "every grant is a channel grant ⇒ device".
-    // Live counter-example (VE stack): the DELEGATE `test1` held exactly
-    // channel-pub + channel-sub and nothing else, so it read as a device —
-    // while the real device sat next to it, also "device". The chain (tier 2
-    // vs 3) separates them; grant shape never can.
     const delegateWithOnlyChannels = actor({
       kind: 'delegate',
       services: ['channel-pub:opchat-test1', 'channel-sub:opchat-test1'],

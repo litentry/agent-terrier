@@ -147,13 +147,6 @@ pub async fn mint_canonical_sts(
         p.service.to_lowercase(),
     );
     let policy_string;
-    // #582: the VE provider refuses AWS-dialect inline session policies (#510
-    // guard) — same posture as channel-sts one file over. There the scope-down
-    // is PROVIDER-SIDE: the #511 per-class memory role's identity policy
-    // (bots/* on the memory bucket only). The creds never leave the memory
-    // worker (it redeems the cap server-side and streams the object), so the
-    // trust envelope equals the worker's every other class-scoped path; an
-    // exact-object VE rendering is the #512-style intent follow-up on #582.
     let policy = if state.sts.supports_inline_session_policy() {
         policy_string = serde_json::json!({
             "Version": "2012-10-17",

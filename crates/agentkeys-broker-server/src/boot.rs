@@ -739,11 +739,6 @@ fn build_registry(
     })
 }
 
-/// Magic-link landing URL: `<base>/auth/email/landing`, where base is the
-/// `BROKER_EMAIL_LANDING_URL_BASE` override when non-empty, else the OIDC
-/// issuer (correct only when the issuer IS the broker's public host — on VE
-/// the issuer is the TOS-bucket JWKS URL, which serves no landing page).
-/// Env value is injected by the caller so tests never mutate process env.
 #[cfg(feature = "auth-email-link")]
 fn email_landing_base(override_base: Option<String>, oidc_issuer: &str) -> String {
     let base = override_base

@@ -1,41 +1,4 @@
-//! `POST /v1/cap/own-sts` — broker-brokered scoped STS for a delegate's
-//! OWN-namespace memory op (#716; the own-prefix sibling of
-//! [`super::inbox_sts`] and [`super::canonical_sts`]).
-//!
-//! ## Why this exists
-//! A delegate's two cross-actor data paths already run their credential
-//! SERVER-SIDE: `memory_canonical_get` relays the delegate's session bearer +
-//! cap to `/v1/cap/canonical-sts`, `memory_inbox_append` to `/v1/cap/inbox-sts`.
-//! The delegate's OWN-namespace put/get was the outlier: it relied on the
-//! CLIENT relaying `X-Aws-*` creds it minted through the AWS STS relay — which
-//! needs a `memory_role_arn` the sandbox never holds — so on VE every #594/#694
-//! checkpoint put reached the worker credential-less and died on the worker's
-//! DEFAULT S3 client (`no providers in chain provided credentials`, measured
-//! 2026-09-22 on VE prod: nothing a delegate remembered survived a re-create).
-//! On AWS the same request silently rode the worker's EC2 instance profile —
-//! the ambient-authority fallback arch.md §22e prohibits.
-//!
-//! The flow (A', same posture as the two siblings):
-//! 1. The delegate authenticates with its OWN session JWT.
-//! 2. It presents the `Store`/`Fetch` Memory cap the broker already minted for
-//!    it (`actor == session`, service = its own `knowledge:<ns>`), which the
-//!    broker only minted AFTER the on-chain `knowledge:<ns>` grant check (#642
-//!    — a delegate mints own-store caps with its actor session).
-//! 3. The broker re-verifies the cap (`broker_sig`, op, data class, freshness,
-//!    `actor_omni == session`, and the #369 delegation path when present),
-//!    mints an ACTOR-tagged OIDC JWT **internally** (never handed out), and
-//!    `AssumeRole`s the memory role with an inline session policy scoped to the
-//!    delegate's OWN objects for that ONE service — `bots/<actor>/memory/<service>.enc`
-//!    and `bots/<actor>/memory/<service>.objects/*`. A `Store` cap yields
-//!    PutObject and GetObject (the D-K5 compare-and-swap reads the current
-//!    object before the put); a `Fetch` cap yields GetObject only.
-//! 4. The worker receives ONLY those narrow creds and performs the op. On AWS
-//!    the ACTOR PrincipalTag intersects with the same prefix (layer 3); on VE
-//!    the provider-side per-actor scope-down does (no inline dialect, #510).
-//!
-//! Strictly narrower than what a delegate could already mint on AWS through
-//! the client relay (its whole `bots/<actor>/{memory,inbox}/*`), so this is no
-//! widening — it is the VE credential path that did not exist.
+//! Delegate-authenticated credential exchange scoped to one memory service.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -249,10 +212,6 @@ pub async fn mint_own_sts(
     );
     let oidc_jwt = state.oidc.sign_jwt(&claims)?;
 
-    // 5. AWS: narrow further to this ONE service's objects with an inline
-    //    session policy. VE refuses the AWS dialect (#510) — the per-actor
-    //    scope-down is rendered provider-side from the tag (the inbox-sts
-    //    posture; the single-service narrowing is the #512 intent follow-up).
     let policy_string;
     let policy = if state.sts.supports_inline_session_policy() {
         policy_string = own_session_policy(&norm(&p.actor_omni), &p.service.to_lowercase(), op);

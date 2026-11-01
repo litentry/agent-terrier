@@ -2,6 +2,7 @@
 import argparse
 from bisect import bisect_right
 import hashlib
+from functools import lru_cache
 import json
 from pathlib import Path
 import re
@@ -36,6 +37,25 @@ PRIVATE_DOMAIN_HASHES = {
     "635e1575548fc031c6be553c651882cf364b52764e63515d7638bfac5f9959e8",
     "f67484e69b9e281f48767db6908b30372b0bdd55c3ceb409432a1cb5cf5b8680",
 }
+PRIVATE_CONTEXT_HASHES = {
+    "5c73bf19bcfe22a91577de80a66a0a4670719cd6f8ae81310e57f5f8397c204a",
+    "8ee42f808ed4b3e17a7d0235decf1a0b6bb6e33de17320394777b54a7e7f2a0f",
+    "ab34384db36caada7d8bd1906631acbbc8132ee2c6e1a6b41842760a4e4c4f45",
+    "88a59458d262c0a19f32a1c6e687e4fce2eb6ce42e66c1d5ef0fc2358ff3b223",
+    "4e5fb449ed28292b3a92c3693f5228f9e72637d21305e7a38be5e67dfd291b3f",
+    "1993b42445bd7b2049fbdd2fb3c90b0180118fd3d2d54028de6187276f558ced",
+    "1cd4fcde991bdd7c1f7d012b4679098d6dae5bbb3a9002417471ffcec2f1753f",
+    "f101c4a4f9a8d048ce693d5151aea2901d9b242367dbd039b891952eeeea521c",
+    "902034a92f6546e2d692519bdfa9965115117b522e19dcb61e95c0f01da60c90",
+    "8b7eef3475f0f46f034835b4ba7bbb33a7d44638dcc27d8919f9d468e08842a6",
+    "1c76aeb8ae2dd638ee9ebefdea58c6b7d90e4fdd8214f6289404421bd701773f",
+}
+CONTEXT_WORD = re.compile(r"[A-Za-z][A-Za-z0-9_.-]*")
+
+@lru_cache(maxsize=32768)
+def context_digest(value):
+    return hashlib.sha256(value.encode()).hexdigest()
+
 HOSTNAME = re.compile(r"\b(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}\b", re.IGNORECASE)
 
 def load_exceptions(root):
@@ -108,6 +128,19 @@ def inspect_file(root, path):
             domain_lines.add(bisect_right(newline_offsets, match.start()) + 1)
     findings.extend({"path":str(relative), "rule":"private-deployment-domain", "line":line}
                     for line in sorted(domain_lines))
+    context_lines = set()
+    previous = None
+    for match in CONTEXT_WORD.finditer(contents):
+        word = match.group().rstrip(".").lower()
+        candidates = [(word, match.start())]
+        if previous:
+            candidates.append((previous[0] + " " + word, previous[1]))
+        for candidate, offset in candidates:
+            if context_digest(candidate) in PRIVATE_CONTEXT_HASHES:
+                context_lines.add(bisect_right(newline_offsets, offset) + 1)
+        previous = (word, match.start())
+    findings.extend({"path":str(relative), "rule":"private-deployment-context", "line":line}
+                    for line in sorted(context_lines))
     return findings
 
 def inspect_tree(root):

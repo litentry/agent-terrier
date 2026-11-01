@@ -385,7 +385,7 @@ impl WeixinGatewayConfig {
                  0x+64-hex — ON-CHAIN CONTACT AUDIT UNARMED at boot: bind/reject/revoke will NOT \
                  anchor on chain. It self-arms at the next parent-control 连接 ceremony (#502: \
                  the session's omni is recorded at connect + persisted); the env stamp \
-                 (WEIXIN_OPERATOR_OMNI + setup-broker-host.sh, #424 §3) remains the manual/CLI \
+                 (AGENTKEYS_WEIXIN_OPERATOR_OMNI) remains the explicit configuration \
                  fallback."
             );
         }
