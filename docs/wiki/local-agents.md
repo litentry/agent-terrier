@@ -2,7 +2,7 @@
 
 ## Prepare
 
-Use the [local services](./local-services.md) guide to deploy the development contracts, configure a preloaded [agent image](./local-agent-image.md), register an owner and log in. The supervisor must report healthy services and an explicitly configured Docker runtime. Start and qualify the [local models](./local-models.md) separately before expecting inference.
+Use the [local services](./local-services.md) guide to deploy the development contracts, configure a preloaded [agent image](./local-agent-image.md), register an owner and log in. The supervisor must report healthy services and an explicitly configured Docker runtime. Prepare the [local models](./local-models.md), select `--model-dir` when starting services, and run `terrier models probe` before expecting inference.
 
 The wrapper resolves the existing local owner and current deployment, then passes only protected file paths and local service coordinates to the native CLI. It does not place the session bearer or signing keys in arguments or environment values. The existing session validator checks the development marker, broker, owner, request key and expiry. The native client also checks the bearer identity and requires a local development profile and loopback HTTP service. HTTP proxies and redirects cannot redirect these requests.
 

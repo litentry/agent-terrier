@@ -28,6 +28,8 @@ Agent Terrier local development tools
 | --broker-port | no |  |  |
 | --runtime-image | no |  |  |
 | --docker-socket | no |  |  |
+| --model-dir | no |  | Own a local model runner using predownloaded models |
+| --model-binary | no |  | Installed Ollama executable; requires --model-dir |
 
 ## terrier test
 
@@ -81,6 +83,8 @@ Agent Terrier local development tools
 | --broker-port | no |  | Broker port for the first service startup |
 | --runtime-image | no |  | Enable the managed runtime with a reviewed preloaded local image |
 | --docker-socket | no |  | Explicit local Docker Unix socket; required with --runtime-image |
+| --model-dir | no |  | Own a local model runner using predownloaded models |
+| --model-binary | no |  | Installed Ollama executable; requires --model-dir |
 
 ## terrier cred
 

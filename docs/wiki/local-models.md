@@ -34,6 +34,22 @@ An existing local compatibility server can be selected with `--base-url`, `--cha
 
 Missing models fail before inference. Unsupported tools/streaming, invalid vectors and incomplete streams fail the capability check. A service error names its HTTP status and asks you to inspect model availability and runner memory. Smaller models or contexts can be tested explicitly, but their performance/capabilities are not covered by the pinned recipe until requalified.
 
+## Supervised startup after downloads
+
+Stop the preparation runner with Ctrl-C before starting the owned service group. Local, in the public checkout, after preparing contracts and service binaries:
+
+```sh
+./terrier stack start --model-dir "${OLLAMA_MODELS:?Set the prepared model directory}"
+./terrier models probe
+./terrier stack doctor
+./terrier stack restart
+./terrier stack stop
+```
+
+`services start` accepts the same `--model-dir` and optional `--model-binary` flags. The existing supervisor persists the absolute model directory and executable alongside its service configuration; later starts and restarts reuse them. Changing either requires stopping the services first. An existing model listener is never adopted or stopped. A missing executable, changed runner version, absent model or mismatched model digest refuses startup. Downloading or upgrading remains explicit.
+
+The runner gets an isolated private home under the local state directory, the canonical recipe's loopback endpoint and resource settings, cloud features disabled, and pruning disabled. Host model/proxy/credential environment values are not inherited. The model files remain in the selected prepared directory; stop preserves them. The supervisor owns the runner's process group, including inference children, and includes model identity/availability in `doctor`. Readiness checks inventory; `models probe` separately proves inference capabilities. Without `--model-dir`, the backend-only mode remains available and does not claim model readiness. The cloud-disable setting is not an operating-system network firewall; the explicit offline qualifier below adds that boundary.
+
 ## Optional memory configuration
 
 When memory is explicitly configured, its embedding settings default to the same recipe used by the CLI and relay: local endpoint, model and measured vector dimension. There is no host credential discovery or alternate hosted endpoint. With no memory configuration, the daemon leaves the optional engine unconfigured.
@@ -74,7 +90,7 @@ Sampled runner-process RSS peaked at 1,911,104 KiB (about 1.82 GiB). This is pro
 
 ## Authenticated relay
 
-The relay defaults to the same local endpoint and chat model as the recipe, binds to loopback, and requires a caller relay key. An upstream model key is optional. Configuration comes only from explicit `AGENTKEYS_GATE_*` inputs or flags; the relay does not discover host credential files. Without a relay keys file, inference requests return 401. Use `agentkeys-gate --help` for the explicit configuration fields; the [local services launcher](./local-services.md) supervises the relay; starting the model runner is an explicit preparation step.
+The relay defaults to the same local endpoint and chat model as the recipe, binds to loopback, and requires a caller relay key. An upstream model key is optional. Configuration comes only from explicit `AGENTKEYS_GATE_*` inputs or flags; the relay does not discover host credential files. Without a relay keys file, inference requests return 401. Use `agentkeys-gate --help` for the explicit configuration fields; the [local services launcher](./local-services.md) supervises the relay and optionally the prepared model runner through `--model-dir`.
 
 `--admin-token-file`, `--upstream-api-key-file` and `--keys-file` must name owner-only regular files owned by the current user, with no symlinks or hard links. Supplying both inline and file forms of an admin or upstream credential is an error. Invalid explicit configuration fails startup instead of selecting another endpoint. The chat model override never overwrites an embedding request's model.
 
@@ -114,3 +130,19 @@ python3 scripts/tests/qualify_local_models.py \
 The [2026-11-01 application report](../../e2e/fixtures/model-qualification/macos-arm64-application-2026-11-01.json) records the immutable image identity, compiler hash and exact model digests. On that Mac, runner startup took 0.250 seconds, the preliminary capability probe 3.060 seconds, and the application leg 24.456 seconds. Models and compiled dependencies were already cached; these are measured warm timings, not cold-install or CI targets. The agent container had networking disabled and the host application/model processes ran under the external-connection denial policy, with local control sockets allowed.
 
 This proves actual owner-to-agent chat and persisted conversation recall after runtime recreation. It does not qualify channel conversations, application tool authority, OpenViking-backed authorized memory, browser behavior or an independent clean install. The direct capability probe's addition tool and three-document vector lookup remain separate component checks. Failed lifecycle tests retain a private diagnostic directory; review it before sharing.
+
+## Supervised application qualification
+
+Local, on macOS in the prepared public checkout, with the preparation runner stopped:
+
+```sh
+python3 scripts/tests/qualify_local_models.py --supervised-application \
+  --models-dir "${OLLAMA_MODELS:?Set the prepared model directory}" \
+  --runtime-image "${AGENT_TERRIER_RUNTIME_IMAGE:?Set the reviewed preloaded complete image}" \
+  --docker-socket "${AGENT_TERRIER_DOCKER_SOCKET:?Set the local Docker Unix socket}" \
+  --solc "${AGENT_TERRIER_SOLC:?Set the installed compiler matching foundry.toml}"
+```
+
+This reuses the real application scenario under external IP connection denial. The service supervisor starts the runner, the actual CLI probes chat/streaming/tools/embeddings, and the application exercises protected creation, real chat, service/model restart, conversation recall and revocation. The test verifies that model configuration is reused and the model port is released on shutdown. It removes only its owned temporary application state and labeled containers/volumes; downloaded models remain. Full channel/tool-authority/browser journeys and independent clean installation remain separate gates.
+
+The [2026-11-01 supervised report](../../e2e/fixtures/model-qualification/macos-arm64-supervised-2026-11-01.json) records a 42.546-second run on macOS arm64 with the pinned models and complete local image already prepared. That is a measured warm qualification time, not a fresh-install budget.

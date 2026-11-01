@@ -13,10 +13,10 @@ import time
 import urllib.error
 import urllib.request
 
-from . import chain, contracts, deployment, local_state
+from . import chain, contracts, deployment, local_state, models
 
 SOCKET_NAME = "services.sock"
-START_TIMEOUT = 45
+START_TIMEOUT = models.RUNNER_START_TIMEOUT + 45
 CHILD_START_TIMEOUT = 10
 STOP_TIMEOUT = 10
 HEALTH_TIMEOUT = 1
@@ -33,7 +33,7 @@ SIGNER_BINARY = "agentkeys-local-signer"
 RELAY_BINARY = "agentkeys-gate"
 BUNDLER_BINARY = "agentkeys-bundler"
 BINARIES = (BROKER_BINARY, STORE_BINARY, SIGNER_BINARY, RELAY_BINARY, BUNDLER_BINARY, *WORKERS.values())
-MANIFEST_VERSION = 5
+MANIFEST_VERSION = 6
 
 
 def binary_directory(repository, configured=None):
@@ -58,13 +58,13 @@ def available_port():
         return listener.getsockname()[1]
 
 
-def prepare(repository, state, binaries, port, runtime_image=None, docker_socket=None):
+def prepare(repository, state, binaries, port, runtime_image=None, docker_socket=None, model_directory=None, model_binary=None):
     running_chain, profile, fingerprint = deployment.active_profile(repository, state)
     directory = local_state.private_directory(state / "services")
     manifest_path = directory / "manifest.json"
     if manifest_path.exists() or manifest_path.is_symlink():
         manifest = local_state.read_json(manifest_path)
-        if (not isinstance(manifest, dict) or manifest.get("version") not in (1, 2, 3, 4, MANIFEST_VERSION) or manifest.get("development_only") is not True
+        if (not isinstance(manifest, dict) or manifest.get("version") not in (1, 2, 3, 4, 5, MANIFEST_VERSION) or manifest.get("development_only") is not True
                 or manifest.get("profile_identity") != fingerprint
                 or type(manifest.get("initialized")) is not bool
                 or type(manifest.get("broker_port")) is not int
@@ -81,6 +81,7 @@ def prepare(repository, state, binaries, port, runtime_image=None, docker_socket
                     "broker_port":port if port is not None else available_port(), "initialized":False}
         local_state.write_json(manifest_path, manifest)
     runtime = runtime_configuration(manifest, runtime_image, docker_socket)
+    model_runner = models.configuration(manifest, model_directory, model_binary)
     broker_directory = local_state.private_directory(directory / "broker")
     for purpose in ("oidc", "session"):
         path = broker_directory / f"{purpose}.json"
@@ -129,6 +130,7 @@ def prepare(repository, state, binaries, port, runtime_image=None, docker_socket
             local_state.write_json(path, {})
     prepare_submitter(state, binaries, manifest, running_chain, profile)
     manifest["runtime"] = runtime
+    manifest["model_runner"] = model_runner
     manifest["version"] = MANIFEST_VERSION
     manifest["initialized"] = True
     local_state.write_json(manifest_path, manifest)
@@ -138,7 +140,7 @@ def prepare(repository, state, binaries, port, runtime_image=None, docker_socket
 def runtime_configuration(manifest, image=None, socket_path=None):
     if (image is None) != (socket_path is None):
         raise ValueError("Runtime image and Docker socket must be configured together")
-    if manifest.get("version") == MANIFEST_VERSION and manifest.get("initialized") and "runtime" not in manifest:
+    if manifest.get("version", 0) >= 5 and manifest.get("initialized") and "runtime" not in manifest:
         raise ValueError("Existing runtime configuration is missing; restore the service manifest")
     previous = manifest.get("runtime")
     if previous is not None:
@@ -208,7 +210,7 @@ def prepare_submitter(state, binaries, manifest, running_chain, profile):
         chain.rpc(running_chain["rpc_http"], "anvil_setBalance", [address, hex(funding)])
 
 
-def start(repository, state, configured=None, port=None, runtime_image=None, docker_socket=None):
+def start(repository, state, configured=None, port=None, runtime_image=None, docker_socket=None, model_directory=None, model_binary=None):
     current = status(state)
     if current["running"]:
         if current.get("service_schema") != MANIFEST_VERSION:
@@ -221,9 +223,13 @@ def start(repository, state, configured=None, port=None, runtime_image=None, doc
             requested = runtime_configuration({"runtime":current.get("runtime")}, runtime_image, docker_socket)
             if requested != current.get("runtime"):
                 raise ValueError("Stop local services before changing runtime configuration")
+        if model_directory is not None or model_binary is not None:
+            requested = models.configuration({"model_runner":current.get("model_runner")}, model_directory, model_binary)
+            if requested != current.get("model_runner"):
+                raise ValueError("Stop local services before changing model runner configuration")
         return current
     binaries = binary_directory(repository, configured)
-    prepare(repository, state, binaries, port, runtime_image, docker_socket)
+    prepare(repository, state, binaries, port, runtime_image, docker_socket, model_directory, model_binary)
     log = local_state.open_private(state / "services-supervisor.log", os.O_CREAT | os.O_WRONLY | os.O_APPEND)
     environment = contracts.tool_environment()
     environment["AGENT_TERRIER_STATE_DIR"] = str(state)
@@ -250,17 +256,24 @@ def start(repository, state, configured=None, port=None, runtime_image=None, doc
         raise
 
 
+def signal_child_group(process, selected_signal):
+    try:
+        os.killpg(process.pid, selected_signal)
+    except ProcessLookupError:
+        pass
+
+
 def stop_children(children):
     for process in children:
-        if process.poll() is None:
-            process.terminate()
+        signal_child_group(process, signal.SIGTERM)
     deadline = time.monotonic() + STOP_TIMEOUT
     for process in children:
         try:
             process.wait(timeout=max(0.01, deadline - time.monotonic()))
         except subprocess.TimeoutExpired:
-            process.kill()
+            signal_child_group(process, signal.SIGKILL)
             process.wait(timeout=2)
+        signal_child_group(process, signal.SIGKILL)
         if process.stdout:
             process.stdout.close()
 
@@ -284,7 +297,7 @@ def launch(binary, arguments, environment, log_path, children):
     log = local_state.open_private(log_path, os.O_CREAT | os.O_WRONLY | os.O_APPEND)
     try:
         process = subprocess.Popen([str(binary), *map(str, arguments)], env=environment,
-            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=log, text=True, umask=0o077)
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=log, text=True, start_new_session=True, umask=0o077)
     finally:
         os.close(log)
     children.append(process)
@@ -303,6 +316,28 @@ def launch(binary, arguments, environment, log_path, children):
     if host != "127.0.0.1" or not separator or not port.isdigit() or not 1 <= int(port) <= 65535:
         raise ValueError("Local service announced a non-loopback listener")
     return process, "http://" + address
+
+
+def launch_model(configuration, recipe, directory, children):
+    address = models.endpoint(recipe)
+    host, port = address.removeprefix("http://").split(":")
+    with socket.socket() as reservation:
+        reservation.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            reservation.bind((host, int(port)))
+        except OSError:
+            raise ValueError("Model recipe port is occupied; stop that runner explicitly before starting owned services") from None
+    environment = models.runner_environment(recipe, configuration["directory"],
+        directory / "model-home", address)
+    log = local_state.open_private(directory / "model-runner.log", os.O_CREAT | os.O_WRONLY | os.O_APPEND)
+    try:
+        process = subprocess.Popen([configuration["binary"], "serve"], env=environment,
+            stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True, umask=0o077)
+    finally:
+        os.close(log)
+    children.append(process)
+    models.wait_ready(process, recipe, address)
+    return process, address
 
 
 def healthy(endpoint, broker=False):
@@ -357,6 +392,9 @@ def serve(repository, state, configured):
                     raise ValueError("Local service listener differs from its reserved endpoint")
                 return launched
 
+            model_recipe = models.recipe(repository) if manifest["model_runner"] is not None else None
+            if model_recipe is not None:
+                components["model_runner"] = launch_model(manifest["model_runner"], model_recipe, directory, children)
             relay_directory = directory / "relay"
             components["model_relay"] = launch(binaries / RELAY_BINARY,
                 ["--listen", "127.0.0.1:0", "--require-local-upstream",
@@ -398,7 +436,8 @@ def serve(repository, state, configured):
                     contracts.tool_environment())
 
             def snapshot():
-                services = {name:{"url":endpoint, "healthy":process.poll() is None and healthy(endpoint, name in ("broker", "model_relay"))}
+                services = {name:{"url":endpoint, "healthy":process.poll() is None and (models.healthy(model_recipe, endpoint) if name == "model_runner"
+                                else healthy(endpoint, name in ("broker", "model_relay")))}
                             for name, (process, endpoint) in components.items()}
                 running_chain = chain.status(state)
                 profile = local_state.read_json(profile_path)
@@ -407,7 +446,7 @@ def serve(repository, state, configured):
                                    and profile.get("contract_set_version") ==
                                    (repository / "crates/agentkeys-chain/VERSION").read_text().strip())
                 return {"running":True, "service_schema":MANIFEST_VERSION, "ready":running_chain["running"] and profile_matches and all(item["healthy"] for item in services.values()),
-                        "development_only":True, "broker_port":manifest["broker_port"], "runtime":manifest["runtime"],
+                        "development_only":True, "broker_port":manifest["broker_port"], "runtime":manifest["runtime"], "model_runner":manifest["model_runner"],
                         "chain_running":running_chain["running"], "profile_matches":profile_matches, "services":services}
 
             if not snapshot()["ready"]:
@@ -459,7 +498,7 @@ def serve(repository, state, configured):
 def logs(state):
     paths = [state / "services-supervisor.log"]
     directory = state / "services"
-    paths.extend([directory / "broker.log", directory / "signer.log", directory / "model-relay.log", directory / "bundler.log",
+    paths.extend([directory / "broker.log", directory / "signer.log", directory / "model-relay.log", directory / "model-runner.log", directory / "bundler.log",
                   *[directory / f"{name}{suffix}.log" for name in WORKERS for suffix in ("", "-store")]])
     for path in paths:
         if path.exists() or path.is_symlink():

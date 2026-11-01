@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import shutil
 import sqlite3
+import socket
 import subprocess
 import sys
 import tempfile
@@ -14,11 +15,23 @@ from qualify_local_chain import REPOSITORY, available_port
 from qualify_local_login import request
 from qualify_local_owner import LocalOwnerFixture
 import qualify_local_services
-from terrier_local import chain, contracts, local_state
+from terrier_local import chain, contracts, local_state, models
 
 
 class LocalAgentQualification(LocalOwnerFixture):
-    services = qualify_local_services.LocalServicesQualification.services
+    def services(self, state, *arguments, **options):
+        result = qualify_local_services.LocalServicesQualification.services(self, state, *arguments, **options)
+        if os.environ.get("AGENT_TERRIER_TEST_MODEL_DIR") and options.get("success", True):
+            if arguments[0] == "stop":
+                address = models.endpoint(models.recipe(REPOSITORY)).removeprefix("http://")
+                host, port = address.split(":")
+                with socket.socket() as listener:
+                    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                    listener.bind((host, int(port)))
+            elif arguments[0] == "start":
+                self.assertTrue(result["services"]["model_runner"]["healthy"])
+                self.assertEqual(result["model_runner"]["directory"], os.environ["AGENT_TERRIER_TEST_MODEL_DIR"])
+        return result
 
     def test_create_archive_and_protected_session_denials(self):
         image = os.environ.get("AGENT_TERRIER_TEST_AGENT_IMAGE")
@@ -50,7 +63,15 @@ class LocalAgentQualification(LocalOwnerFixture):
         try:
             node = self.invoke(state, "start", "--port", str(available_port()))
             self.invoke(state, "deploy", "--offline")
-            running = self.services(state, "start", "--runtime-image", image, "--docker-socket", docker_socket)
+            model_options = []
+            if os.environ.get("AGENT_TERRIER_TEST_MODEL_DIR"):
+                model_options = ["--model-dir", os.environ["AGENT_TERRIER_TEST_MODEL_DIR"],
+                                 "--model-binary", os.environ["AGENT_TERRIER_TEST_MODEL_BINARY"]]
+            running = self.services(state, "start", "--runtime-image", image, "--docker-socket", docker_socket, *model_options)
+            if model_options:
+                capabilities = models.run(REPOSITORY, "probe")
+                self.assertEqual(capabilities["embedding_dimensions"], models.recipe(REPOSITORY)["embedding"]["dimension"])
+
             namespace = running["runtime"]["namespace"]
             broker = running["services"]["broker"]["url"]
             for name in ("alice", "bob"):
@@ -303,7 +324,8 @@ class LocalAgentQualification(LocalOwnerFixture):
                     "protected_owner_login": True, "signer_custody": True, "managed_docker": True,
                     "image_id": image_identity, "container_network": "none", "real_model_chat": True,
                     "restart_recall": True, "foreign_chat_denied": True, "denied_chat_usage_unchanged": True,
-                    "revocation": True, "retained_data": True,
+                    "revocation": True, "retained_data": True, "model_runner_supervised": bool(model_options),
+                    "model_runner_restart_verified": bool(model_options),
                     "not_qualified": ["channel conversation", "application tool authority", "browser", "independent clean install"]}))
             completed = True
         finally:

@@ -22,7 +22,7 @@ class LocalServicesQualification(LocalOwnerFixture):
         environment = contracts.tool_environment()
         environment["AGENT_TERRIER_STATE_DIR"] = str(state)
         result = subprocess.run([sys.executable, str(REPOSITORY / "terrier"), "services", *arguments],
-            env=environment, capture_output=True, text=True, timeout=90)
+            env=environment, capture_output=True, text=True, timeout=services.START_TIMEOUT + 15)
         if success:
             self.assertEqual(result.returncode, 0, result.stderr)
             return json.loads(result.stdout)
