@@ -122,8 +122,7 @@ pub async fn agent_bridge(
     let Some((base, route_headers)) = backend.instance_mgmt_endpoint(&target) else {
         return Err(aerr(
             StatusCode::CONFLICT,
-            "this backend has no broker-routable bridge path (ECS: the per-task ENI is not \
-             guaranteed reachable) — nothing to forward to",
+            "this runtime has no broker-routable bridge endpoint",
         ));
     };
     let bearer = crate::handlers::sandbox::sandbox_bridge_token(

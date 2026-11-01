@@ -48,6 +48,10 @@ The command validates the protected record and current session, then calls the e
 
 Receipt confirmation is not a live health check. A missing record cannot be reconstructed from its hash alone by this command. Records are written only by the protected local commands introduced with this feature; older operations do not have them. Archive cleanup is reconstructed from the independently verified chain revocation, so a broker restart does not prevent retrying relay disablement, context removal or runtime teardown. It uses the shared cleanup owner and never submits a second transaction. The retained-data choice comes from the protected record or the original archive result; an older record without that choice stays incomplete if the original result is also unavailable. Missing creation context can likewise leave creation incomplete. These cases exit nonzero; never resubmit solely to clear that status.
 
+## Console bridge routing
+
+Managed console requests use the broker's authenticated bridge route. A configured broker, owner session and delegate binding are required; missing information is an error even when a direct agent URL is available. The broker independently checks chain ownership and the selected live instance. Without an instance ID it resolves the delegate's live runtime. A broker refusal or redirect never retries directly, and bridge requests ignore ambient HTTP proxy configuration. These routing checks do not complete browser enrollment or full browser acceptance.
+
 ## Explicit qualification
 
 Local, from the public checkout, select an existing reviewed image and Docker socket, then run:
