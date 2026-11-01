@@ -39,7 +39,6 @@ fn bridge_state(broker: Option<String>, direct: Option<String>) -> SharedUiBridg
         None,
         None,
         None,
-        None,
     )
     .unwrap()
 }
@@ -481,4 +480,34 @@ async fn broker_registration_is_typed_owner_bound_and_confirmation_gated() {
     assert_eq!(result.chain, "master-registered");
     assert_eq!(result.register_account.as_deref(), Some(account.as_str()));
     assert!(replies.lock().await.is_empty());
+}
+
+#[tokio::test]
+async fn removed_pairing_registration_route_cannot_contact_the_broker() {
+    let requests = Arc::new(AtomicUsize::new(0));
+    let observed = requests.clone();
+    let broker = Endpoint::start(axum::Router::new().fallback(move || {
+        observed.fetch_add(1, Ordering::SeqCst);
+        async { Json(serde_json::json!({"ok":true})) }
+    }))
+    .await;
+    let state = bridge_state(Some(broker.url.clone()), None);
+    owner_session(&state).await;
+    let server = Endpoint::start(build_router(state, "http://localhost:3113")).await;
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    let health = client
+        .get(format!("{}/healthz", server.url))
+        .send()
+        .await
+        .unwrap();
+    assert!(health.status().is_success());
+    let before = requests.load(Ordering::SeqCst);
+    let response = client
+        .post(format!("{}/v1/agent/pairing/register", server.url))
+        .json(&serde_json::json!({"request_id":"synthetic-request"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::NOT_FOUND);
+    assert_eq!(requests.load(Ordering::SeqCst), before);
 }

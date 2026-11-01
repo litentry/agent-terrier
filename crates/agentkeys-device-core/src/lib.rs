@@ -1,21 +1,9 @@
-//! Shared device-key (K10) crypto for the §10.2 agent bootstrap (issue #144),
-//! extracted to a `no_std` crate so the daemon and the ESP32 firmware run the
-//! SAME secp256k1 / EIP-191 / keccak code byte-for-byte (issue #367 anti-drift).
+//! Shared no_std device-key crypto, re-exported by agentkeys-core::device_crypto.
+//! The optional C ABI uses the same secp256k1, EIP-191 and keccak implementation.
 //!
-//! `agentkeys-core::device_crypto` re-exports every function here (wrapping the
-//! fallible ones back into `anyhow::Result`), so the daemon / CLI / broker keep
-//! importing `agentkeys_core::device_crypto::*` unchanged. The firmware links the
-//! same crate as an xtensa staticlib (the `ffi` feature). There is ONE
-//! implementation of the bytes the broker's `ecrecover` verifies.
-//!
-//! The proof-of-possession preimage is the **deployed** one —
-//! `keccak256("agentkeys-agent-pop:" || device_key_hash_hex)` — matching
-//! `scripts/operator/chain/heima-agent-create.sh` and the on-chain `registerAgentDevice` inputs.
-//!
-//! What is NOT here (it is platform-specific, lives in the std layer):
-//! entropy acquisition (`OsRng` on the host, `esp_fill_random` on the device)
-//! and key persistence (a `0600` file on the host, encrypted NVS on the device).
-//! Everything cryptographic — every byte that has to match the broker — is here.
+//! Agent proof of possession uses keccak256("agentkeys-agent-pop:" || device_key_hash_hex),
+//! matching registerAgentDevice and the shared registry verifier. Platform adapters
+//! supply entropy and protected key persistence outside this pure crypto crate.
 
 #![no_std]
 // The pure-crypto build forbids unsafe outright; only the `ffi` build relaxes to

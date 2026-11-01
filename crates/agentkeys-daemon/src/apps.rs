@@ -2401,7 +2401,6 @@ mod handler_tests {
             None,
             None,
             None,
-            None,
         )
         .unwrap();
         *state.onboarding_session.write().await = Some(OnboardingSession {
@@ -2508,7 +2507,6 @@ mod handler_tests {
             Some(broker.clone()),
             None,
             84532,
-            None,
             None,
             None,
             None,
