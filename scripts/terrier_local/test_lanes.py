@@ -167,7 +167,8 @@ def run(repository, lane, components, online=False, report_path=None, plan=False
             if not any(existing[1:] == suite[1:] for existing in rust):
                 rust.append(suite)
     builds = affected_plan["rust_builds"] if affected_plan else []
-    selected = [name + "-compile" for name, _ in builds] + [name for name, *_ in rust] + [value for value in components if value in ("ui", "display", "dsh", "managed", "contracts", "provisioner")]
+    qualification_only = affected_plan["qualification_only"] if affected_plan else []
+    selected = [name + "-compile" for name, _ in builds] + [name + "-compile" if name in qualification_only else name for name, *_ in rust] + [value for value in components if value in ("ui", "display", "dsh", "managed", "contracts", "provisioner")]
     if lane in ("source", "core", "affected", "regression"):
         selected = [name for name, _ in SOURCE_COMMANDS] + selected
     qualification_scripts = list(dict.fromkeys(script for component in components for script in QUALIFICATIONS.get(component, ()))) if lane == "qualification" else []
@@ -224,7 +225,7 @@ def run(repository, lane, components, online=False, report_path=None, plan=False
         if target_name:
             command.append(target_name)
         build, log_path = check(name + "-build", "build", command + ["--no-run", "--message-format=json"])
-        if build["status"] != "passed":
+        if build["status"] != "passed" or name in qualification_only:
             continue
         executables = []
         for line in log_path.read_text(errors="replace").splitlines():

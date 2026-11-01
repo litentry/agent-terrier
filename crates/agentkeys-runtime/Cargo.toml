@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2021"
 license.workspace = true
 
+[package.metadata.terrier]
+qualification-only-tests = ["docker_local", "docker_managed"]
+
 [dependencies]
 agentkeys-core = { workspace = true }
 agentkeys-protocol = { workspace = true }

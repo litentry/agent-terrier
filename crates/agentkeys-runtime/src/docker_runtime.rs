@@ -10,7 +10,9 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+mod disk;
 mod managed;
+pub use disk::DiskPolicy;
 mod state_volume;
 use crate::managed_agent::{RuntimeBootstrap, BOOTSTRAP_VERSION};
 pub use managed::ManagedDockerConfig;

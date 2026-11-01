@@ -28,7 +28,7 @@ def stop(state):
             "chain": stopped_chain, "services": stopped_services}
 
 
-def start(repository, state, chain_port=None, bin_directory=None, broker_port=None, runtime_image=None, docker_socket=None, model_directory=None, model_binary=None, enable_website=None, web_port=None):
+def start(repository, state, chain_port=None, bin_directory=None, broker_port=None, runtime_image=None, docker_socket=None, model_directory=None, model_binary=None, enable_website=None, web_port=None, runtime_disk_policy=None):
     previous_chain = chain.status(state)
     previous_services = services.status(state)
     if previous_services.get("running") and not previous_chain.get("running"):
@@ -41,7 +41,7 @@ def start(repository, state, chain_port=None, bin_directory=None, broker_port=No
         stage = "deployment"
         deployment_result = deployment.deploy(repository, state, offline=True)
         stage = "services"
-        services.start(repository, state, bin_directory, broker_port, runtime_image, docker_socket, model_directory, model_binary, enable_website, web_port)
+        services.start(repository, state, bin_directory, broker_port, runtime_image, docker_socket, model_directory, model_binary, enable_website, web_port, runtime_disk_policy)
         result = status(state)
         result.update(success=result["ready"], action="start", deployment=deployment_result)
         return result
@@ -58,7 +58,7 @@ def start(repository, state, chain_port=None, bin_directory=None, broker_port=No
         return result
 
 
-def execute(repository, state, action, chain_port=None, bin_directory=None, broker_port=None, runtime_image=None, docker_socket=None, model_directory=None, model_binary=None, enable_website=None, web_port=None):
+def execute(repository, state, action, chain_port=None, bin_directory=None, broker_port=None, runtime_image=None, docker_socket=None, model_directory=None, model_binary=None, enable_website=None, web_port=None, runtime_disk_policy=None):
     if action in ("status", "doctor"):
         result = status(state)
         result.update(action=action, success=action == "status" or result["ready"])
@@ -68,7 +68,7 @@ def execute(repository, state, action, chain_port=None, bin_directory=None, brok
     if action == "restart":
         stop(state)
     if action in ("start", "restart"):
-        result = start(repository, state, chain_port, bin_directory, broker_port, runtime_image, docker_socket, model_directory, model_binary, enable_website, web_port)
+        result = start(repository, state, chain_port, bin_directory, broker_port, runtime_image, docker_socket, model_directory, model_binary, enable_website, web_port, runtime_disk_policy)
         result["action"] = action
         return result
     raise ValueError("Unknown stack operation")

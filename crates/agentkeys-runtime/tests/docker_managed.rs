@@ -6,7 +6,9 @@ use std::time::Duration;
 
 use agentkeys_core::chain_profile::ChainProfile;
 use agentkeys_protocol::{model_runtime, sandbox_env};
-use agentkeys_runtime::docker_runtime::{DockerConfig, DockerRuntime, ManagedDockerConfig};
+use agentkeys_runtime::docker_runtime::{
+    DiskPolicy, DockerConfig, DockerRuntime, ManagedDockerConfig,
+};
 use agentkeys_runtime::managed_agent::SERVICE_ENVIRONMENT;
 use agentkeys_runtime::{CreateEnvProvider, SandboxBackend, SandboxRuntime};
 use anyhow::{ensure, Context, Result};
@@ -147,6 +149,7 @@ async fn managed_docker_controller_transport_and_persistence() -> Result<()> {
     profile.rpc.http = origin.clone();
     let settings = ManagedDockerConfig {
         chain_profile: profile,
+        disk_policy: Default::default(),
         transport_script: std::fs::canonicalize(
             PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("../../packages/agent-terrier-runtime/service-transport.mjs"),
@@ -320,6 +323,145 @@ async fn managed_docker_controller_transport_and_persistence() -> Result<()> {
         .await
         .context("abandoned controller left container running")??;
         runtime.kill_for_device(&second_device).await?;
+        let disk_settings = ManagedDockerConfig {
+            disk_policy: DiskPolicy {
+                state_limit_mib: 4,
+                min_free_mib: 1,
+                check_interval_seconds: 1,
+            },
+            ..settings.clone()
+        };
+        let disk_limited =
+            DockerRuntime::connect_managed(config.clone(), disk_settings.clone()).await?;
+        let disk_agent = disk_limited
+            .ensure_for_delegate_with_envs(
+                &second_device,
+                &second_actor,
+                &[],
+                credentials(&second_actor),
+            )
+            .await?;
+        ensure!(
+            chat(
+                &disk_limited,
+                &disk_agent.sandbox_id,
+                &bridge_token,
+                "within disk allowance"
+            )
+            .await?
+            .status()
+            .is_success(),
+            "disk policy positive control failed"
+        );
+        let disk_marker = format!(
+            "{}/disk-limit-fixture",
+            agentkeys_protocol::runtime_layout::STATE_DIRECTORY
+        );
+        engine
+            .run(&[
+                "exec",
+                &disk_agent.sandbox_id,
+                "dd",
+                "if=/dev/zero",
+                &format!("of={disk_marker}"),
+                "bs=1048576",
+                "count=8",
+            ])
+            .await?;
+        tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                if engine.inspect(&disk_agent.sandbox_id).await?["State"]["Running"] == false {
+                    return Ok::<(), anyhow::Error>(());
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .context("over-budget agent remained running")??;
+        ensure!(
+            engine.inspect(&restored.sandbox_id).await?["State"]["Running"] == true,
+            "disk policy stopped another actor"
+        );
+        disk_limited.kill_for_device(&second_device).await?;
+        let model_calls = fixture.requests.lock().unwrap().len();
+        let denied = disk_limited
+            .ensure_for_delegate_with_envs(
+                &second_device,
+                &second_actor,
+                &[],
+                credentials(&second_actor),
+            )
+            .await;
+        ensure!(
+            denied
+                .err()
+                .context("oversized state was accepted")?
+                .chain()
+                .any(|cause| cause
+                    .to_string()
+                    .contains("development state allowance exceeded")),
+            "oversized saved state was not refused before startup"
+        );
+        ensure!(
+            fixture.requests.lock().unwrap().len() == model_calls,
+            "refused disk startup reached the model"
+        );
+        let disk_recovery =
+            DockerRuntime::connect_managed(config.clone(), settings.clone()).await?;
+        let recovered = disk_recovery
+            .ensure_for_delegate_with_envs(
+                &second_device,
+                &second_actor,
+                &[],
+                credentials(&second_actor),
+            )
+            .await?;
+        let bytes = engine
+            .run(&[
+                "exec",
+                &recovered.sandbox_id,
+                "stat",
+                "-c",
+                "%s",
+                &disk_marker,
+            ])
+            .await?;
+        ensure!(
+            std::str::from_utf8(&bytes)?.trim() == "8388608",
+            "disk shutdown discarded saved bytes"
+        );
+        disk_recovery.kill_for_device(&second_device).await?;
+        let low_disk = DockerRuntime::connect_managed(
+            config.clone(),
+            ManagedDockerConfig {
+                disk_policy: DiskPolicy {
+                    min_free_mib: u32::MAX,
+                    ..settings.disk_policy.clone()
+                },
+                ..settings.clone()
+            },
+        )
+        .await?;
+        let refused = low_disk
+            .ensure_for_delegate_with_envs(
+                &second_device,
+                &second_actor,
+                &[],
+                credentials(&second_actor),
+            )
+            .await;
+        ensure!(
+            refused
+                .err()
+                .context("low-disk startup was accepted")?
+                .chain()
+                .any(|cause| cause.to_string().contains("insufficient free space")),
+            "insufficient disk headroom was not specifically refused"
+        );
+        ensure!(
+            fixture.requests.lock().unwrap().len() == model_calls,
+            "low-disk refusal reached the model"
+        );
         let failure_source = tempfile::tempdir()?;
         let failure_script = failure_source.path().join("fail.mjs");
         std::fs::write(&failure_script, "process.exit(23);\n")?;

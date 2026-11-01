@@ -2,6 +2,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+import json
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -35,6 +36,25 @@ class LocalServicesTests(unittest.TestCase):
             local_state.write_json(client_config, {"credsStore":"must-not-use"})
             with self.assertRaisesRegex(ValueError, "isolated configuration"):
                 services.runtime_environment(directory, directory, configured)
+
+    def test_disk_policy_is_explicit_persisted_and_not_taken_from_host_environment(self):
+        configured = services.runtime_configuration({}, "fixture-image", "/tmp/test.sock")
+        policy = '{"state_limit_mib":8,"min_free_mib":2,"check_interval_seconds":1}'
+        updated = services.runtime_configuration({"runtime":configured}, disk_policy=policy)
+        self.assertEqual(updated["disk_policy"], json.loads(policy))
+        self.assertEqual(services.runtime_configuration({"runtime":updated}), updated)
+        changed_image = services.runtime_configuration({"runtime":updated}, "updated-image", "/tmp/test.sock")
+        self.assertEqual(changed_image["disk_policy"], updated["disk_policy"])
+        self.assertNotIn("disk_policy", configured)
+        with self.assertRaisesRegex(ValueError, "Configure a local runtime"):
+            services.runtime_configuration({}, disk_policy=policy)
+        for malformed in ("null", "[]", "broken", "x" * 4097):
+            with self.assertRaises(ValueError):
+                services.runtime_configuration({"runtime":configured}, disk_policy=malformed)
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            self.assertEqual(json.loads(services.runtime_environment(directory, directory, updated)["AGENT_TERRIER_RUNTIME_DISK_POLICY"]), updated["disk_policy"])
+            self.assertNotIn("AGENT_TERRIER_RUNTIME_DISK_POLICY", services.runtime_environment(directory, directory, configured))
 
     def test_missing_existing_keys_and_changed_deployment_never_generate_replacements(self):
         with tempfile.TemporaryDirectory() as temporary:

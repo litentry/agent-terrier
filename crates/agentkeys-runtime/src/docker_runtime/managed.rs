@@ -7,10 +7,12 @@ use tokio::process::Child;
 pub struct ManagedDockerConfig {
     pub chain_profile: agentkeys_core::chain_profile::ChainProfile,
     pub transport_script: PathBuf,
+    pub disk_policy: DiskPolicy,
 }
 
 impl ManagedDockerConfig {
     pub fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Result<Self> {
+        let disk_policy = DiskPolicy::from_json(lookup("AGENT_TERRIER_RUNTIME_DISK_POLICY"))?;
         let transport_script = lookup("AGENT_TERRIER_TRANSPORT_SCRIPT")
             .context("managed Docker runtime requires AGENT_TERRIER_TRANSPORT_SCRIPT")?;
         let (mut chain_profile, _) = agentkeys_core::chain_profile::ChainProfile::resolve(
@@ -26,6 +28,7 @@ impl ManagedDockerConfig {
         let configuration = Self {
             chain_profile,
             transport_script: PathBuf::from(transport_script),
+            disk_policy,
         };
         configuration.validate()?;
         Ok(configuration)
@@ -33,6 +36,7 @@ impl ManagedDockerConfig {
 
     pub fn validate(&self) -> Result<()> {
         self.chain_profile.require_local_development(true, None)?;
+        self.disk_policy.validate()?;
         ensure!(
             self.transport_script.is_absolute()
                 && std::fs::canonicalize(&self.transport_script)? == self.transport_script
@@ -145,6 +149,7 @@ impl LocalDockerCommand {
                 }
                 tokio::time::sleep(Duration::from_millis(25)).await;
             }
+            self.check_disk(id, &settings.disk_policy).await?;
             let mut command = tokio::process::Command::new("node");
             command.env_clear();
             for name in ["PATH", "HOME", "TMPDIR", "DOCKER_CONFIG"] {
@@ -255,10 +260,24 @@ impl LocalDockerCommand {
                 .await
                 .context("managed runtime startup timed out")??;
         let (shutdown, stopping) = tokio::sync::oneshot::channel();
+        let disk_command = LocalDockerCommand {
+            socket: self.socket.clone(),
+        };
+        let disk_container = id.to_owned();
+        let disk_policy = settings.disk_policy.clone();
         let task = tokio::spawn(async move {
             let mut runtime_sink = tokio::io::sink();
             let mut transport_sink = tokio::io::sink();
             tokio::select! {
+                reason = disk_command.monitor_disk(&disk_container, &disk_policy) => {
+                    if let Err(reason) = reason {
+                        eprintln!("Local agent {disk_container} disk policy requested shutdown: {reason}");
+                    }
+                    let stopped = disk_command.execute(&["container".into(), "stop".into(), "--time=2".into(), disk_container], None).await;
+                    if stopped.is_err() {
+                        eprintln!("Development disk policy could not confirm container shutdown; inspect the local Docker engine.");
+                    }
+                },
                 _ = stopping => {},
                 _ = attached.wait() => {},
                 _ = transport.wait() => {},

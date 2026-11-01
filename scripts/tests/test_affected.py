@@ -14,7 +14,7 @@ def workspace(repository):
                                ("agentkeys-cli", ["shared"]), ("independent", [])):
         packages.append({"id": name, "name": name, "manifest_path": str(repository / "crates" / name / "Cargo.toml"),
                          "dependencies": [{"name": dependency, "path": str(repository / "crates" / dependency)} for dependency in dependencies],
-                         "targets": [{"kind": ["lib"]}]})
+                         "metadata": None, "targets": [{"kind": ["lib"]}]})
     return {"workspace_members": [package["id"] for package in packages], "packages": packages}
 
 
@@ -83,6 +83,24 @@ class AffectedTests(unittest.TestCase):
         metadata["packages"][0]["targets"].append({"name": "http_boundary", "kind": ["test"]})
         result = affected.select(root, ["crates/primitive/tests/http_boundary.rs"], metadata)
         self.assertIn(("primitive-http_boundary", "primitive", "--test", "http_boundary", ""), result["rust_suites"])
+
+    def test_qualification_only_targets_are_compiled_without_claiming_execution(self):
+        root = Path("/synthetic/source")
+        metadata = workspace(root)
+        package = metadata["packages"][0]
+        package["targets"].extend([{"name":"live_engine", "kind":["test"]}, {"name":"ordinary", "kind":["test"]}])
+        package["metadata"] = {"terrier":{"qualification-only-tests":["live_engine"]}}
+        original = affected.select
+        with patch.object(affected, "select", side_effect=lambda repository, paths: original(repository, paths, metadata)):
+            plan, status = test_lanes.run(root, "affected", [], plan=True, changed_files=["crates/primitive/tests/live_engine.rs"])
+        self.assertEqual(status, 0)
+        self.assertIn("primitive-live_engine-compile", plan["selected"])
+        self.assertNotIn("primitive-live_engine", plan["selected"])
+        self.assertIn("primitive-ordinary", plan["selected"])
+        self.assertEqual(plan["affected"]["qualification_only"], ["primitive-live_engine"])
+        package["metadata"]["terrier"]["qualification-only-tests"] = ["missing"]
+        with self.assertRaisesRegex(ValueError, "invalid qualification-only"):
+            original(root, ["crates/primitive/tests/live_engine.rs"], metadata)
 
     def test_curated_integration_targets_do_not_run_twice(self):
         root = Path("/synthetic/source")

@@ -100,7 +100,7 @@ def select(repository, changed_files, metadata=None):
         if expanded == affected_packages:
             break
         affected_packages = expanded
-    suites, builds = [], []
+    suites, builds, qualification_only = [], [], []
     for name in sorted(affected_packages):
         component = PACKAGE_COMPONENTS.get(name)
         if component:
@@ -111,10 +111,17 @@ def select(repository, changed_files, metadata=None):
             builds.append((name, "classify-dataset"))
         else:
             raise ValueError(f"Package {name} needs an explicit test target mapping")
+        deferred = (packages[name].get("metadata") or {}).get("terrier", {}).get("qualification-only-tests", [])
+        target_names = {target["name"] for target in packages[name]["targets"] if "test" in target["kind"]}
+        if not isinstance(deferred, list) or any(not isinstance(target, str) or target not in target_names for target in deferred):
+            raise ValueError(f"Package {name} has invalid qualification-only test metadata")
         for target in packages[name]["targets"]:
             if "test" in target["kind"] and any(path.startswith(directories[name] + "/tests/") for path in changed_files):
-                suites.append((name + "-" + target["name"], name, "--test", target["name"], ""))
+                suite_name = name + "-" + target["name"]
+                suites.append((suite_name, name, "--test", target["name"], ""))
+                if target["name"] in deferred:
+                    qualification_only.append(suite_name)
         if name == "agentkeys-web-core":
             components.update(("ui", "display"))
     return {"components": sorted(components), "packages": sorted(affected_packages),
-            "rust_suites": suites, "rust_builds": builds, "reasons": reasons}
+            "rust_suites": suites, "rust_builds": builds, "qualification_only": qualification_only, "reasons": reasons}
