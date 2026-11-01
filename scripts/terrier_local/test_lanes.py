@@ -38,6 +38,17 @@ RUST_COMPONENTS = {
             ("cli-agent-ceremony", "agentkeys-cli", "--test", "agent_admin_mock", ""),
             ("cli-agent-transport", "agentkeys-cli", "--test", "local_agent_transport", "")],
 }
+QUALIFICATIONS = {
+    "storage": (
+        "qualify_local_storage.py", "qualify_local_credentials.py", "qualify_local_config.py",
+        "qualify_local_memory.py", "qualify_local_channel.py", "qualify_local_broker_storage.py",
+        "qualify_local_credential_cli.py",
+    ),
+}
+QUALIFICATION_RUST = {
+    "storage": [*RUST_COMPONENTS["storage"],
+                ("worker-authority", "agentkeys-worker-creds", "--test", "local_storage", "")],
+}
 SOURCE_COMMANDS = (
     ("privacy", ["python3", "scripts/check-public.py"]),
     ("python", ["python3", "-m", "unittest", "discover", "-s", "scripts/tests"]),
@@ -87,7 +98,22 @@ def rust_counts(result, output):
     return result
 
 
+def python_counts(result, output):
+    totals = re.findall(r"^Ran (\d+) tests? in ", output, re.MULTILINE)
+    skipped = re.findall(r"^OK \(skipped=(\d+)\)", output, re.MULTILINE)
+    total = sum(map(int, totals))
+    ignored = sum(map(int, skipped))
+    result["tests"] = {"passed": total - ignored if result["status"] == "passed" else 0, "ignored": ignored}
+    if result["status"] == "passed" and (total - ignored <= 0 or not re.search(r"^OK(?:$| \()", output, re.MULTILINE)):
+        result["status"] = "empty-or-failed-suite"
+    return result
+
+
 def selection(lane, components):
+    if lane == "qualification":
+        if not components or any(component not in QUALIFICATIONS for component in components):
+            raise ValueError("qualification requires a supported component: " + ", ".join(QUALIFICATIONS))
+        return list(dict.fromkeys(suite for component in components for suite in QUALIFICATION_RUST[component]))
     if lane == "source" and components:
         raise ValueError("source lane has no component selection; use focused or core")
     if lane == "focused" and not components:
@@ -104,8 +130,10 @@ def run(repository, lane, components, online=False, report_path=None, plan=False
     components = list(dict.fromkeys(components))
     rust = selection(lane, components)
     selected = [name for name, *_ in rust] + [value for value in components if value in ("ui", "dsh", "managed")]
-    if lane != "focused":
+    if lane in ("source", "core"):
         selected = [name for name, _ in SOURCE_COMMANDS] + selected
+    qualification_scripts = list(dict.fromkeys(script for component in components for script in QUALIFICATIONS.get(component, ()))) if lane == "qualification" else []
+    selected += [Path(script).stem for script in qualification_scripts]
     if plan:
         return {"lane": lane, "selected": selected, "downloads": online}, 0
     if report_path:
@@ -121,11 +149,13 @@ def run(repository, lane, components, online=False, report_path=None, plan=False
     diagnostics = Path(tempfile.mkdtemp(prefix="terrier-tests-"))
     checks = []
 
-    def check(name, phase, command, directory=repository, rust_test=False, extra_environment=None):
+    def check(name, phase, command, directory=repository, rust_test=False, extra_environment=None, python_test=False):
         log_path = diagnostics / f"{len(checks):02d}-{name}.log"
         result = execute(command, directory, log_path, extra_environment=extra_environment)
         if rust_test:
             rust_counts(result, log_path.read_text(errors="replace"))
+        if python_test:
+            python_counts(result, log_path.read_text(errors="replace"))
         result.update(name=name, phase=phase, log=log_path.name)
         checks.append(result)
         print(f"{name}: {result['status']} ({result['seconds']:.3f}s)", file=sys.stderr)
@@ -135,9 +165,9 @@ def run(repository, lane, components, online=False, report_path=None, plan=False
         setup, _ = check("dependencies", "setup", ["cargo", "fetch", "--locked"])
         if setup["status"] != "passed":
             rust = []
-    if lane != "focused":
+    if lane in ("source", "core"):
         for name, command in SOURCE_COMMANDS:
-            check(name, "execution", command)
+            check(name, "execution", command, python_test=name == "python")
     for name, package, target, target_name, test_filter in rust:
         command = ["cargo", "test", "--offline", "--locked", "-p", package, target]
         if target_name:
@@ -191,15 +221,19 @@ def run(repository, lane, components, online=False, report_path=None, plan=False
             if component == "dsh":
                 check(component + "-build", "build", ["npm", "run", "build"], directory)
             check(component, "execution", ["npm", "test"], directory)
+    qualification_environment = {name: os.environ[name] for name in ("AGENT_TERRIER_CACHE_DIR", "AGENT_TERRIER_SOLC", "AGENT_TERRIER_FORGE") if name in os.environ}
+    for script in qualification_scripts:
+        check(Path(script).stem, "execution", [sys.executable, "scripts/tests/" + script],
+              extra_environment=qualification_environment, python_test=True)
     elapsed = round(time.monotonic() - started, 3)
-    target = 30 if lane == "focused" else 180
+    target = None if lane == "qualification" else (30 if lane == "focused" else 180)
     success = bool(checks) and all(check["status"] == "passed" for check in checks)
     revision = os.environ.get("GITHUB_SHA", "") if os.environ.get("GITHUB_ACTIONS") == "true" else ""
     report = {
         "schema_version": 1, "lane": lane, "selected": selected, "success": success,
         "revision": revision if re.fullmatch(r"[0-9a-f]{40}", revision) else None,
         "runner": {"system": platform.system(), "architecture": platform.machine()},
-        "seconds": elapsed, "warm_target_seconds": target, "target_exceeded": elapsed > target,
+        "seconds": elapsed, "warm_target_seconds": target, "target_exceeded": elapsed > target if target is not None else None,
         "phase_seconds": {phase: round(sum(check["seconds"] for check in checks if check["phase"] == phase), 3)
                           for phase in ("setup", "build", "execution")},
         "queue_seconds": None, "cleanup_seconds": None,

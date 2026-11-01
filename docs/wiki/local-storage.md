@@ -1,132 +1,93 @@
-The local object service is a qualified storage component. The credential, configuration, memory and channel workers use it for encrypted data operations. The CLI credential journey now includes actual owner login and broker capability minting. Complete local application integration remains open in [#5](https://github.com/litentry/agent-terrier/issues/5).
+The local storage implementation serves credentials, configuration, memory and channel messages through independently verified capabilities. The real broker-login/credential journey and each worker's real-contract qualification have separate evidence. Browser enrollment, client-encrypted delegated credential decryption and full application acceptance remain release work; they are not implied by storage qualification.
 
-The browser data library and shared native client now call storage workers directly with signed capabilities. No cloud credential exchange or cloud headers are required. Browser configuration and credential encryption still uses the explicitly configured key-derivation signer; the complete local signer and broker-session setup remains in progress.
+## Run locally
 
-The broker executable now defaults to loopback and starts without cloud roles or a credential startup probe. It uses the existing session and capability authentication; local mode does not grant anonymous data access. Explicit external provider selection is rejected by this binary. Run `cargo test -p agentkeys-broker-server --test local_boot` locally from the public checkout to verify real-process readiness and unauthenticated rejection. This startup check is separate from real-chain login and complete application acceptance.
+Prepare the public binaries and contracts using [local services](./local-services.md), then use the [local manager](./local-manager.md) to start the backend. It creates protected keys, starts four workers and gives each data class its own persistent object database. Every listener is loopback-only. State lives outside the checkout; preserve its keys with its databases.
 
-## Client commands
-
-`cred fetch`, `cred store` and `memory inbox-push` use `--device-key-file` (or `AGENTKEYS_DEVICE_KEY_FILE`) for the actor's existing registered key. They derive its hash instead of accepting a manually supplied hash. Missing key files fail without creating replacement identities. `memory canonical-get` accepts either that key file or an explicit `--delegation-file`, never both. It signs the canonical `knowledge:<namespace>` service using the shared service-name builder.
-
-These commands need explicit broker and worker URLs plus an authorized session. Storage role and region flags have been removed. Headless owner login is available; automatic service startup and delegate-session orchestration remain unfinished.
-
-Daemon UI mode requires an explicitly configured existing `--device-key-file` for storage and channel capabilities. It loads the protected key at startup; worker calls do not search for a default key file. Channel capability caches are separate for each signing key. Supply worker endpoints through `--memory-url`, `--config-url` and `--cred-url`; storage roles, region settings and cloud credential exchanges are no longer used.
-
-Daemon configuration and credential writes require an explicit key-derivation signer and send client-encrypted v3 envelopes. A signer refusal prevents the write, and a missing or negative worker receipt is an error. These UI credentials currently support owner-side encryption only; delegated v3 decryption and complete local signer/session setup remain unfinished. The CLI's development credential commands use the separately qualified worker-encrypted path; changing between envelope modes is not an implicit fallback.
-
-## Ownership and boundaries
-
-`agentkeys-local-store` runs a small authenticated HTTP service with a separate SQLite database for each data class. The database records its application, schema and data-class identity; an unrelated database or a database belonging to another class is rejected. Database directories must be private, and files must be owned by the current user with no symbolic or hard links. Host administrators remain trusted in this local development environment.
-
-Every object request carries a broker signature and a fresh actor proof. Before reading or changing objects, the service independently checks the current chain device binding, grant and epoch using `agentkeys-core::capability_verify`. `agentkeys-protocol::object_store` owns the request schema and key/action restrictions. Neither a caller-supplied key nor a broker signature alone grants access to another actor or data class.
-
-Objects are opaque bytes. Product workers remain responsible for envelope encryption; the storage component does not turn arbitrary input into ciphertext. It never receives SQL or filesystem paths from callers. Object sizes and list pages are bounded; updates support an atomic expected-revision condition. Inbox append is create-only, and channel publish does not grant subscribe or delete permission.
-
-## Backend choice
-
-The experiment uses the already-pinned `rusqlite` dependency with bundled SQLite, avoiding another local infrastructure service. SQLite documents local application storage and application-specific servers as [intended uses](https://sqlite.org/whentouse.html). Its deliverable library is [public domain](https://sqlite.org/copyright.html); the pinned `rusqlite` 0.31.0 package declares MIT in its [package manifest](https://docs.rs/crate/rusqlite/0.31.0/source/Cargo.toml.orig). Keep dependency updates and license inventory in the public repository. This qualification establishes local behavior, not production scale or cloud-policy equivalence.
-
-## Fast checks
-
-Run locally from the public repository root:
+Local, in the prepared public checkout and the same state directory:
 
 ```sh
-cargo test -p agentkeys-local-store
-cargo test -p agentkeys-protocol object_store
-cargo test -p agentkeys-core object_store
-cargo test -p agentkeys-worker-creds --test local_storage
+./terrier stack start
+./terrier owner register --name developer
+./terrier owner login --name developer \
+  --broker-url "$(./terrier services status | jq -r .services.broker.url)"
+printf %s 'local-development-example' | ./terrier cred store example --name developer --secret-stdin
+./terrier cred fetch example --name developer
 ```
 
-These tests use controlled chain responses and real signatures. They pair valid access with wrong-actor, wrong-class, wrong-operation, missing/forged proof, expiry, binding, scope, epoch and revocation denials. Denials assert the exact error, no object-service storage operation and unchanged stored data. Additional tests cover concurrent updates, append-only behavior, reopen persistence and unsafe file rejection.
+The fetch command deliberately prints the decrypted credential. The protected session file and actor request key are loaded by the native client; no bearer or key value is passed in command arguments. Invalid sessions, missing original keys and unsafe file permissions fail. [Local services](./local-services.md) describes restart, configuration and recovery; [local owner](./local-owner.md) describes development-only signing.
 
-## Credential worker integration
+## Canonical owners
 
-The credential worker invokes `agentkeys-core::object_store::ObjectClient` through the `ObjectStore` interface. The HTTP adapter sends the signed capability on every request, has no ambient cloud credentials, rejects redirects and bounds responses. It verifies returned content revisions and validates list scope, ordering and cursor progress. The worker independently verifies authority before contacting storage; the object service repeats verification before using its database.
+| Responsibility | Source owner |
+|---|---|
+| Capability fields, object request schema, allowed key/action combinations | `agentkeys-protocol::capability` and `agentkeys-protocol::object_store` |
+| Pure signature, device-binding, grant and epoch verification | `agentkeys-core::capability_verify` |
+| Native bounded HTTP object client | `agentkeys-core::object_store::ObjectClient` |
+| SQLite identity, persistence and atomic object operations | `agentkeys-local-store` |
+| Worker startup, protected development keys and shared verification adapter | `agentkeys-worker-creds` shared modules |
+| Data-class behavior and encryption | Credential, configuration, memory and channel worker crates |
+| Native and browser product calls | `agentkeys-backend-client` and `agentkeys-web-core` |
+| Local process lifecycle | `scripts/terrier_local/services.py` |
 
-The worker binary requires `--development`, a generated `--profile`, a broker public-key file and an explicit loopback `--storage-url`. For plaintext development writes, pass `--development-kek-file`; without it, writes must contain a client-encrypted v3 envelope. That encryption key must be freshly generated, 32 bytes encoded as hex, and stored in an owner-only file. It is an explicitly development-only software encryption key. Symlinks, hard links and readable-by-others key files are refused by the shared protected-file reader. The binary listens only on loopback. Run `cargo run -p agentkeys-worker-creds -- --help` locally from the public checkout for its flags. Automatic creation and supervision of these component inputs remains part of the local lifecycle work.
+The broker, worker and object service independently enforce authority even though they share types and pure verification helpers. A valid broker signature alone is insufficient. Storage also requires a fresh actor proof, current chain binding, permitted service and matching epoch. It confines objects to the signed actor, service, operation and data class before reading or changing bytes. Host administrators remain trusted in this development environment.
 
-The encrypted v2 development flow and client-encrypted v3 envelope flow keep their existing wire format. The response field `s3_key` is a compatibility name for an object key; the credential worker no longer uses S3. Owner-only listing follows pagination, and teardown propagates storage failures rather than reporting partial deletion as success. The existing audit emitter remains in use; audit-service qualification is separate from storage qualification.
+Each SQLite database records its application, schema and data class. Unrelated databases, wrong-class databases, links, unsafe ownership and permissive file modes are rejected. Callers never supply SQL or filesystem paths. Object size and list pages are bounded; conditional updates use an atomic expected revision. Workers own encryption; the object service stores opaque bytes.
 
-The worker integration test runs the actual worker router, cryptography, HTTP adapter and SQLite service with controlled chain responses. It proves encrypted store/read, delegated fetch, owner listing/deletion, rejection before storage access, independent storage denial and deletion-error reporting. It does not establish real broker enrollment or a complete product journey. Other workers still use their previous storage path until migrated.
+## Data-class behavior
 
-After building the public CLI and preparing contract dependencies, run `python3 scripts/tests/qualify_local_credentials.py` locally from the public checkout for the explicit real-contract credential qualification. It uses the actual credential-worker executable and newly enrolled owner/delegate request keys, verifies encrypted storage and readback, restarts the worker, and applies real scope and device revocations. Owner access remains available after the delegate is revoked. The issuer remains a deliberately untrusted fixture; this does not claim real broker login or mint acceptance.
+| Class | Authorized behavior | Additional restrictions |
+|---|---|---|
+| Credentials | Owner store/list/delete; granted delegate fetch | Delegated writes fail; deletion failures are reported |
+| Configuration | Owner put/get/delete | A delegate grant never permits access; stale revisions return `409 stale_base` |
+| Memory | Actor-owned memory, distinct canonical owner-memory read, append-only proposals | Canonical reads cannot address checkpoints; proposals cannot overwrite; owner inbox deletion cannot delete ordinary memory |
+| Channel | Signed-feed publish or subscribe; owner feed teardown | Publish cannot read/overwrite/delete; subscribe cannot publish; teardown is limited to one feed and its attachments |
 
-## Explicit real-chain qualification
+Workers start with an explicit local profile, broker public key and loopback storage URL. The service launcher supplies these through the same public binary options. `--development-kek-file` names a fresh protected 32-byte hex key. Credential and configuration workers can instead accept client-encrypted v3 envelopes without a worker key. Memory and channel workers require their separate development key. Missing original keys are never silently regenerated over existing state.
 
-### Broker login and credential journey
+The credential/configuration v3 path keeps encryption in the client and requires its explicit key-derivation signer. Daemon/browser owner encryption is separate from the CLI's qualified worker-encrypted development path. Delegated v3 decryption and interactive browser signer enrollment remain unfinished. The memory worker encrypts its development records; client-encrypted v3 memory is not implemented. Existing envelopes are never silently re-keyed or switched between modes.
 
-Run locally from the public checkout after preparing the contract dependencies described in [contract development](./contract-development.md):
+The retained wire field `s3_key` is a compatibility name for an object key; these workers do not use cloud storage credentials. Shared native/browser clients send signed capabilities directly to workers. HTTP adapters disable inherited proxies and redirects, bound responses, verify content revisions and validate pagination scope/progress. The audit emitter is a separate interface; audit-service acceptance is outside this storage qualification.
 
-```bash
-cargo build -p agentkeys-cli -p agentkeys-broker-server -p agentkeys-local-store -p agentkeys-worker-creds
-python3 scripts/tests/qualify_local_broker_storage.py
-```
+## Memory and channels
 
-This explicit check creates fresh owner identities and contracts, obtains an actual passkey session, and drives the native credential CLI through the real broker, worker and SQLite service. Broker login and capability minting resolve the same generated chain profile; separate contract-address environment variables are unnecessary for this journey. Owner store/read, delegated read, ciphertext-only records and worker/storage restart persistence are positive controls. Wrong-owner request keys, invalid sessions, missing keys, delegated writes and revoked grants/devices are refused, with unchanged stored objects. The owner retains access after delegate revocation.
+The signed service owns the memory namespace; an unsigned request hint cannot change it. Native memory/inbox commands load the actor's existing `--device-key-file`. Canonical reads may instead use an explicit delegation file, never both. Protocol helpers own the `knowledge:<namespace>` service spelling. Missing keys fail without replacement.
 
-The delegate read in this qualification uses the owner's session with the delegate's enrolled request key. Automatic delegate-session provisioning and the complete container journey remain separate acceptance work. The test creates development keys outside the source checkout and removes its owned services/state afterward; it never requires company credentials. Keep this real-contract check outside the fast default unit-test loop.
+Memory updates compare the expected plaintext hash with a read revision before atomic storage update. Proposals stamp provenance from the signed actor/service and reject an existing object with `409 object_revision_conflict`. Owner inbox listing follows pagination and surfaces unreadable records. Deletion requires the distinct signed `MemoryInboxDelete` operation and is confined to inbox objects; a fetch token cannot delete.
 
-### Configuration worker
+Channel encryption binds each record to its exact object key, preventing replay under a new event or attachment name. Poll cursors read one page; tail requests follow all pages. Notifications are scoped to owner/feed and retained across the initial read race. Storage checks current authority again after a long-poll wake, so revoked readers receive no messages.
 
-Configuration and credential workers share the same local startup options: `--development`, `--profile`, `--broker-public-key`, `--storage-url`, optional `--browser-origins`, and loopback `--listen`. Use a separate storage service/database bound to the `config` data class. The configuration worker has no cloud storage credentials or fallback.
+Channel startup can lower limits with `--max-poll-seconds`, `--inline-max-bytes` and `--blob-max-bytes`; the source defaults are 25 seconds, 1 MiB and 16 MiB. Optional wake delivery requires an explicit local `--wake-url` and protected `--wake-token-file`. Without them messaging works but auto-wake is disabled. Wake failure is reported after storing the message. Complete agent channel conversation remains a separate application check.
 
-Without `--development-kek-file`, the workers accept only client-encrypted v3 writes and return those envelopes unchanged. Supplying a protected file containing a fresh random 32-byte hex key enables development-only plaintext writes encrypted by the worker. Preserve that key with the private runtime state to read those records after restart. Existing encrypted records are never silently re-keyed. This explicit option replaces the configuration worker's former environment-based encryption switches.
+## Test lanes and evidence
 
-Configuration is owner-only for put, get and teardown. A valid delegate grant does not confer access. Reads return an opaque revision; send that exact value as `expected_revision` to update the value you read, or an empty string for create-only. A competing update returns HTTP 409 `stale_base`; reload before saving. Teardown reports storage failures instead of counting failed deletes as success.
-
-Run locally from the public checkout:
-
-```bash
-cargo test -p agentkeys-worker-creds --test local_storage
-python3 scripts/tests/qualify_local_config.py
-```
-
-The shared Rust integration target belongs to `agentkeys-worker-creds` and covers both workers. It checks real SQLite writes, owner-only denial before storage access, independent storage denial, concurrent revision conflicts, ciphertext-only storage, v3 passthrough without a worker key, and deletion failures. The explicit qualifier runs the configuration executable against real local contracts, then restarts it and revokes the delegate's grant and device while retaining owner access. Its issuer is a fixture; broker login/mint and the complete application remain separate acceptance work.
-
-### Memory and proposal inboxes
-
-The memory worker uses the same local startup options and requires `--development-kek-file`. Use its own protected key and a database bound to the `memory` data class. It encrypts development memory and proposal records; client-encrypted v3 memory is not implemented. The worker no longer obtains storage credentials from a broker or cloud account.
-
-Own-memory reads and writes stay within the caller's signed service and actor prefix. Canonical reads need the distinct canonical-fetch capability and address one owner knowledge object; they cannot select a checkpoint sub-key. The request's `namespace` is a client hint: the signed service controls storage and encryption context. Conditional writes compare the caller's expected plaintext hash and use an atomic storage revision to reject competing updates with `409 stale_base`.
-
-A proposal grant permits append only. The worker stamps provenance from the signed actor and service, and repeating an existing proposal returns `409 object_revision_conflict` without overwriting it. The owner lists and reads the inbox with a fetch capability for `inbox`. Lists follow storage pagination and return an error for unreadable records instead of silently omitting them. Deleting a proposal requires an owner capability from `/v1/cap/memory-inbox-delete`, with the signed teardown operation. That capability is confined to inbox objects; it cannot delete canonical or working memory.
-
-Run locally from the public checkout after preparing the contract cache and CLI:
-
-```bash
-cargo test -p agentkeys-worker-creds --test local_storage
-python3 scripts/tests/qualify_local_memory.py
-```
-
-The shared deterministic fixture exercises own/canonical separation, keyed checkpoints, competing writes, proposal provenance, append-only behavior and read-versus-delete denials at both worker and storage boundaries. The explicit qualifier uses the actual memory executable and local contracts for canonical access, persistence and real scope/device revocation. Its issuer is still a test fixture, so complete broker-session and product-client acceptance remains pending.
-
-### Channel messages and attachments
-
-The channel worker shares local startup options and requires its own protected `--development-kek-file` and a database bound to `channel`. Publish grants create events and attachments; they cannot read, overwrite or delete. Each encrypted record is bound to its exact storage key; copying it under another name fails decryption. The retained wire field `s3_key` names a local object key and does not require a cloud service. Subscribe grants read only the signed owner's channel. Owner deletion uses `/v1/cap/channel-teardown`, with `channel-pub:<id>` as the service and a signed teardown operation. The request's `channel_id` does not override that signed scope. Deletion covers both events and attachments, follows pagination and reports a storage failure.
-
-Polling reads one page after the cursor. A tail request follows all pages to find the latest events. Long polls retain a notification that arrives during the initial read, scope notifications by owner and channel, and recheck authority at storage after waking. A revoked subscriber receives no messages even if its request began while authorized.
-
-`--max-poll-seconds`, `--inline-max-bytes` and `--blob-max-bytes` can lower the supported limits: 25 seconds, 1 MiB and 16 MiB respectively. The optional `--wake-url` is the complete local application-wake URL; pair it with `--wake-token-file` pointing to an owner-only file. Redirects and inherited proxies are disabled. Without these options, messaging works but application auto-wake is disabled. A wake failure is logged after the message has been stored; it does not discard the message. Full application lifecycle wiring remains pending.
-
-Run locally from the public checkout:
-
-```bash
-cargo test -p agentkeys-worker-creds --test local_storage
-cargo test -p agentkeys-worker-channel
-python3 scripts/tests/qualify_local_channel.py
-```
-
-The explicit qualifier starts the actual channel executable with local contracts, checks encrypted persistence across restart and revokes the subscriber's grant and device. As with the other worker qualifiers, its issuer is a fixture; it does not complete broker-session or whole-application acceptance.
-
-### Object service
-
-Install the pinned Rust toolchain and Foundry, prepare the contract cache with `terrier contracts setup`, and build the CLI. Run locally from the public repository root:
+Local, from the public checkout, for fast object and worker/client checks:
 
 ```sh
-cargo build -p agentkeys-cli
-python3 scripts/tests/qualify_local_storage.py
+./terrier test focused --component storage
+cargo test --offline -p agentkeys-worker-creds --test local_storage
 ```
 
-The qualifier creates disposable identities, deploys the real contracts, enrolls an actor and launches the object-service binary. It checks authorized write/read, wrong actor/class/proof/expiry, broker-signed but chain-unauthorized requests, persistence after killing and restarting the service, and denial after actual scope and device revocations. Generated keys, profiles and databases stay in private temporary directories and are removed by the fixture.
+After preparing the CLI, service binaries and cached contract inputs, local in that checkout:
 
-The capability issuer is a test fixture, deliberately able to sign unauthorized requests. This proves independent storage enforcement. It does not qualify broker login or capability minting; those must pass through the real broker when the workers and clients are connected. The latest local run completed this storage qualification in 27.049 seconds on macOS, including the affected test-binary rebuild. An earlier run with warmed binaries took 12.262 seconds. A cold build or first download adds time.
+```sh
+./terrier test qualification --component storage \
+  --report "${AGENT_TERRIER_TEST_REPORT:?Choose a new report path outside the checkout}"
+```
+
+This explicit lane reuses the existing scenarios; ordinary PR lanes do not invoke it. It runs object-store checks, shared worker/native/browser-library tests, then real-chain object, credential, configuration, memory, channel, broker-storage and protected CLI qualifiers. Each real-worker qualifier executes active access, actual grant revocation and actual device revocation. The selected ignored Rust test must actually execute; missing, empty or skipped-only suites cannot pass. Reports contain test counts and timings; raw logs remain private.
+
+| Boundary tested | Positive control | Negative evidence |
+|---|---|---|
+| Object service with real contracts | Write/read and reopen persisted bytes | Wrong actor/key/class/proof, expiry, forged binding and ungranted service return the exact error; database rows/revisions remain unchanged |
+| Each real worker | Owner data persists across worker restart; permitted delegate reads succeed | Missing proof, wrong actor/class/service, revoked grant/device fail with exact status/reason, no plaintext and unchanged objects; configuration remains owner-only |
+| Shared worker/client HTTP tests | Real SQLite, encryption and native/browser library requests | Rejected worker authority forwards no storage operation; storage independently rejects unauthorized requests; competing writes, append-only rules and cross-feed deletion are checked |
+| Real broker and protected credential CLI | Actual passkey login, minting, store/read, restart and delegated read | Invalid/expired/mismatched sessions, wrong or missing keys, foreign owners, delegated writes and revoked authority fail without unauthorized changes |
+
+The object/worker qualifiers deliberately use a test issuer that can sign an unauthorized capability. That is the positive control for independent chain enforcement after broker compromise; it is not a replacement for broker login. The separate broker qualifier uses actual login and capability minting. Its delegated read uses the owner's session with the enrolled delegate key; automatic container use and browser interaction are different acceptance surfaces.
+
+See the [recorded qualification report](../../e2e/fixtures/storage-qualification/macos-arm64-2026-11-01.json) for the exact measured run. Fixture setup/build/execution/cleanup is included in each scenario's elapsed time; the report does not pretend to split those internal phases. No production scale, hardware custody or hosted-policy equivalence is claimed.
+
+## Backend maintenance and licensing
+
+The component uses the pinned `rusqlite` dependency with bundled SQLite. SQLite documents local application storage and application-specific servers as [intended uses](https://sqlite.org/whentouse.html), and distributes its library as [public domain](https://sqlite.org/copyright.html). The pinned `rusqlite` package declares MIT in its [manifest](https://docs.rs/crate/rusqlite/0.31.0/source/Cargo.toml.orig). Maintain dependency updates and this license inventory in the public repository. API compatibility alone is not the qualification evidence: the executable boundary and persistence checks above are.

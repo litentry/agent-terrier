@@ -9,7 +9,7 @@ import unittest
 from qualify_local_owner import LocalOwnerFixture
 from qualify_local_chain import REPOSITORY, available_port
 import qualify_local_binding
-from terrier_local import contracts
+from terrier_local import contracts, test_lanes
 
 
 class LocalStorageFixture(LocalOwnerFixture):
@@ -65,6 +65,8 @@ class LocalStorageFixture(LocalOwnerFixture):
                     result = subprocess.run([binaries[0], "--ignored", "--exact", test_name],
                         env=environment, capture_output=True, text=True, timeout=120)
                     self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    counted = test_lanes.rust_counts({"status": "passed"}, result.stdout + result.stderr)
+                    self.assertEqual(counted["status"], "passed", "selected real-chain test did not execute")
 
                 qualify("active")
                 self.owner(state, "revoke", "--name", "alice", "--actor-omni", identity["enrollment"]["actor_omni"])
