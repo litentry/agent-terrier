@@ -1143,20 +1143,12 @@ function InteractiveApp({ hosted, onSessionEnd }: { hosted: boolean; onSessionEn
     }
     if (action.kind === 'revoke-device') {
       const actor = action.actor;
-      // The binding isn't gone until SidecarRegistry says so. revokeAgentDevice
-      // requires msg.sender == operatorMasterWallet — for an account-master
-      // operator that's the passkey P256Account, so the unpair is a Touch-ID
-      // UserOp (build → K11-sign → submit), NOT the deployer-signed script
-      // (which reverts NotAuthorized — real 2026-06-11 incident).
-      //
-      // Gate ONLY on having the device hash. Whether the master is a
-      // P256Account is the BROKER's chain read (operatorMasterWallet +
-      // has-code) — the local accountType field can be stale (`none` on a
-      // restored session, real 2026-06-11 follow-up incident) and gating on it
-      // silently sent account-master operators down the doomed script path.
-      // A genuine legacy-EOA master gets the broker's 409 → script fallback.
-      const legacyRevoke = async (): Promise<boolean> => {
-        showToast(`Revoking ${actor.label} on chain…`);
+      if (!actor.deviceKeyHash) {
+        showToast('Cannot verify revocation: this actor has no on-chain device key hash.');
+        return;
+      }
+      const confirmRevoke = async (): Promise<boolean> => {
+        showToast(`Confirming ${actor.label} revocation on chain…`);
         const r = await client.revokeDevice(actor.id, action.intent);
         if (!r.ok) {
           showToast(`Revoke failed — ${r.status?.detail ?? 'check the daemon + chain config'}`);
@@ -1169,13 +1161,8 @@ function InteractiveApp({ hosted, onSessionEnd }: { hosted: boolean; onSessionEn
         const built = await client.revokeBuild({ deviceKeyHashes: [actor.deviceKeyHash] });
         if (!built.ok) {
           const buildDetail = built.status?.detail ?? '';
-          if (/legacy EOA|nothing to revoke/i.test(buildDetail)) {
-            // legacy EOA: the broker chain-read says the master IS an EOA — the
-            // script can sign this revoke. nothing-to-revoke: the chain already
-            // reads `revoked` — the script's read-only pre-check converges
-            // local state without signing anything. Either way: legacy path.
-            akLog('revoke: falling back to the script path', { actor: actor.id, detail: buildDetail });
-            if (!(await legacyRevoke())) return;
+          if (/nothing to revoke/i.test(buildDetail)) {
+            if (!(await confirmRevoke())) return;
             const a0 = await client.listActors();
             if (a0.ok) setActors(a0.data);
             showToast(`${actor.label} revoked on chain.`);
@@ -1220,17 +1207,11 @@ function InteractiveApp({ hosted, onSessionEnd }: { hosted: boolean; onSessionEn
         const txHash = submitted.data.txHash;
         const auditEnvelopeHashes = submitted.data.auditEnvelopeHashes;
         akLog('revoke: submit OK ✅', { actor: actor.id, txHash, auditEnvelopeHashes });
-        // The daemon re-reads the registry (device must read `revoked`) before
-        // flipping local state — the chain stays the source of truth. The #97
-        // receipts ride along so the feed event carries the real envelope hash.
         const r = await client.revokeDevice(actor.id, action.intent, { txHash, auditEnvelopeHashes });
         if (!r.ok) {
           showToast(`Revoke landed on chain but the daemon verify failed — ${r.status?.detail ?? 'refresh'}`);
           return;
         }
-      } else if (!(await legacyRevoke())) {
-        // No on-chain device hash recorded (legacy local-only row) — script path.
-        return;
       }
       const a = await client.listActors();
       if (a.ok) setActors(a.data);

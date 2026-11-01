@@ -24,15 +24,14 @@ async fn native_agent_client_refuses_redirects_remote_services_and_ambient_proxi
     let bridge_calls = Arc::new(std::sync::Mutex::new(Vec::new()));
     let bridge_response = Arc::new(AtomicUsize::new(0));
     let private_response = "synthetic-private-response-must-not-be-printed";
-    let app =
-        Router::new()
-            .route(
-                "/v1/agent/bridge",
-                post({
-                    let bridge_calls = bridge_calls.clone();
-                    let status = status.clone();
-                    let bridge_response = bridge_response.clone();
-                    move |headers: HeaderMap,
+    let app = Router::new()
+        .route(
+            "/v1/agent/bridge",
+            post({
+                let bridge_calls = bridge_calls.clone();
+                let status = status.clone();
+                let bridge_response = bridge_response.clone();
+                move |headers: HeaderMap,
                           Json(request): Json<
                         agentkeys_backend_client::protocol::BridgeProxyBody,
                     >| {
@@ -60,40 +59,40 @@ async fn native_agent_client_refuses_redirects_remote_services_and_ambient_proxi
                             }
                         }
                     }
-                }),
-            )
-            .route(
-                "/v1/agent/spawn/build",
-                post({
+            }),
+        )
+        .route(
+            "/v1/agent/spawn/build",
+            post({
+                let calls = calls.clone();
+                let status = status.clone();
+                move || {
                     let calls = calls.clone();
                     let status = status.clone();
-                    move || {
-                        let calls = calls.clone();
-                        let status = status.clone();
-                        async move {
-                            calls.fetch_add(1, Ordering::SeqCst);
-                            (
-                                StatusCode::from_u16(status.load(Ordering::SeqCst) as u16).unwrap(),
-                                [("location", "/redirect-target")],
-                                private_response,
-                            )
-                        }
+                    async move {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        (
+                            StatusCode::from_u16(status.load(Ordering::SeqCst) as u16).unwrap(),
+                            [("location", "/redirect-target")],
+                            private_response,
+                        )
                     }
-                }),
-            )
-            .route(
-                "/redirect-target",
-                post({
+                }
+            }),
+        )
+        .route(
+            "/redirect-target",
+            post({
+                let redirects = redirects.clone();
+                move || {
                     let redirects = redirects.clone();
-                    move || {
-                        let redirects = redirects.clone();
-                        async move {
-                            redirects.fetch_add(1, Ordering::SeqCst);
-                            StatusCode::NO_CONTENT
-                        }
+                    async move {
+                        redirects.fetch_add(1, Ordering::SeqCst);
+                        StatusCode::NO_CONTENT
                     }
-                }),
-            );
+                }
+            }),
+        );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let broker = format!("http://{}", listener.local_addr().unwrap());
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
