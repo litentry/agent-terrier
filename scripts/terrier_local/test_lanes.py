@@ -12,7 +12,7 @@ import time
 
 from . import contracts, affected
 
-COMPONENTS = ("protocol", "runtime", "broker", "signer", "relay", "bundler", "daemon", "storage", "cli", "ui", "display", "dsh", "managed", "contracts", "provisioner", "chain", "services", "agents")
+COMPONENTS = ("protocol", "runtime", "broker", "signer", "relay", "bundler", "daemon", "storage", "cli", "ui", "display", "dsh", "managed", "contracts", "provisioner", "chain", "services", "agents", "website")
 REGRESSION_TIMEOUT_SECONDS = 3600
 RUNTIME_SUITE = ("runtime", "agentkeys-runtime", "--lib", None, "")
 CORE = (
@@ -45,6 +45,7 @@ QUALIFICATIONS = {
     "chain": ("qualify_local_chain.py", "qualify_local_signing.py", "qualify_local_binding.py", "qualify_local_owner.py", "qualify_local_login.py", "qualify_local_bundler.py"),
     "services": ("qualify_local_services.py",),
     "agents": ("qualify_local_agents.py",),
+    "website": ("qualify_local_website.py",),
     "ui": ("qualify_public_web.py",),
     "storage": (
         "qualify_local_storage.py", "qualify_local_credentials.py", "qualify_local_config.py",
@@ -53,7 +54,7 @@ QUALIFICATIONS = {
     ),
 }
 QUALIFICATION_RUST = {
-    "contracts": [], "provisioner": [], "chain": [], "services": [], "agents": [],
+    "contracts": [], "provisioner": [], "chain": [], "services": [], "agents": [], "website": [],
     "ui": [],
     "storage": [*RUST_COMPONENTS["storage"],
                 ("worker-authority", "agentkeys-worker-creds", "--test", "local_storage", "")],
@@ -130,8 +131,8 @@ def python_counts(result, output):
 
 
 def selection(lane, components):
-    if lane != "qualification" and set(components) & {"chain", "services", "agents"}:
-        raise ValueError("chain, services and agents require explicit qualification")
+    if lane != "qualification" and set(components) & {"chain", "services", "agents", "website"}:
+        raise ValueError("chain, services, agents and website require explicit qualification")
     if lane == "regression" and components:
         raise ValueError("regression runs the full native workspace; select component lanes separately")
     if lane == "qualification":

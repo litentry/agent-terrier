@@ -10,7 +10,7 @@ def run(dispatch, input_stream=None, output_stream=None):
     if not source.isatty() or not destination.isatty():
         raise ValueError("The local manager requires a terminal; use terrier stack commands in scripts")
     print("Agent Terrier local manager — chain and backend services", file=destination)
-    print("Uses the current local state and existing configuration. Model runner and website are separate.", file=destination)
+    print("Uses the current local state and configured backend, model runner and website.", file=destination)
     while True:
         for number, (label, _) in enumerate(MENU, 1):
             print(f"{number}. {label}", file=destination)

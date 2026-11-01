@@ -23,4 +23,4 @@ Use fresh development identities only. The development software signer is not pr
 - [Licenses and exceptions](./licensing.md)
 - [Wiki source and publication](./wiki-publication.md)
 
-The source of every page lives in `docs/wiki` in the public repository. Edit those files through a reviewed pull request. Published pages link to the exact source revision; browser enrollment, full application tool/channel workflows, website supervision, destructive reset and independent clean-install acceptance remain open in [the release epic](https://github.com/litentry/agent-terrier/issues/1).
+The source of every page lives in `docs/wiki` in the public repository. Edit those files through a reviewed pull request. Published pages link to the exact source revision; browser enrollment, full application tool/channel workflows, auxiliary browser services, destructive reset and independent clean-install acceptance remain open in [the release epic](https://github.com/litentry/agent-terrier/issues/1).

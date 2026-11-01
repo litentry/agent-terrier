@@ -84,7 +84,7 @@ Local, after building the public service binaries and preparing contract depende
 python3 terrier test qualification --component chain --component services --component storage
 ```
 
-The chain selection reuses deployment, signing, binding, owner, login and transaction-service scenarios. Services reuses full backend restart and cleanup checks. Storage keeps its existing seven-scenario selection. The chain, services and agents selections are refused by ordinary focused/core lanes; real services are never silently started on a PR.
+The chain selection reuses deployment, signing, binding, owner, login and transaction-service scenarios. Services reuses full backend restart and cleanup checks. Storage keeps its existing seven-scenario selection. The chain, services, agents and website selections are refused by ordinary focused/core lanes; real services are never silently started on a PR.
 
 The explicit `qualification --component agents` selection reuses the existing real-contract Docker lifecycle scenario. Set `AGENT_TERRIER_TEST_AGENT_IMAGE` to a reviewed preloaded image and `AGENT_TERRIER_TEST_DOCKER_SOCKET` to the local Unix socket. Missing inputs fail. The runner forwards these explicit selectors only for that qualification; it does not inherit unrelated runtime or model settings. This deterministic lane does not claim real-model or complete browser acceptance.
 
@@ -92,7 +92,7 @@ The explicit `qualification --component agents` selection reuses the existing re
 
 The public qualification workflow runs nightly at 02:23 UTC and can be dispatched manually. It runs on an isolated GitHub-hosted Linux runner with read-only repository permission, no deployment credentials and no model downloads. GitHub schedules use the default branch and can be delayed; see [GitHub schedule semantics](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#schedule). Manual dispatch records the selected revision.
 
-The PR and nightly workflows share one component setup action for Node, contract tooling, browser build dependencies and plugins. The nightly job prepares public dependencies, runs the complete native workspace targets, strict formatting/lint and component lanes, builds service executables and an image from that revision, then invokes the existing chain/service/storage/agent/UI/provisioner qualifications. The built image stays on that disposable runner; this workflow publishes no image or release. Its two-hour failure ceiling is a cold-build bound, not a performance target. Initial hosted duration and Linux image acceptance must be measured from a completed run.
+The PR and nightly workflows share one component setup action for Node, contract tooling, browser build dependencies and plugins. The nightly job prepares public dependencies, runs the complete native workspace targets, strict formatting/lint and component lanes, builds service executables and an image from that revision, then invokes the existing chain/service/storage/agent/UI/provisioner qualifications and the prebuilt website lifecycle qualifier. The built image stays on that disposable runner; this workflow publishes no image or release. Its two-hour failure ceiling is a cold-build bound, not a performance target. Initial hosted duration and Linux image acceptance must be measured from a completed run.
 
 Local, from the public checkout, the native step is:
 
@@ -103,3 +103,5 @@ python3 terrier test regression --report "${TMPDIR:?Set a temporary directory}/n
 Choose a new report path for every run. This explicit lane builds all native test targets, then executes the workspace suite. The report separates build from execution and records aggregate passed/failed/ignored counts. Empty or ignored-only aggregate results fail; ignored tests are not qualified by that result. Explicit chain/storage/Docker scenarios provide separate integration evidence. Component flags cannot narrow the regression lane. Ordinary PRs continue using affected selection.
 
 Only structured reports are retained for seven days. They include the tested revision, platform, timings, counts and failures; raw logs and generated development state are not uploaded. A missing report is labeled incomplete. Cache saves require a successful main-revision job. The schedule neither submits fixes nor promotes production. Weekly real models, independent installation, mutation checks and authenticated product browser acceptance remain separately tracked work.
+
+`qualification --component website` starts the real prebuilt console through the existing service owner, checks origin isolation and restart/cleanup, and launches no browser. It requires prepared service binaries and website output. Full authenticated browser flows remain separate.

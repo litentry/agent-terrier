@@ -13,10 +13,10 @@ import time
 import urllib.error
 import urllib.request
 
-from . import chain, contracts, deployment, local_state, models
+from . import chain, contracts, deployment, local_state, models, website
 
 SOCKET_NAME = "services.sock"
-START_TIMEOUT = models.RUNNER_START_TIMEOUT + 45
+START_TIMEOUT = models.RUNNER_START_TIMEOUT + website.START_TIMEOUT + 45
 CHILD_START_TIMEOUT = 10
 STOP_TIMEOUT = 10
 HEALTH_TIMEOUT = 1
@@ -33,7 +33,7 @@ SIGNER_BINARY = "agentkeys-local-signer"
 RELAY_BINARY = "agentkeys-gate"
 BUNDLER_BINARY = "agentkeys-bundler"
 BINARIES = (BROKER_BINARY, STORE_BINARY, SIGNER_BINARY, RELAY_BINARY, BUNDLER_BINARY, *WORKERS.values())
-MANIFEST_VERSION = 6
+MANIFEST_VERSION = 7
 
 
 def binary_directory(repository, configured=None):
@@ -58,13 +58,13 @@ def available_port():
         return listener.getsockname()[1]
 
 
-def prepare(repository, state, binaries, port, runtime_image=None, docker_socket=None, model_directory=None, model_binary=None):
+def prepare(repository, state, binaries, port, runtime_image=None, docker_socket=None, model_directory=None, model_binary=None, enable_website=None, web_port=None):
     running_chain, profile, fingerprint = deployment.active_profile(repository, state)
     directory = local_state.private_directory(state / "services")
     manifest_path = directory / "manifest.json"
     if manifest_path.exists() or manifest_path.is_symlink():
         manifest = local_state.read_json(manifest_path)
-        if (not isinstance(manifest, dict) or manifest.get("version") not in (1, 2, 3, 4, 5, MANIFEST_VERSION) or manifest.get("development_only") is not True
+        if (not isinstance(manifest, dict) or manifest.get("version") not in (1, 2, 3, 4, 5, 6, MANIFEST_VERSION) or manifest.get("development_only") is not True
                 or manifest.get("profile_identity") != fingerprint
                 or type(manifest.get("initialized")) is not bool
                 or type(manifest.get("broker_port")) is not int
@@ -82,6 +82,9 @@ def prepare(repository, state, binaries, port, runtime_image=None, docker_socket
         local_state.write_json(manifest_path, manifest)
     runtime = runtime_configuration(manifest, runtime_image, docker_socket)
     model_runner = models.configuration(manifest, model_directory, model_binary)
+    web_configuration = website.configuration(manifest, enable_website, web_port)
+    if web_configuration is not None:
+        website.prepared_application(repository)
     broker_directory = local_state.private_directory(directory / "broker")
     for purpose in ("oidc", "session"):
         path = broker_directory / f"{purpose}.json"
@@ -131,6 +134,7 @@ def prepare(repository, state, binaries, port, runtime_image=None, docker_socket
     prepare_submitter(state, binaries, manifest, running_chain, profile)
     manifest["runtime"] = runtime
     manifest["model_runner"] = model_runner
+    manifest["website"] = web_configuration
     manifest["version"] = MANIFEST_VERSION
     manifest["initialized"] = True
     local_state.write_json(manifest_path, manifest)
@@ -210,7 +214,7 @@ def prepare_submitter(state, binaries, manifest, running_chain, profile):
         chain.rpc(running_chain["rpc_http"], "anvil_setBalance", [address, hex(funding)])
 
 
-def start(repository, state, configured=None, port=None, runtime_image=None, docker_socket=None, model_directory=None, model_binary=None):
+def start(repository, state, configured=None, port=None, runtime_image=None, docker_socket=None, model_directory=None, model_binary=None, enable_website=None, web_port=None):
     current = status(state)
     if current["running"]:
         if current.get("service_schema") != MANIFEST_VERSION:
@@ -227,9 +231,13 @@ def start(repository, state, configured=None, port=None, runtime_image=None, doc
             requested = models.configuration({"model_runner":current.get("model_runner")}, model_directory, model_binary)
             if requested != current.get("model_runner"):
                 raise ValueError("Stop local services before changing model runner configuration")
+        if enable_website is not None or web_port is not None:
+            requested = website.configuration({"website":current.get("website")}, enable_website, web_port)
+            if requested != current.get("website"):
+                raise ValueError("Stop local services before changing website configuration")
         return current
     binaries = binary_directory(repository, configured)
-    prepare(repository, state, binaries, port, runtime_image, docker_socket, model_directory, model_binary)
+    prepare(repository, state, binaries, port, runtime_image, docker_socket, model_directory, model_binary, enable_website, web_port)
     log = local_state.open_private(state / "services-supervisor.log", os.O_CREAT | os.O_WRONLY | os.O_APPEND)
     environment = contracts.tool_environment()
     environment["AGENT_TERRIER_STATE_DIR"] = str(state)
@@ -367,6 +375,8 @@ def serve(repository, state, configured):
         reserved_listeners = {}
         children = []
         components = {}
+        website_instance = None
+        browser_origin = website.endpoint(manifest["website"]) if manifest["website"] is not None else ""
         path = chain.socket_path(state, SOCKET_NAME)
         bound = False
 
@@ -405,6 +415,7 @@ def serve(repository, state, configured):
                  "--signer-key-file", directory / "bundler/submitter.key"],
                 contracts.tool_environment(), directory / "bundler.log", children)
             environment = broker_environment(broker_directory, profile_path, manifest["broker_port"])
+            environment["BROKER_BROWSER_ORIGINS"] = browser_origin
             environment.update(AGENTKEYS_GATE_ADMIN_URL=components["model_relay"][1],
                 AGENTKEYS_GATE_ADMIN_TOKEN_FILE=str(relay_directory / "admin.key"),
                 AGENTKEYS_GATE_TURN_URL=components["model_relay"][1] + "/v1", AGENTKEYS_BUNDLER_URL=components["bundler"][1],
@@ -432,11 +443,18 @@ def serve(repository, state, configured):
                     contracts.tool_environment(), directory / f"{data_class}-store.log", children)
                 components[data_class + "_store"] = store
                 components[data_class] = launch_reserved(data_class, binaries / worker_binary,
-                    [*common, "--storage-url", store[1], "--development-kek-file", worker_directory / "development.key"],
+                    [*common, "--storage-url", store[1], "--development-kek-file", worker_directory / "development.key",
+                     "--browser-origins", browser_origin],
                     contracts.tool_environment())
+
+            if manifest["website"] is not None:
+                process, address, website_instance = website.launch(repository, manifest["website"],
+                    components["broker"][1], directory, children)
+                components["website"] = (process, address)
 
             def snapshot():
                 services = {name:{"url":endpoint, "healthy":process.poll() is None and (models.healthy(model_recipe, endpoint) if name == "model_runner"
+                                else website.healthy(endpoint, components["broker"][1], website_instance) if name == "website"
                                 else healthy(endpoint, name in ("broker", "model_relay")))}
                             for name, (process, endpoint) in components.items()}
                 running_chain = chain.status(state)
@@ -446,7 +464,7 @@ def serve(repository, state, configured):
                                    and profile.get("contract_set_version") ==
                                    (repository / "crates/agentkeys-chain/VERSION").read_text().strip())
                 return {"running":True, "service_schema":MANIFEST_VERSION, "ready":running_chain["running"] and profile_matches and all(item["healthy"] for item in services.values()),
-                        "development_only":True, "broker_port":manifest["broker_port"], "runtime":manifest["runtime"], "model_runner":manifest["model_runner"],
+                        "development_only":True, "broker_port":manifest["broker_port"], "runtime":manifest["runtime"], "model_runner":manifest["model_runner"], "website":manifest["website"],
                         "chain_running":running_chain["running"], "profile_matches":profile_matches, "services":services}
 
             if not snapshot()["ready"]:
@@ -498,7 +516,7 @@ def serve(repository, state, configured):
 def logs(state):
     paths = [state / "services-supervisor.log"]
     directory = state / "services"
-    paths.extend([directory / "broker.log", directory / "signer.log", directory / "model-relay.log", directory / "model-runner.log", directory / "bundler.log",
+    paths.extend([directory / "broker.log", directory / "signer.log", directory / "model-relay.log", directory / "model-runner.log", directory / "bundler.log", directory / "website.log",
                   *[directory / f"{name}{suffix}.log" for name in WORKERS for suffix in ("", "-store")]])
     for path in paths:
         if path.exists() or path.is_symlink():

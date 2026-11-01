@@ -20,6 +20,8 @@ def build_parser():
     stack_parser.add_argument("--docker-socket", type=Path)
     stack_parser.add_argument("--model-dir", type=Path, help="Own a local model runner using predownloaded models")
     stack_parser.add_argument("--model-binary", type=Path, help="Installed Ollama executable; requires --model-dir")
+    stack_parser.add_argument("--website", action="store_true", default=None, help="Own the prebuilt local web console")
+    stack_parser.add_argument("--web-port", type=int, help="First website port; requires --website and otherwise selects a free port")
     test_parser = commands.add_parser("test", help="Run measured source, core, focused or explicit qualification lanes")
     test_parser.add_argument("lane", choices=["source", "core", "focused", "affected", "regression", "qualification"])
     test_parser.add_argument("--component", action="append", default=[], choices=test_lanes.COMPONENTS)
@@ -50,6 +52,8 @@ def build_parser():
     service_parser.add_argument("--docker-socket", type=Path, help="Explicit local Docker Unix socket; required with --runtime-image")
     service_parser.add_argument("--model-dir", type=Path, help="Own a local model runner using predownloaded models")
     service_parser.add_argument("--model-binary", type=Path, help="Installed Ollama executable; requires --model-dir")
+    service_parser.add_argument("--website", action="store_true", default=None, help="Own the prebuilt local web console")
+    service_parser.add_argument("--web-port", type=int, help="First website port; requires --website and otherwise selects a free port")
     credential_parser = commands.add_parser("cred", help="Use an existing local owner session for credentials")
     credential_parser.add_argument("action", choices=["store", "fetch"])
     credential_parser.add_argument("service")
@@ -123,7 +127,7 @@ def main(argv=None):
         state = local_state.state_directory(repository)
         if arguments.command == "stack":
             configuration = (arguments.chain_port, arguments.bin_dir, arguments.broker_port,
-                             arguments.runtime_image, arguments.docker_socket, arguments.model_dir, arguments.model_binary)
+                             arguments.runtime_image, arguments.docker_socket, arguments.model_dir, arguments.model_binary, arguments.website, arguments.web_port)
             if arguments.action not in ("start", "restart") and any(value is not None for value in configuration):
                 raise ValueError("Stack configuration options require start or restart")
             if arguments.action == "logs":
@@ -145,7 +149,7 @@ def main(argv=None):
         if arguments.command == "_serve-services":
             return services.serve(repository, state, arguments.bin_dir)
         if arguments.command == "services":
-            if arguments.action != "start" and (arguments.bin_dir is not None or arguments.broker_port is not None or arguments.runtime_image is not None or arguments.docker_socket is not None or arguments.model_dir is not None or arguments.model_binary is not None):
+            if arguments.action != "start" and (arguments.bin_dir is not None or arguments.broker_port is not None or arguments.runtime_image is not None or arguments.docker_socket is not None or arguments.model_dir is not None or arguments.model_binary is not None or arguments.website is not None or arguments.web_port is not None):
                 raise ValueError("Service configuration options are only valid for services start")
             if arguments.action == "logs":
                 return services.logs(state)
@@ -153,7 +157,7 @@ def main(argv=None):
                 result = services.status(state)
             else:
                 with local_state.exclusive_lock(state / "operation.lock"):
-                    result = (services.start(repository, state, arguments.bin_dir, arguments.broker_port, arguments.runtime_image, arguments.docker_socket, arguments.model_dir, arguments.model_binary)
+                    result = (services.start(repository, state, arguments.bin_dir, arguments.broker_port, arguments.runtime_image, arguments.docker_socket, arguments.model_dir, arguments.model_binary, arguments.website, arguments.web_port)
                               if arguments.action == "start" else services.stop(state))
             print(json.dumps(result, indent=2))
             return 1 if arguments.action == "doctor" and not result.get("ready") else 0

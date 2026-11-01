@@ -1,4 +1,4 @@
-The lightweight manager is a terminal menu over the same `terrier stack` commands used by scripts. It adds no server, credential store, Docker controller or service supervisor. It manages the local chain, backend service group and an explicitly configured local model runner. Website startup remains separate.
+The lightweight manager is a terminal menu over the same `terrier stack` commands used by scripts. It adds no server, credential store, Docker controller or service supervisor. It manages the local chain, backend service group and an explicitly configured local model runner. It can also own the prebuilt [local website](./local-website.md).
 
 ## Prepare once
 
@@ -20,7 +20,7 @@ For the first managed-image startup, local in that same checkout and state direc
   --model-dir "${OLLAMA_MODELS:?Set the prepared model directory}"
 ```
 
-The menu displays the selected state directory and offers status, health, start, persistent restart, private logs and stop. It dispatches the canonical CLI and reports unsuccessful operations. Quit leaves services running. A terminal is required; automation should use the commands below.
+The menu displays the selected state directory and offers status, health, start, persistent restart, private logs and stop. Add `--website` to `stack start` after building the console to include website startup; the menu reuses that persisted choice. It dispatches the canonical CLI and reports unsuccessful operations. Quit leaves services running. A terminal is required; automation should use the commands below.
 
 ## Scriptable lifecycle
 
@@ -34,13 +34,13 @@ Local, in the same public checkout and state directory:
 ./terrier stack stop
 ```
 
-`start` starts the owned chain, verifies or deploys its contracts, then starts the existing service group. A second start reuses healthy owned processes. `restart` stops services before the chain, then starts from the same saved chain and service state. It preserves keys, contract addresses, service data and the broker endpoint. The existing chain profile owns the saved RPC port; no second manager configuration file is introduced. `--chain-port` explicitly selects a port, while `--bin-dir`, `--broker-port`, `--runtime-image`, `--docker-socket`, `--model-dir` and `--model-binary` use the service controller's existing configuration rules. Configuration flags require `start` or `restart`; keep a custom binary directory in `AGENT_TERRIER_BIN_DIR` for menu use.
+`start` starts the owned chain, verifies or deploys its contracts, then starts the existing service group. A second start reuses healthy owned processes. `restart` stops services before the chain, then starts from the same saved chain and service state. It preserves keys, contract addresses, service data and the broker endpoint. The existing chain profile owns the saved RPC port; no second manager configuration file is introduced. `--chain-port` explicitly selects a port, while `--bin-dir`, `--broker-port`, `--runtime-image`, `--docker-socket`, `--model-dir`, `--model-binary`, `--website` and `--web-port` use the service controller's existing configuration rules. Configuration flags require `start` or `restart`; keep a custom binary directory in `AGENT_TERRIER_BIN_DIR` for menu use.
 
-`status` reports both controllers even when one cannot be reached. `doctor` exits nonzero unless both are healthy. Structured operation output includes `success`, `action`, `chain` and `services`. A startup failure also reports `failed_stage`, `error` and any cleanup outcome. A configured model runner is included in readiness through version/inventory checks. Without model configuration, readiness covers the backend only. Inference still requires `models probe`; website/browser acceptance remains separate.
+`status` reports both controllers even when one cannot be reached. `doctor` exits nonzero unless both are healthy. Structured operation output includes `success`, `action`, `chain` and `services`. A startup failure also reports `failed_stage`, `error` and any cleanup outcome. A configured model runner is included in readiness through version/inventory checks. Without model configuration, readiness covers the backend only. Inference still requires `models probe`; website delivery is checked when configured; complete authenticated browser acceptance remains separate.
 
 If startup fails, a chain started by that operation is stopped only when services are confirmed stopped. An already-running chain is preserved. An uncertain control response preserves the chain and reports the error. Stop requires confirmed service shutdown before stopping the chain. All process operations use the existing private control sockets; saved PIDs are never signal authority. Generated state is retained after failures so it can be inspected or resumed. Interrupted deployment still requires the explicit `chain deploy --resume` procedure from [local chain](./local-chain.md).
 
-Logs contain private development diagnostics. Review them before sharing. Stop/restart do not erase local state or agent volumes. Destructive reset, website startup and complete browser acceptance remain separate release work; this menu does not imply those features are complete.
+Logs contain private development diagnostics. Review them before sharing. Stop/restart do not erase local state or agent volumes. Destructive reset and complete browser acceptance remain separate release work; this menu does not imply those features are complete.
 
 ## Qualification
 

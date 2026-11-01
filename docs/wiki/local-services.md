@@ -1,4 +1,4 @@
-The local service launcher starts the real broker, development signer, authenticated model relay, transaction submitter and four storage workers, each with its own persistent object database. It uses the existing chain controller, signing implementation, key generators, protected state files and worker executables. It can configure the broker to use a reviewed local agent image. It does not start the model server or web console yet. Protected [agent creation and archive](./local-agents.md) use the same service group and the canonical lifecycle implementation.
+The local service launcher starts the real broker, development signer, authenticated model relay, transaction submitter and four storage workers, each with its own persistent object database. It uses the existing chain controller, signing implementation, key generators, protected state files and worker executables. It can configure the broker to use a reviewed local agent image. It can also supervise a prepared local model runner and prebuilt web console through the same owner. Protected [agent creation and archive](./local-agents.md) use the same service group and the canonical lifecycle implementation.
 
 The [lightweight terminal manager](./local-manager.md) composes these same controllers through `terrier stack`, including persistent whole-backend restart.
 
@@ -25,7 +25,9 @@ The first start generates fresh broker signing keys, a development signer master
 
 Repeating `services start` reuses a healthy owned supervisor. It refuses changed ports, another deployment, unhealthy existing services and missing original keys. Startup failures stop only the children launched by that supervisor. An unrelated listener on the selected port is preserved. No process is stopped using a PID found in a state file.
 
-The service manifest is version 5. It retains the optional image/socket/runtime namespace configuration; older manifests migrate with agent runtime disabled until explicitly configured. Stop an older supervisor before starting the updated launcher. Migration verifies existing state and creates only newly introduced files: the signer key for version 1, relay admin/key-registry files for versions 1 and 2, and the transaction submitter key for versions 1 through 3. It preserves existing keys and data. Once introduced, a missing file requires restoration; migration never regenerates a previously required key.
+The service manifest is version 7. It retains optional runtime, model-runner and website configuration; existing configured components are retained, while newly introduced optional components stay disabled until explicitly selected. Stop an older supervisor before starting the updated launcher. Migration verifies existing state and creates only newly introduced files: the signer key for version 1, relay admin/key-registry files for versions 1 and 2, and the transaction submitter key for versions 1 through 3. It preserves existing keys and data. Once introduced, a missing file requires restoration; migration never regenerates a previously required key.
+
+Add `--website` after preparing the [local console](./local-website.md) to start it in the same service group. Its first selected port is persisted, its runtime backend comes from the broker endpoint, and the supervisor configures exact-origin browser access on the broker and storage workers. Website health covers delivery and instance/configuration identity; complete browser enrollment and auxiliary services remain separate qualification.
 
 ## Configure the local agent image
 
@@ -43,7 +45,7 @@ The supervisor gives the broker an isolated empty Docker client configuration an
 
 ## Local model relay
 
-The launcher starts the existing `agentkeys-gate` executable using the [local model recipe](./local-models.md). The model runner itself must be started separately. The relay binds to loopback and explicitly rejects a remote upstream. It starts with no authorized inference callers. The broker receives the relay endpoint and a path to the same protected admin token; the token is absent from command arguments and child environment values.
+The launcher starts the existing `agentkeys-gate` executable using the [local model recipe](./local-models.md). The model runner can be supervised with `--model-dir` or started explicitly outside this group. The relay binds to loopback and explicitly rejects a remote upstream. It starts with no authorized inference callers. The broker receives the relay endpoint and a path to the same protected admin token; the token is absent from command arguments and child environment values.
 
 The broker and relay consume one shared provisioning schema in `agentkeys-protocol::model_relay`. Provisioned credentials include the selected model ID through the canonical runtime environment builder. Admin mutations require the admin token; inference and usage require a provisioned, enabled caller credential. The protected key registry persists creation and revocation before reporting success. Partial or conflicting admin configuration fails startup without falling back.
 
