@@ -2,23 +2,12 @@ import { CoreBackend } from './core';
 import { DaemonBackend } from './daemon';
 import { EmptyBackend } from './empty';
 import type { AgentKeysClient } from './types';
+import { validateBackendConfiguration, type BackendConfiguration } from '../backendConfiguration';
 
-export type BackendKind = 'empty' | 'daemon' | 'core';
-
-export function selectBackend(): AgentKeysClient {
-  // Default to the local daemon (the desktop host): the browser talks to
-  // agentkeys-daemon --ui-bridge on :3114, which reaches the broker + chain.
-  // Override with NEXT_PUBLIC_AGENTKEYS_BACKEND=core (phone-first) or =empty.
-  const kind = (process.env.NEXT_PUBLIC_AGENTKEYS_BACKEND ?? 'daemon') as BackendKind;
-  if (kind === 'core') {
-    // Phone-first host: the WASM core talks to the broker directly (no daemon). X1.
-    return new CoreBackend(
-      process.env.NEXT_PUBLIC_AGENTKEYS_BROKER_URL ?? 'https://broker.example.invalid',
-    );
-  }
-  if (kind === 'daemon') {
-    return new DaemonBackend(process.env.NEXT_PUBLIC_AGENTKEYS_DAEMON_URL);
-  }
+export function selectBackend(value: BackendConfiguration): AgentKeysClient {
+  const configuration = validateBackendConfiguration(value);
+  if (configuration.kind === 'core') return new CoreBackend(configuration.url);
+  if (configuration.kind === 'daemon') return new DaemonBackend(configuration.url);
   return new EmptyBackend();
 }
 

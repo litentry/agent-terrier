@@ -18,6 +18,7 @@ Use fresh development identities only. The development software signer is not pr
 - [Local storage and authorization checks](./local-storage.md)
 - [Fast and extended test lanes](./test-lanes.md)
 - [Docker isolation qualification](./docker-qualification.md)
+- [Local website configuration](./local-website.md)
 - [Development email outbox](./local-email.md)
 - [Licenses and exceptions](./licensing.md)
 - [Wiki source and publication](./wiki-publication.md)

@@ -30,11 +30,7 @@ import type { RouterViewWire } from '@/lib/routerView';
 import type { HostedGatewayRequest } from '@/lib/generated/HostedGatewayRequest';
 import type { GatewayLoginVerifyRequest } from '@/lib/generated/GatewayLoginVerifyRequest';
 
-const DEFAULT_BASE_URL = 'http://localhost:3114';
-
-function baseUrl(): string {
-  return (process.env.NEXT_PUBLIC_AGENTKEYS_DAEMON_URL ?? DEFAULT_BASE_URL).replace(/\/$/, '');
-}
+import { browserBackendConfiguration, type BackendConfiguration } from './backendConfiguration';
 
 /** Front-end gateway tracing (#419 connect/login diagnostics). OFF by default —
  *  the contacts/channels pages poll `status`/`contacts`/`monitor` on a timer, so
@@ -84,7 +80,12 @@ async function call<T>(
   path: string,
   body?: unknown,
 ): Promise<GatewayResult<T>> {
-  if (process.env.NEXT_PUBLIC_AGENTKEYS_BACKEND === 'core') {
+  let configuration: BackendConfiguration;
+  try { configuration = browserBackendConfiguration(); } catch {
+    return { ok: false, reason: 'backend_configuration_invalid', status: 0 };
+  }
+  if (configuration.kind === 'empty') return { ok: false, reason: 'backend_not_configured', status: 0 };
+  if (configuration.kind === 'core') {
     const request = hostedRequest(method, path, body);
     return request
       ? callHosted<T>(request)
@@ -93,7 +94,7 @@ async function call<T>(
   gwlog('→', method, path, body ?? '');
   let resp: Response;
   try {
-    resp = await fetch(`${baseUrl()}${path}`, {
+    resp = await fetch(`${configuration.url}${path}`, {
       method,
       cache: 'no-store',
       headers: body ? { 'content-type': 'application/json' } : undefined,

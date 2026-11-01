@@ -116,7 +116,7 @@ import { loadWasmModule } from './wasm-module';
  *   POST /v1/k11/enroll/finish          → enrollK11Finish
  */
 
-const DEFAULT_BASE_URL = 'http://localhost:3114';
+import { DEFAULT_DAEMON_URL } from '../backendConfiguration';
 
 function unreachable(detail: string): DisconnectedStatus {
   return { kind: 'disconnected', reason: 'unreachable', detail };
@@ -132,7 +132,7 @@ export class MappedBackend implements AgentKeysClient {
   private pendingReads = new Map<string, Promise<Result<unknown>>>();
 
   constructor(baseUrl?: string) {
-    this.baseUrl = (baseUrl ?? process.env.NEXT_PUBLIC_AGENTKEYS_DAEMON_URL ?? DEFAULT_BASE_URL).replace(/\/$/, '');
+    this.baseUrl = (baseUrl ?? DEFAULT_DAEMON_URL).replace(/\/$/, '');
   }
 
   protected coalesceRead<T>(path: string, read: () => Promise<Result<T>>): Promise<Result<T>> {

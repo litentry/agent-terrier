@@ -569,7 +569,7 @@ export function ApplicationsPage({
       {!supported && (
         <div className="banner warn" style={{ marginBottom: 14 }}>
           <span className="lbl">no daemon</span>
-          <span>The applications surface needs a running agentkeys-daemon (NEXT_PUBLIC_AGENTKEYS_BACKEND=daemon).</span>
+          <span>The configured backend does not provide applications.</span>
         </div>
       )}
       {loadError && supported && (

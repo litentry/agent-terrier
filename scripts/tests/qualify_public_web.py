@@ -19,8 +19,7 @@ class PublicWebQualification(unittest.TestCase):
     def test_console_assets_and_removed_proxy_have_no_direct_bridge_authority(self):
         application = REPOSITORY / "apps/parent-control"
         self.assertFalse(list(application.glob(".env*")), "Use a checkout without local environment files")
-        environment = dict(contracts.tool_environment(), NEXT_TELEMETRY_DISABLED="1", CI="1",
-                           NEXT_PUBLIC_AGENTKEYS_DAEMON_URL="http://127.0.0.1:0")
+        environment = dict(contracts.tool_environment(), NEXT_TELEMETRY_DISABLED="1", CI="1")
         diagnostics = Path(tempfile.mkdtemp(prefix="terrier-web-qualification-"))
         completed = False
         children = []
@@ -67,23 +66,37 @@ class PublicWebQualification(unittest.TestCase):
             self.assertEqual(built["status"], "passed", "Console build failed; inspect retained diagnostics")
             executable = subprocess.check_output(["node", "-p", "require.resolve('next/dist/bin/next')"],
                 cwd=application, env=environment, text=True, timeout=10).strip()
-            port = available_port()
-            with (diagnostics / "server.log").open("xb") as log:
-                server = subprocess.Popen(["node", executable, "start", "--hostname", "127.0.0.1", "--port", str(port)],
-                    cwd=application, env=environment, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT)
-            children.append(server)
-            base = f"http://127.0.0.1:{port}"
-            deadline = time.monotonic() + 10
-            while True:
-                self.assertIsNone(server.poll(), "Console server exited before readiness")
-                try:
-                    status, body, _ = request(base + "/")
-                    break
-                except OSError:
-                    self.assertLess(time.monotonic(), deadline, "Console server readiness timed out")
-                    time.sleep(0.05)
-            self.assertEqual(status, 200)
-            self.assertIn(b"<html", body)
+            build_identity = (application / ".next/BUILD_ID").read_bytes()
+
+            def start_website(broker_url, name):
+                runtime_environment = dict(environment, AGENT_TERRIER_WEB_BACKEND="core",
+                                           AGENT_TERRIER_WEB_BROKER_URL=broker_url)
+                port = available_port()
+                with (diagnostics / f"{name}.log").open("xb") as log:
+                    server = subprocess.Popen(["node", executable, "start", "--hostname", "127.0.0.1", "--port", str(port)],
+                        cwd=application, env=runtime_environment, stdin=subprocess.DEVNULL,
+                        stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+                children.append(server)
+                base = f"http://127.0.0.1:{port}"
+                deadline = time.monotonic() + 10
+                while True:
+                    self.assertIsNone(server.poll(), "Console server exited before readiness")
+                    try:
+                        status, body, headers = request(base + "/")
+                        break
+                    except OSError:
+                        self.assertLess(time.monotonic(), deadline, "Console server readiness timed out")
+                        time.sleep(0.05)
+                self.assertEqual(status, 200)
+                self.assertIn(b"<html", body)
+                self.assertIn("no-store", headers.get("Cache-Control", ""))
+                configuration = re.search(rb'<script id="terrier-backend-configuration" type="application/json">(.*?)</script>', body)
+                self.assertIsNotNone(configuration, "Production page must include runtime backend configuration")
+                self.assertEqual(json.loads(configuration.group(1)), {"kind": "core", "url": broker_url})
+                self.assertNotIn(b"synthetic-qualification-only", body)
+                return base, body
+
+            base, body = start_website(bridge_url, "server")
             assets = re.findall(rb'<script[^>]+src="(/_next/static/[^"?]+)', body)
             self.assertTrue(assets, "The production page has no executable client assets")
             status, asset, headers = request(base + assets[0].decode())
@@ -96,6 +109,11 @@ class PublicWebQualification(unittest.TestCase):
             responses = [(route, request(base + route, payload)[0]) for route, payload in routes]
             self.assertEqual(responses, [(route, 404) for route, _ in routes])
             self.assertEqual(requests, [], "A removed route reached a privileged bridge")
+            services.stop_children(children)
+            children.clear()
+            start_website(f"http://127.0.0.1:{available_port()}", "restarted-server")
+            self.assertEqual((application / ".next/BUILD_ID").read_bytes(), build_identity, "Runtime selection must not rebuild the app")
+            self.assertEqual(requests, [])
             completed = True
         finally:
             services.stop_children(children)
