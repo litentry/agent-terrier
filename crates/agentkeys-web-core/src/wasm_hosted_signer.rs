@@ -21,6 +21,25 @@ impl HostedSignerClient {
             broker: BrokerClient::new(broker_url),
         }
     }
+    #[wasm_bindgen(js_name=localEnrollmentEnabled)]
+    pub async fn local_enrollment_enabled(&self) -> Result<bool, JsValue> {
+        Ok(self
+            .broker
+            .login_config()
+            .await
+            .map_err(js)?
+            .local_browser_enrollment)
+    }
+    #[wasm_bindgen(js_name=localStart)]
+    pub async fn local_start(&self, request: JsValue) -> Result<JsValue, JsValue> {
+        value(
+            &self
+                .broker
+                .local_browser_start(&serde_wasm_bindgen::from_value(request).map_err(js)?)
+                .await
+                .map_err(js)?,
+        )
+    }
     pub async fn start(&self, bearer: String, request: JsValue) -> Result<JsValue, JsValue> {
         value(
             &self

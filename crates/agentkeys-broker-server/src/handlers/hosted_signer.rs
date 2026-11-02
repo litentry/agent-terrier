@@ -1,11 +1,9 @@
-use agentkeys_core::device_crypto::{device_key_hash, ecrecover_eip191};
 use agentkeys_core::erc4337::{
     additional_master_challenge, master_device_key_hash, AdditionalMaster, AgentRegister,
     ScopeGrant,
 };
 use agentkeys_protocol::hosted_signer::*;
 use axum::{extract::State, http::HeaderMap, Json};
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use sha2::{Digest, Sha256};
 
 use crate::accept_assertion::decode_assertion_parts;
@@ -115,12 +113,8 @@ fn allowed_origins() -> Vec<String> {
     )
 }
 fn enrollment_challenge(intent: &HostedSignerIntent) -> Result<[u8; 32], BrokerError> {
-    let mut digest = Sha256::new();
-    digest.update(b"agentkeys:hosted-signer-enrollment:v1:");
-    digest.update(
-        serde_json::to_vec(intent).map_err(|error| BrokerError::Internal(error.to_string()))?,
-    );
-    Ok(digest.finalize().into())
+    agentkeys_core::browser_enrollment::challenge(intent)
+        .map_err(|error| BrokerError::Internal(error.to_string()))
 }
 fn validate_intent(
     intent: &HostedSignerIntent,
@@ -169,50 +163,81 @@ fn validate_public_proofs(
     proof: &BrowserAssertion,
     device_proof: &str,
 ) -> Result<[u8; 32], BrokerError> {
-    if proof.authenticator_data.len()
-        + proof.client_data_json.len()
-        + proof.signature.len()
-        + device_proof.len()
-        > super::hosted_signer_pending::MAX_PUBLIC_REQUEST_BYTES
-    {
-        return Err(BrokerError::BadRequest("browser proof is too large".into()));
-    }
-    if proof.credential_id != intent.credential_id {
+    use agentkeys_core::browser_enrollment::EnrollmentProofError;
+    agentkeys_core::browser_enrollment::verify_public_proofs(intent, proof, device_proof).map_err(
+        |error| match error {
+            EnrollmentProofError::Invalid(message) => BrokerError::BadRequest(message),
+            EnrollmentProofError::Denied(message) => BrokerError::Forbidden(message),
+        },
+    )
+}
+
+fn local_profile_enabled(
+    profile: &agentkeys_core::chain_profile::ChainProfile,
+    rpc: &str,
+    broker: &str,
+    development: bool,
+) -> bool {
+    profile
+        .require_local_development(development, Some(rpc))
+        .is_ok()
+        && agentkeys_core::chain_profile::is_loopback_http_endpoint(broker)
+}
+
+pub(crate) fn local_enabled(state: &SharedState) -> bool {
+    let Ok(profile) = super::console::profile() else {
+        return false;
+    };
+    let Ok((rpc, _)) = load_chain_read_config() else {
+        return false;
+    };
+    local_profile_enabled(
+        &profile,
+        &rpc,
+        &state.config.oidc_issuer,
+        state.config.dev_mode,
+    )
+}
+
+pub async fn local_start(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(request): Json<LocalBrowserStartRequest>,
+) -> Result<Json<HostedSignerChallenge>, BrokerError> {
+    if !local_enabled(&state) {
         return Err(BrokerError::Forbidden(
-            "proof credential does not match enrollment".into(),
+            "local browser setup requires the local development stack".into(),
         ));
     }
-    let parts = decode_assertion_parts(proof).map_err(BrokerError::BadRequest)?;
-    let client_data: serde_json::Value = serde_json::from_slice(&parts.client_data_json)
-        .map_err(|error| BrokerError::BadRequest(format!("client data: {error}")))?;
-    let challenge = enrollment_challenge(intent)?;
-    if client_data.get("origin").and_then(|value| value.as_str()) != Some(&intent.origin)
-        || client_data.get("type").and_then(|value| value.as_str()) != Some("webauthn.get")
-        || client_data
-            .get("challenge")
-            .and_then(|value| value.as_str())
-            != Some(&URL_SAFE_NO_PAD.encode(challenge))
-        || client_data
-            .get("crossOrigin")
-            .and_then(|value| value.as_bool())
-            == Some(true)
+    if serde_json::to_vec(&request)
+        .map_err(|error| BrokerError::BadRequest(error.to_string()))?
+        .len()
+        > MAX_BROWSER_APPROVAL_BYTES
     {
-        return Err(BrokerError::Forbidden(
-            "new credential proof has the wrong origin, challenge, or context".into(),
+        return Err(BrokerError::BadRequest(
+            "browser request is too large".into(),
         ));
     }
-    let address = ecrecover_eip191(&challenge, device_proof)
-        .map_err(|_| BrokerError::Forbidden("new device proof rejected".into()))?;
-    let derived_hash =
-        device_key_hash(&address).map_err(|error| BrokerError::BadRequest(error.to_string()))?;
-    if word(&derived_hash, "derived device hash")?
-        != word(&intent.device_key_hash, "device_key_hash")?
+    let origin = reqwest::Url::parse(&request.enrollment.origin)
+        .map_err(|_| BrokerError::BadRequest("invalid browser origin".into()))?;
+    if origin.scheme() != "http"
+        || origin.host_str() != Some("localhost")
+        || request.enrollment.rp_id != "localhost"
+        || headers
+            .get("origin")
+            .is_some_and(|header| header.to_str().ok() != Some(request.enrollment.origin.as_str()))
     {
         return Err(BrokerError::Forbidden(
-            "device proof does not own the requested K10 binding".into(),
+            "local browser setup requires the configured localhost origin".into(),
         ));
     }
-    Ok(challenge)
+    let omni = word(&request.operator_omni, "operator_omni")?;
+    state
+        .config
+        .login_access
+        .require_omni(&state, &hex0x(&omni))
+        .await?;
+    prepare_challenge(state, omni, request.enrollment).await
 }
 
 struct RegistryDevice {
@@ -268,6 +293,14 @@ pub async fn start(
     Json(request): Json<HostedSignerStartRequest>,
 ) -> Result<Json<HostedSignerChallenge>, BrokerError> {
     let omni = operator(&state, &headers).await?;
+    prepare_challenge(state, omni, request).await
+}
+
+async fn prepare_challenge(
+    state: SharedState,
+    omni: [u8; 32],
+    request: HostedSignerStartRequest,
+) -> Result<Json<HostedSignerChallenge>, BrokerError> {
     let (config, _) = load_accept_config().map_err(BrokerError::BackendUnreachable)?;
     let account = current_account(&state, &config.rpc_url, &config.registry, &omni).await?;
     let nonce = operator_nonce(&state, &config.rpc_url, &config.registry, &omni).await?;
@@ -605,6 +638,47 @@ pub async fn dismiss(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agentkeys_core::device_crypto::device_key_hash;
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+
+    #[test]
+    fn local_browser_setup_requires_all_development_boundaries() {
+        let mut profile =
+            agentkeys_core::chain_profile::ChainProfile::load_builtin("anvil").unwrap();
+        let rpc = profile.rpc.http.clone();
+        assert!(local_profile_enabled(
+            &profile,
+            &rpc,
+            "http://127.0.0.1:9000",
+            true
+        ));
+        assert!(!local_profile_enabled(
+            &profile,
+            &rpc,
+            "http://127.0.0.1:9000",
+            false
+        ));
+        assert!(!local_profile_enabled(
+            &profile,
+            "https://rpc.example.test",
+            "http://127.0.0.1:9000",
+            true
+        ));
+        assert!(!local_profile_enabled(
+            &profile,
+            &rpc,
+            "https://broker.example.test",
+            true
+        ));
+        profile.chain_id += 1;
+        assert!(!local_profile_enabled(
+            &profile,
+            &rpc,
+            "http://127.0.0.1:9000",
+            true
+        ));
+    }
+
     use agentkeys_core::device_crypto::{eip191_sign, evm_address};
     use p256::ecdsa::{signature::Signer as _, Signature, SigningKey};
 
@@ -684,6 +758,28 @@ mod tests {
         let mut wrong = assertion.clone();
         wrong.credential_id = URL_SAFE_NO_PAD.encode(b"other");
         assert!(validate_public_proofs(&intent, &wrong, &device_proof).is_err());
+    }
+    #[test]
+    fn rejects_wrong_passkey_rp_flags_and_cross_origin_proofs() {
+        let (intent, key, device) = fixture();
+        let assertion = proof(&intent, &key);
+        let device_proof = eip191_sign(&device, &enrollment_challenge(&intent).unwrap()).unwrap();
+        let other = p256::ecdsa::SigningKey::random(&mut rand_core::OsRng);
+        assert!(validate_public_proofs(&intent, &proof(&intent, &other), &device_proof).is_err());
+        for (index, value) in [(0, 0), (32, 1)] {
+            let mut changed = assertion.clone();
+            let mut authenticator = URL_SAFE_NO_PAD.decode(&changed.authenticator_data).unwrap();
+            authenticator[index] = value;
+            changed.authenticator_data = URL_SAFE_NO_PAD.encode(authenticator);
+            assert!(validate_public_proofs(&intent, &changed, &device_proof).is_err());
+        }
+        let mut changed = assertion.clone();
+        let mut client: serde_json::Value =
+            serde_json::from_slice(&URL_SAFE_NO_PAD.decode(&changed.client_data_json).unwrap())
+                .unwrap();
+        client["crossOrigin"] = serde_json::json!(true);
+        changed.client_data_json = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&client).unwrap());
+        assert!(validate_public_proofs(&intent, &changed, &device_proof).is_err());
     }
     #[test]
     fn exact_origin_rp_binding_requires_the_configured_secure_origin() {

@@ -5,7 +5,8 @@ use std::{collections::HashMap, sync::RwLock};
 
 const MAX_PENDING_PER_OPERATOR: usize = 4;
 const MAX_PENDING_REQUESTS: usize = 1024;
-pub(crate) const MAX_PUBLIC_REQUEST_BYTES: usize = 16 * 1024;
+pub(crate) const MAX_PUBLIC_REQUEST_BYTES: usize =
+    agentkeys_protocol::hosted_signer::MAX_BROWSER_APPROVAL_BYTES;
 pub(crate) fn check_size(approval: &HostedSignerApproval) -> Result<(), String> {
     if serde_json::to_vec(approval)
         .map_err(|error| error.to_string())?

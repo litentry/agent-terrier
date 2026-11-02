@@ -111,6 +111,7 @@ impl BrokerConfig {
                     chain_id: chain_id.to_string(),
                     signer_url,
                     email_allowlist_enabled: login_access.is_restricted(),
+                    local_browser_enrollment: false,
                 },
             );
         Ok(Self {
