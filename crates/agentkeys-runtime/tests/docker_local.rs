@@ -100,6 +100,11 @@ async fn real_docker_lifecycle_and_isolation() -> Result<()> {
     let first_actor = hex::encode([3; 32]);
     let second_actor = hex::encode([4; 32]);
     let count = Arc::new(AtomicUsize::new(0));
+    let foreign_configuration = DockerConfig {
+        namespace: format!("foreign-{}", uuid::Uuid::new_v4().simple()),
+        ..config.clone()
+    };
+    let foreign = DockerRuntime::connect(foreign_configuration).await?;
     let qualification = async {
         let first = runtime.ensure_for_delegate_with_envs(&first_device, &first_actor, &[], environment(&first_actor, count.clone())).await?;
         ensure!(first.created, "first ensure must create");
@@ -137,7 +142,6 @@ async fn real_docker_lifecycle_and_isolation() -> Result<()> {
         ensure!(client.get(&endpoint).send().await?.status() == 403, "missing forwarding proof was accepted");
         ensure!(runtime.ensure_for_delegate_with_envs(&first_device, &second_actor, &[], environment(&second_actor, count.clone())).await.is_err(), "foreign actor reused the runtime");
         ensure!(count.load(Ordering::SeqCst) == 1, "denial minted a credential");
-        let foreign = DockerRuntime::connect(DockerConfig { namespace: format!("foreign-{}", uuid::Uuid::new_v4().simple()), ..config.clone() }).await?;
         ensure!(foreign.booted_image_info(&first.sandbox_id).await.is_err(), "foreign namespace accessed metadata");
         ensure!(foreign.kill_for_device(&first_device).await?.is_empty(), "foreign namespace removed a runtime");
         ensure!(engine.inspect(&first.sandbox_id).await?["State"]["Running"] == true, "negative test changed the authorized runtime");
@@ -177,6 +181,13 @@ async fn real_docker_lifecycle_and_isolation() -> Result<()> {
         ensure!(!runtime.reset_state_for_device(&first_device, &first_actor).await?, "repeated reset was not idempotent");
         let fresh = runtime.ensure_for_delegate_with_envs(&first_device, &first_actor, &[], environment(&first_actor, count.clone())).await?;
         engine.run(&["exec", &fresh.sandbox_id, "test", "!", "-e", &state_file]).await.context("explicit reset retained old state")?;
+        let foreign_instance = foreign.ensure_for_delegate_with_envs(&first_device, &first_actor, &[], environment(&first_actor, count.clone())).await?;
+        engine.run(&["exec", &foreign_instance.sandbox_id, "sh", "-c", "umask 077; printf %s foreign-stack-state > \"$1\"", "foreign-state", &state_file]).await?;
+        ensure!(DockerRuntime::reset_local(config.clone()).await? == 2, "namespace reset did not remove both owned actors");
+        ensure!(DockerRuntime::reset_local(config.clone()).await? == 0, "namespace reset is not idempotent");
+        ensure!(engine.inspect(&foreign_instance.sandbox_id).await?["State"]["Running"] == true, "namespace reset stopped another stack");
+        ensure!(engine.run(&["exec", &foreign_instance.sandbox_id, "cat", &state_file]).await? == b"foreign-stack-state", "namespace reset changed another stack's data");
+        engine.run(&["image", "inspect", &fixture_image]).await.context("namespace reset removed its shared image")?;
         Ok::<_, anyhow::Error>(())
     }.await;
     let first_cleanup = runtime.kill_for_device(&first_device).await;
@@ -187,12 +198,18 @@ async fn real_docker_lifecycle_and_isolation() -> Result<()> {
     let second_state_cleanup = runtime
         .reset_state_for_device(&second_device, &second_actor)
         .await;
+    let foreign_cleanup = foreign.kill_for_device(&first_device).await;
+    let foreign_state_cleanup = foreign
+        .reset_state_for_device(&first_device, &first_actor)
+        .await;
     let image_cleanup = engine.run(&["image", "rm", &fixture_image]).await;
     qualification?;
     first_cleanup?;
     second_cleanup?;
     first_state_cleanup?;
     second_state_cleanup?;
+    foreign_cleanup?;
+    foreign_state_cleanup?;
     image_cleanup?;
     Ok(())
 }

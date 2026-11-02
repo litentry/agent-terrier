@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import stat
 import tempfile
+import time
 
 
 def private_directory(directory):
@@ -64,13 +65,18 @@ def write_json(path, value):
 
 
 @contextmanager
-def exclusive_lock(path):
+def exclusive_lock(path, timeout=0):
     descriptor = open_private(path, os.O_CREAT | os.O_RDWR)
+    deadline = time.monotonic() + timeout
     try:
-        try:
-            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            raise RuntimeError("Another local operation owns this state") from None
+        while True:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise RuntimeError("Another local operation owns this state") from None
+                time.sleep(0.05)
         yield
     finally:
         os.close(descriptor)

@@ -1,10 +1,11 @@
 import sys
 
 MENU = (("Status", "status"), ("Check health", "doctor"), ("Start", "start"),
-        ("Restart, keeping data", "restart"), ("Show private logs", "logs"), ("Stop, keeping data", "stop"))
+        ("Restart, keeping data", "restart"), ("Show private logs", "logs"), ("Stop, keeping data", "stop"),
+        ("Reset, deleting this stack's keys and data", "reset"))
 
 
-def run(dispatch, input_stream=None, output_stream=None):
+def run(dispatch, input_stream=None, output_stream=None, state=None):
     source = input_stream if input_stream is not None else sys.stdin
     destination = output_stream if output_stream is not None else sys.stdout
     if not source.isatty() or not destination.isatty():
@@ -22,6 +23,17 @@ def run(dispatch, input_stream=None, output_stream=None):
             print("Choose a listed number or q.", file=destination)
             continue
         action = MENU[int(selected) - 1][1]
-        exit_code = dispatch(["stack", action])
+        arguments = ["stack", action]
+        if action == "reset":
+            if state is None:
+                raise ValueError("Reset requires the selected local state directory")
+            print(f"Permanently delete this stack's keys, chain and data. Type {state} to confirm: ",
+                end="", file=destination, flush=True)
+            confirmation = source.readline().rstrip("\r\n")
+            if confirmation != str(state):
+                print("Reset cancelled.", file=destination)
+                continue
+            arguments.extend(["--confirm-state", confirmation])
+        exit_code = dispatch(arguments)
         if exit_code:
             print("The operation did not complete. Inspect the reported error before retrying.", file=destination)

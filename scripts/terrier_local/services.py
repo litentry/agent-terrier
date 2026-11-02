@@ -59,18 +59,22 @@ def available_port():
         return listener.getsockname()[1]
 
 
+def validate_manifest(manifest, fingerprint):
+    if (not isinstance(manifest, dict) or manifest.get("version") not in (1, 2, 3, 4, 5, 6, 7, 8, MANIFEST_VERSION) or manifest.get("development_only") is not True
+            or manifest.get("profile_identity") != fingerprint
+            or type(manifest.get("initialized")) is not bool
+            or type(manifest.get("broker_port")) is not int
+            or not 1 <= manifest["broker_port"] <= 65535):
+        raise ValueError("Service state belongs to another deployment or has an invalid manifest")
+
+
 def prepare(repository, state, binaries, port, runtime_image=None, docker_socket=None, model_directory=None, model_binary=None, enable_website=None, web_port=None, runtime_disk_policy=None):
     running_chain, profile, fingerprint = deployment.active_profile(repository, state)
     directory = local_state.private_directory(state / "services")
     manifest_path = directory / "manifest.json"
     if manifest_path.exists() or manifest_path.is_symlink():
         manifest = local_state.read_json(manifest_path)
-        if (not isinstance(manifest, dict) or manifest.get("version") not in (1, 2, 3, 4, 5, 6, 7, 8, MANIFEST_VERSION) or manifest.get("development_only") is not True
-                or manifest.get("profile_identity") != fingerprint
-                or type(manifest.get("initialized")) is not bool
-                or type(manifest.get("broker_port")) is not int
-                or not 1 <= manifest["broker_port"] <= 65535):
-            raise ValueError("Service state belongs to another deployment or has an invalid manifest")
+        validate_manifest(manifest, fingerprint)
         if port is not None and port != manifest["broker_port"]:
             raise ValueError("The broker port is bound to existing service sessions; retain it or explicitly migrate the state")
     else:
