@@ -67,8 +67,13 @@ class LocalWebsiteQualification(LocalOwnerFixture):
             self.assertEqual(len(group["services"]), 14)
             address = group["services"]["website"]["url"]
             broker = group["services"]["broker"]["url"]
-            self.assertEqual(address, f"http://127.0.0.1:{web_port}")
+            self.assertEqual(address, f"http://localhost:{web_port}")
             self.assertEqual(self.stack(state, "start")["services"], group)
+            before_host_change = local_state.read_json(state / "services/manifest.json")
+            refused_host = self.stack(state, "start", "--website", "--web-host", "127.0.0.1", success=False)
+            self.assertIn("Stop local services", refused_host["error"])
+            self.assertEqual(local_state.read_json(state / "services/manifest.json"), before_host_change)
+            self.assertTrue(refused_host["ready"])
             status, payload, headers = request(address + "/api/healthz")
             self.assertEqual(status, 200)
             self.assertIn("no-store", headers.get("Cache-Control", ""))
@@ -109,6 +114,13 @@ class LocalWebsiteQualification(LocalOwnerFixture):
             self.assertTrue(self.stack(state, "stop")["state_preserved"])
             self.assertFalse(website.healthy(address, broker, next_health["instance"]))
             self.assertFalse(self.stack(state, "doctor", success=False)["ready"])
+            switched = self.stack(state, "start", "--website", "--web-host", "127.0.0.1")
+            selected_address = switched["services"]["services"]["website"]["url"]
+            self.assertEqual(selected_address, f"http://127.0.0.1:{web_port}")
+            selected_broker = switched["services"]["services"]["broker"]["url"]
+            self.assertEqual(request(selected_broker + "/healthz", origin=selected_address)[2].get("Access-Control-Allow-Origin"), selected_address)
+            self.assertIsNone(request(selected_broker + "/healthz", origin=address)[2].get("Access-Control-Allow-Origin"))
+            self.assertEqual(self.stack(state, "restart")["services"]["services"]["website"]["url"], selected_address)
             completed = True
         finally:
             foreign.shutdown()

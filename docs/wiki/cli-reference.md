@@ -34,6 +34,7 @@ Agent Terrier local development tools
 | --model-binary | no |  | Installed Ollama executable; requires --model-dir |
 | --website | no |  | Own the prebuilt local web console |
 | --web-port | no |  | First website port; requires --website and otherwise selects a free port |
+| --web-host | no | localhost, 127.0.0.1 | Explicit website origin host; requires --website and stopped services to change an existing origin |
 
 ## terrier test
 
@@ -93,6 +94,7 @@ Agent Terrier local development tools
 | --model-binary | no |  | Installed Ollama executable; requires --model-dir |
 | --website | no |  | Own the prebuilt local web console |
 | --web-port | no |  | First website port; requires --website and otherwise selects a free port |
+| --web-host | no | localhost, 127.0.0.1 | Explicit website origin host; requires --website and stopped services to change an existing origin |
 
 ## terrier channel
 
