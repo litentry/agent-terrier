@@ -27,7 +27,7 @@ fn service(base: &str) -> ConsoleApps {
             config_url: base.into(),
             memory_url: base.into(),
             credential_url: base.into(),
-            audit_url: base.into(),
+            audit_url: Some(base.into()),
             classify_url: Some(base.into()),
         }),
         config(base),

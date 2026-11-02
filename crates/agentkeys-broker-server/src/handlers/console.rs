@@ -49,22 +49,14 @@ pub async fn config(State(state): State<SharedState>) -> Result<Json<ConsoleConf
                 .retain(|contract| contract.name != "CredentialAudit");
         }
     }
-    let worker = |name: &str| -> Result<String, BrokerError> {
+    let worker = |name: &str| {
         let key = format!("AGENTKEYS_WORKER_{}_URL", name.to_uppercase());
-        match std::env::var(key)
-            .ok()
-            .filter(|value| !value.trim().is_empty())
-        {
-            Some(value) if agentkeys_protocol::worker_override_matches_broker(&value, &broker) => {
-                Ok(value)
-            }
-            Some(_) => Err(BrokerError::BackendUnreachable(format!(
-                "{name} worker belongs to a different stack"
-            ))),
-            None => agentkeys_protocol::derive_worker_url(&broker, name).ok_or_else(|| {
-                BrokerError::BackendUnreachable(format!("cannot derive {name} worker URL"))
-            }),
-        }
+        worker_url(&broker, name, std::env::var(key).ok())
+    };
+    let required_worker = |name: &str| {
+        worker(name)?.ok_or_else(|| {
+            BrokerError::BackendUnreachable(format!("cannot derive {name} worker URL"))
+        })
     };
     let chain = ConsoleChainInfo {
         name: profile.name.clone(),
@@ -93,12 +85,12 @@ pub async fn config(State(state): State<SharedState>) -> Result<Json<ConsoleConf
     Ok(Json(ConsoleConfig {
         chain,
         signer_url: super::auth::session::signer_url(&state)?,
-        config_url: worker("config")?,
-        memory_url: worker("memory")?,
-        credential_url: worker("cred")?,
+        config_url: required_worker("config")?,
+        memory_url: required_worker("memory")?,
+        credential_url: required_worker("cred")?,
         audit_url: worker("audit")?,
-        channel_url: worker("channel")?,
-        classify_url: worker("classify")?,
+        channel_url: required_worker("channel")?,
+        classify_url: required_worker("classify")?,
     }))
 }
 
@@ -129,4 +121,47 @@ pub async fn fleet(
     .await
     .map_err(BrokerError::BackendUnreachable)?;
     Ok(Json(fleet))
+}
+
+fn worker_url(
+    broker: &str,
+    name: &str,
+    configured: Option<String>,
+) -> Result<Option<String>, BrokerError> {
+    match configured.filter(|value| !value.trim().is_empty()) {
+        Some(value) if agentkeys_protocol::worker_override_matches_broker(&value, broker) => {
+            Ok(Some(value))
+        }
+        Some(_) => Err(BrokerError::BackendUnreachable(format!(
+            "{name} worker belongs to a different stack"
+        ))),
+        None => Ok(agentkeys_protocol::derive_worker_url(broker, name)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn worker_coordinates_preserve_explicit_and_derived_stack_boundaries() {
+        let local = "http://127.0.0.1:4100";
+        assert_eq!(worker_url(local, "audit", None).unwrap(), None);
+        let configured = "http://127.0.0.1:4200".to_owned();
+        assert_eq!(
+            worker_url(local, "audit", Some(configured.clone())).unwrap(),
+            Some(configured)
+        );
+        assert!(worker_url(local, "audit", Some("https://audit.foreign.example".into())).is_err());
+        assert!(worker_url(
+            "https://broker.public.example",
+            "audit",
+            Some("https://audit.foreign.example".into())
+        )
+        .is_err());
+        assert_eq!(
+            worker_url("https://broker.public.example", "audit", None).unwrap(),
+            Some("https://audit.public.example".into())
+        );
+    }
 }

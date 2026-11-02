@@ -223,7 +223,7 @@ async fn console_setup() -> (
         config_url: endpoint.clone(),
         memory_url: endpoint.clone(),
         credential_url: endpoint.clone(),
-        audit_url: endpoint.clone(),
+        audit_url: Some(endpoint.clone()),
         channel_url: endpoint.clone(),
         classify_url: endpoint.clone(),
     };

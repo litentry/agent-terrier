@@ -76,7 +76,7 @@ pub struct ConsoleConfig {
     pub config_url: String,
     pub memory_url: String,
     pub credential_url: String,
-    pub audit_url: String,
+    pub audit_url: Option<String>,
     pub channel_url: String,
     pub classify_url: String,
 }

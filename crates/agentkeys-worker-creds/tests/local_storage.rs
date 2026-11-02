@@ -1280,7 +1280,7 @@ async fn browser_client_uses_real_scoped_memory_without_cloud_credentials() {
         signer_url: "http://127.0.0.1:1".into(),
         config_url: String::new(),
         credential_url: String::new(),
-        audit_url: String::new(),
+        audit_url: None,
         classify_url: None,
     });
     let operator = "11".repeat(32);
