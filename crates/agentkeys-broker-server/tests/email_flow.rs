@@ -134,6 +134,7 @@ async fn spawn_broker_fixture(
             chain_id: "212013".into(),
             signer_url,
             email_allowlist_enabled: login_access.is_restricted(),
+            local_browser_enrollment: false,
         }),
         login_access,
         channel_wake_token: String::new(),

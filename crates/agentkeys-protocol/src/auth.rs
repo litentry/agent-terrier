@@ -67,6 +67,8 @@ pub struct LoginConfig {
     pub chain_id: String,
     pub signer_url: String,
     pub email_allowlist_enabled: bool,
+    #[serde(default)]
+    pub local_browser_enrollment: bool,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeriveAddressRequest {

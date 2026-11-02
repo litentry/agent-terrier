@@ -94,17 +94,10 @@ pub fn assemble_hosted_signer_userop(
     master: &agentkeys_core::erc4337::AdditionalMaster<'_>,
     broker_sk: &SigningKey,
 ) -> Result<AssembledAcceptUserOp> {
-    let signer_call = agentkeys_core::erc4337::add_signer_calldata(
-        master.credential_hash,
-        master.pub_x,
-        master.pub_y,
-        master.rp_id_hash,
-    );
-    let device_call = agentkeys_core::erc4337::additional_master_calldata(master);
-    let call_data = agentkeys_core::erc4337::execute_batch_calldata(
-        &[params.master_account, params.registry],
-        &[0, 0],
-        &[signer_call, device_call],
+    let call_data = agentkeys_core::erc4337::hosted_signer_batch_calldata(
+        &params.master_account,
+        &params.registry,
+        master,
     );
     assemble_userop_with_calldata(params, call_data, Vec::new(), broker_sk)
 }

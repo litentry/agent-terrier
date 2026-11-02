@@ -24,6 +24,7 @@ pub async fn login_config(
             BrokerError::BackendUnreachable("browser login is not configured".into())
         })?;
     config.email_allowlist_enabled = state.config.login_access.is_restricted();
+    config.local_browser_enrollment = crate::handlers::hosted_signer::local_enabled(&state);
     Ok(([("cache-control", "no-store")], Json(config)))
 }
 

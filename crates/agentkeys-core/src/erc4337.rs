@@ -135,6 +135,21 @@ pub struct AdditionalMaster<'a> {
     pub s: &'a [u8; 32],
 }
 
+pub fn hosted_signer_batch_calldata(
+    account: &[u8; 20],
+    registry: &[u8; 20],
+    master: &AdditionalMaster<'_>,
+) -> Vec<u8> {
+    let signer_call = add_signer_calldata(
+        master.credential_hash,
+        master.pub_x,
+        master.pub_y,
+        master.rp_id_hash,
+    );
+    let device_call = additional_master_calldata(master);
+    execute_batch_calldata(&[*account, *registry], &[0, 0], &[signer_call, device_call])
+}
+
 pub fn additional_master_calldata(master: &AdditionalMaster<'_>) -> Vec<u8> {
     let mut assertion = Vec::new();
     assertion.extend_from_slice(master.attesting_device_key_hash);

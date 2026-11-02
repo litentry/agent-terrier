@@ -3,6 +3,16 @@ use ts_rs::TS;
 
 pub const HOSTED_SIGNER_TTL_SECONDS: u64 = 600;
 pub const HOSTED_SIGNER_CAP_MINT_ROLE: u8 = 1;
+pub const MAX_BROWSER_APPROVAL_BYTES: usize = 16 * 1024;
+pub const LOCAL_BROWSER_START_ROUTE: &str = "/v1/local/browser/start";
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]
+#[serde(deny_unknown_fields)]
+pub struct LocalBrowserStartRequest {
+    pub operator_omni: String,
+    pub enrollment: HostedSignerStartRequest,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../../../apps/parent-control/lib/generated/")]

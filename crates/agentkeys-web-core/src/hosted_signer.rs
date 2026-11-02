@@ -5,6 +5,14 @@ use agentkeys_protocol::{
 };
 
 impl BrokerClient {
+    pub async fn local_browser_start(
+        &self,
+        request: &LocalBrowserStartRequest,
+    ) -> Result<HostedSignerChallenge, BrokerError> {
+        self.post_json(LOCAL_BROWSER_START_ROUTE, None, request)
+            .await
+    }
+
     pub async fn hosted_signer_start(
         &self,
         bearer: &str,

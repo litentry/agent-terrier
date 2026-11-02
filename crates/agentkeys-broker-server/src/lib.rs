@@ -55,6 +55,10 @@ pub fn create_router(state: SharedState) -> Router {
         )
         .route("/healthz", get(handlers::broker_status::healthz))
         .route("/v1/console/config", get(handlers::console::config))
+        .route(
+            agentkeys_protocol::hosted_signer::LOCAL_BROWSER_START_ROUTE,
+            post(handlers::hosted_signer::local_start),
+        )
         .route("/v1/console/fleet", get(handlers::console::fleet))
         .route("/v1/console/audit", get(handlers::console_audit::recent))
         .route(

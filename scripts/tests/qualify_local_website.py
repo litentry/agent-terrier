@@ -1,6 +1,9 @@
 """Explicit prebuilt website lifecycle and exact-origin qualification with real local services."""
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import base64
+import copy
 import json
+import secrets
 import shutil
 from pathlib import Path
 import tempfile
@@ -35,12 +38,15 @@ class LocalWebsiteQualification(LocalOwnerFixture):
         web_port = foreign.server_port
         client = urllib.request.build_opener(urllib.request.ProxyHandler({}), chain.NoRedirect())
 
-        def request(address, method="GET", origin=None):
+        def request(address, method="GET", origin=None, body=None):
             headers = {"Origin":origin} if origin else {}
             if method == "OPTIONS":
                 headers.update({"Access-Control-Request-Method":"POST", "Access-Control-Request-Headers":"authorization,content-type"})
+            if body is not None:
+                headers["Content-Type"] = "application/json"
+            encoded = None if body is None else json.dumps(body).encode()
             try:
-                response = client.open(urllib.request.Request(address, method=method, headers=headers), timeout=3)
+                response = client.open(urllib.request.Request(address, method=method, headers=headers, data=encoded), timeout=3)
             except urllib.error.HTTPError as error:
                 response = error
             with response:
@@ -83,6 +89,41 @@ class LocalWebsiteQualification(LocalOwnerFixture):
             self.assertFalse(website.healthy(address, broker, "wrong-instance"))
             self.assertFalse(website.healthy(address, "http://127.0.0.1:1", health["instance"]))
             self.assertIn(b"terrier-backend-configuration", request(address)[1])
+            owner = self.owner(state, "register", "--name", "browser-owner")
+            enrollment = {
+                "operator_omni": owner["operator_omni"],
+                "enrollment": {
+                    "credential_id": base64.urlsafe_b64encode(secrets.token_bytes(32)).decode().rstrip("="),
+                    "public_key_x": "0x6b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296",
+                    "public_key_y": "0x4fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5",
+                    "device_key_hash": "0x" + secrets.token_hex(32),
+                    "origin": address, "rp_id": "localhost",
+                },
+            }
+            before = chain.rpc(started["chain"]["rpc_http"], "eth_blockNumber")
+            self.assertTrue(json.loads(request(broker + "/v1/auth/config")[1])["local_browser_enrollment"])
+            challenge_status, challenge_body, _ = request(broker + "/v1/local/browser/start", "POST", address, enrollment)
+            self.assertEqual(challenge_status, 200, challenge_body)
+            challenge = json.loads(challenge_body)
+            self.assertEqual(challenge["intent"]["account"], owner["account"])
+            self.assertEqual(challenge["intent"]["operator_omni"], owner["operator_omni"])
+            self.assertNotIn("session_jwt", challenge)
+            self.assertEqual(request(broker + "/v1/auth/session")[0], 401)
+            for field, value, expected in [
+                ("operator_omni", "0x" + secrets.token_hex(32), 403),
+                ("origin", "http://localhost:1", 403),
+                ("rp_id", "127.0.0.1", 403),
+                ("device_key_hash", owner["device_key_hash"], 400),
+                ("credential_id", "a" * (16 * 1024 + 1), 400),
+            ]:
+                invalid = copy.deepcopy(enrollment)
+                target = invalid if field == "operator_omni" else invalid["enrollment"]
+                target[field] = value
+                status, _, _ = request(broker + "/v1/local/browser/start", "POST", invalid["enrollment"]["origin"], invalid)
+                self.assertEqual(status, expected, field)
+            self.assertEqual(request(broker + "/v1/local/browser/start", "POST", "http://unrelated.example.test", enrollment)[0], 403)
+            self.assertEqual(chain.rpc(started["chain"]["rpc_http"], "eth_blockNumber"), before,
+                "Public challenge requests must not register an identity or write chain state")
             foreign_origin = "http://unrelated.example.test"
             for name in ("broker", *services.WORKERS, *services.COMPUTE_WORKERS):
                 endpoint = group["services"][name]["url"]
