@@ -20,6 +20,22 @@ import qualify_local_services
 from terrier_local import chain, contracts, local_state, models
 
 
+CHANNEL_STARTUP_TIMEOUT_SECONDS = 180
+CHANNEL_REPLY_TIMEOUT_SECONDS = 60
+
+
+def latest_lifecycle(events):
+    reports = [json.loads(base64.b64decode(event["body"], validate=True))
+               for event in events if event.get("kind") == "lifecycle" and event.get("direction") == "out"]
+    return reports[-1].get("stage") if reports else None
+
+
+def completed_reply(event, correlation, marker):
+    return (event.get("direction") == "out" and event.get("kind") == "text"
+            and event.get("correlation") == correlation and not event.get("partial")
+            and marker in base64.b64decode(event.get("body") or "", validate=True).decode())
+
+
 class LocalAgentQualification(LocalOwnerFixture):
     def services(self, state, *arguments, **options):
         result = qualify_local_services.LocalServicesQualification.services(self, state, *arguments, **options)
@@ -284,23 +300,34 @@ visit(process.argv[1]); process.stdout.write(JSON.stringify(sessions));
                     "removing the real chain grant must deny the previously permitted tool target")
                 self.assertEqual(channel_events(denied_channel), granted_events,
                     "revoked tool changed the channel")
+                startup_started = time.monotonic()
+                while True:
+                    knowledge_stage = latest_lifecycle(channel_events("opchat-local-agent"))
+                    if knowledge_stage in ("ready", "pulling", "degraded"):
+                        break
+                    self.assertLess(time.monotonic() - startup_started, CHANNEL_STARTUP_TIMEOUT_SECONDS,
+                        "agent lifecycle never reached ready or explicit degraded operation")
+                    time.sleep(0.5)
+                channel_startup_wait_seconds = round(time.monotonic() - startup_started, 3)
                 channel_marker = "channel" + uuid.uuid4().hex[:8]
                 published = subprocess.run([sys.executable, str(REPOSITORY / "terrier"), "channel", "publish",
                     "opchat-local-agent", "--name", "alice", "--text-stdin"], env=environment,
-                    input=f"Reply with exactly this word: {channel_marker}. /no_think", capture_output=True,
+                    input=f"Reply directly with exactly this word: {channel_marker}, without calling tools. /no_think", capture_output=True,
                     text=True, timeout=45)
                 self.assertTrue(all(secret not in published.stdout + published.stderr for secret in secrets))
                 self.assertEqual(published.returncode, 0, published.stderr)
-                self.assertTrue(json.loads(published.stdout)["response"]["ok"])
-                deadline = time.monotonic() + 60
+                publish_receipt = json.loads(published.stdout)["response"]
+                self.assertTrue(publish_receipt["ok"])
+                reply_started = time.monotonic()
+                deadline = reply_started + CHANNEL_REPLY_TIMEOUT_SECONDS
                 while True:
                     delivered = [event for event in channel_events("opchat-local-agent")
-                        if event["direction"] == "out" and not event.get("partial") and
-                        channel_marker in base64.b64decode(event.get("body") or "").decode()]
+                        if completed_reply(event, publish_receipt["event_id"], channel_marker)]
                     if delivered:
                         break
                     self.assertLess(time.monotonic(), deadline, "owner channel message received no completed agent reply")
                     time.sleep(0.5)
+                channel_reply_seconds = round(time.monotonic() - reply_started, 3)
             operation_path = state / "owners/alice/operations" / (created["user_op_hash"] + ".json")
             operation = local_state.read_json(operation_path)
             self.assertEqual(operation_path.stat().st_mode & 0o777, 0o600)
@@ -445,7 +472,10 @@ visit(process.argv[1]); process.stdout.write(JSON.stringify(sessions));
                     "model_runner_restart_verified": bool(model_options),
                     "model_publish_tool": True, "ungranted_tool_denied": True, "chain_grant_enables_tool": True,
                     "chain_scope_removal_denies_tool": True, "denied_tool_channel_unchanged": True,
-                    "owner_channel_to_agent_reply": True,
+                    "owner_channel_to_agent_reply": True, "channel_reply_correlated": True,
+                    "knowledge_stage_before_channel_reply": knowledge_stage,
+                    "channel_startup_wait_seconds": channel_startup_wait_seconds,
+                    "channel_reply_seconds": channel_reply_seconds,
                     "not_qualified": ["authorized persistent memory retrieval", "browser", "independent clean install"]}))
             completed = True
         finally:

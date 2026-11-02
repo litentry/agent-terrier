@@ -1,0 +1,115 @@
+{
+  "qualification": "supervised-local-model-application",
+  "external_network_denied": true,
+  "local_unix_control_sockets_allowed": true,
+  "recipe": {
+    "base_url": "http://127.0.0.1:11434/v1",
+    "chat": {
+      "digest": "8f68893c685c3ddff2aa3fffce2aa60a30bb2da65ca488b61fff134a4d1730e7",
+      "model": "qwen3:1.7b"
+    },
+    "embedding": {
+      "digest": "0a109f422b47e3a30ba2b10eca18548e944e8a23073ee3f3e947efcf3c45e59f",
+      "dimension": 768,
+      "model": "nomic-embed-text:v1.5"
+    },
+    "runtime": {
+      "context_length": 4096,
+      "max_loaded_models": 1,
+      "name": "ollama",
+      "parallel_requests": 1,
+      "version": "0.34.4"
+    }
+  },
+  "architecture": "arm64",
+  "operating_system": "15.7.4",
+  "application": {
+    "qualification": "local-agent-application",
+    "real_chain": true,
+    "protected_owner_login": true,
+    "signer_custody": true,
+    "managed_docker": true,
+    "image_id": "sha256:ced54da334e11be4d9aba4e90effe779e5e5def7feb3b5d965ed574316bb5e6a",
+    "container_network": "none",
+    "real_model_chat": true,
+    "restart_recall": true,
+    "foreign_chat_denied": true,
+    "denied_chat_usage_unchanged": true,
+    "revocation": true,
+    "retained_data": true,
+    "model_runner_supervised": true,
+    "model_runner_restart_verified": true,
+    "model_publish_tool": true,
+    "ungranted_tool_denied": true,
+    "chain_grant_enables_tool": true,
+    "chain_scope_removal_denies_tool": true,
+    "denied_tool_channel_unchanged": true,
+    "owner_channel_to_agent_reply": true,
+    "channel_reply_correlated": true,
+    "knowledge_stage_before_channel_reply": "degraded",
+    "channel_startup_wait_seconds": 49.677,
+    "channel_reply_seconds": 4.54,
+    "not_qualified": [
+      "authorized persistent memory retrieval",
+      "browser",
+      "independent clean install"
+    ]
+  },
+  "seconds": 120.328,
+  "date": "2026-11-02",
+  "source": {
+    "base_public_revision": "7ccfc0105320109c19be376829e99c007b70bc6d",
+    "fresh_anonymous_https_checkout": true,
+    "product_source_unchanged_from_base": true,
+    "qualification_files_sha256": {
+      "scripts/tests/qualify_local_agents.py": "9db35a43c389a0395d74ad9f743b2ea19fb03ddc36c22b21b01447c9d1f236a2",
+      "scripts/tests/test_channel_qualification.py": "aed6682b23aa8edbb6b16752fe7ccb017707c89946b9ad433c49a155f5f7bd93"
+    }
+  },
+  "builds": {
+    "fresh_native_workspace_binaries_seconds": 84,
+    "browser_wasm_seconds": 43.71,
+    "built_console_http_qualification_seconds": 7.021,
+    "linux_arm64_rust_stage_seconds": 132.6,
+    "downloaded_dependency_cache_reused": true,
+    "downloaded_models_reused": true,
+    "docker_compiler_cache_reused": true,
+    "cold_dependency_download_seconds": null
+  },
+  "images": [
+    {
+      "reference": "agent-terrier-runtime:stage98",
+      "image_id": "sha256:ced54da334e11be4d9aba4e90effe779e5e5def7feb3b5d965ed574316bb5e6a",
+      "platform": "linux/arm64",
+      "size_bytes": 80484124
+    },
+    {
+      "reference": "agent-terrier-runtime:stage98-tests",
+      "image_id": "sha256:01d90ee1035db95ba9f0a75337d74d63b49a1410292e9850f15c32d6865acc33",
+      "platform": "linux/arm64",
+      "size_bytes": 80494221
+    }
+  ],
+  "image_component_tests": {
+    "passed": 7,
+    "failed": 0,
+    "seconds": 2.531,
+    "network": "none"
+  },
+  "artifact_privacy": {
+    "image_first_party_files_and_metadata": 55,
+    "findings": 0
+  },
+  "initial_attempt": {
+    "passed": false,
+    "reason": "Channel reply deadline included knowledge startup; no completed reply arrived within that bound.",
+    "seconds": 128.735
+  },
+  "limits": [
+    "This qualifies the CLI application from a fresh public checkout; browser onboarding and a complete independent installation walkthrough remain open.",
+    "Knowledge readiness was explicitly degraded. Persistent authorized application memory is not qualified.",
+    "Images were built locally from the recorded source. Registry distribution and additional architecture acceptance remain open.",
+    "Dependency and model downloads were already cached. These are not cold-download timings.",
+    "Artifact scanning covered first-party executables, runtime files and image configuration/history; it is not a certification of all third-party image contents."
+  ]
+}
