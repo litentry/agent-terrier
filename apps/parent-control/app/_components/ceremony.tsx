@@ -5,6 +5,7 @@ import { txHash } from '@/lib/demoData';
 import { useClient } from '@/lib/ClientProvider';
 import { CoreBackend } from '@/lib/client/core';
 import { HostedBrowserEnrollment } from './HostedBrowserEnrollment';
+import { LocalBrowserEnrollment } from './LocalBrowserEnrollment';
 import type { AgentKeysClient, ConfigPreset, ReloginInfo } from '@/lib/client/types';
 import { credentialToFinishPayload, getAssertionOverHash, jsonToCreationOptions, webauthnAvailable } from '@/lib/webauthn';
 import type { AcceptAssertion } from '@/lib/webauthn';
@@ -485,6 +486,19 @@ export function OnboardingScreen({
 }) {
   const client = useClient();
   const hosted = client instanceof CoreBackend;
+  const [localEnrollment, setLocalEnrollment] = useState<boolean | null>(null);
+  const [localEnrollmentError, setLocalEnrollmentError] = useState('');
+  const [localEnrollmentRetry, setLocalEnrollmentRetry] = useState(0);
+  useEffect(() => {
+    if (!(client instanceof CoreBackend)) return;
+    let cancelled = false;
+    setLocalEnrollment(null); setLocalEnrollmentError('');
+    void client.localBrowserEnrollmentEnabled().then((enabled) => {
+      if (!cancelled) setLocalEnrollment(enabled);
+    }).catch((failure) => { if (!cancelled) setLocalEnrollmentError(String(failure)); });
+    return () => { cancelled = true; };
+  }, [client, localEnrollmentRetry]);
+
   // email → verify → ceremony (passkey) → setup (#207 1A: author the taxonomy)
   // → onComplete. `setup` is the last onboarding step before connecting agents.
   const [phase, setPhase] = useState<'email' | 'verify' | 'ceremony' | 'setup' | 'browser'>('email');
@@ -898,7 +912,21 @@ export function OnboardingScreen({
 
         <div className="hr-ascii" style={{ margin: '20px 0' }}>{'─'.repeat(220)}</div>
 
-        {phase === 'email' && (
+        {phase === 'email' && hosted && localEnrollment === null && (
+          <section aria-label="Check local sign-in">
+            {localEnrollmentError ? <><p role="alert">{localEnrollmentError}</p><button className="btn" onClick={() => setLocalEnrollmentRetry((value) => value + 1)}>Retry sign-in check</button></>
+              : <p role="status">Checking sign-in configuration…</p>}
+          </section>
+        )}
+        {phase === 'email' && localEnrollment === true && client instanceof CoreBackend && (
+          <LocalBrowserEnrollment key={client.brokerUrl} brokerUrl={client.brokerUrl} initialOmni={relogin?.omni}
+            account={(owner) => client.localBrowserAccount(owner)}
+            start={(owner, request) => client.localBrowserStart(owner, request)}
+            signIn={(owner) => client.signInWithPasskey(owner)}
+            onReady={async (identity) => { setMasterCredId(identity.credentialId); setMasterOmni(identity.omni); setOmni(identity.omni); setPhase('setup'); }} />
+        )}
+        {phase === 'email' && (!hosted || localEnrollment === false) && (
+
           <div className="onboard-login">
             <h1 className="serif" style={{ fontSize: 22, fontStyle: 'italic', margin: '0 0 6px' }}>
               {hosted || relogin ? 'Welcome back.' : 'Set up your master identity.'}

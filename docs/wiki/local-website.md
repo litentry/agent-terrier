@@ -19,7 +19,7 @@ After preparing the [local service binaries](./local-services.md), local from th
 
 The website URL appears under `services.services.website.url`. An optional `--web-port` with `--website` selects the port on the first start. Otherwise a free loopback port is chosen and persisted in the existing service manifest. Later starts and restarts retain that origin because browser storage belongs to it. A changed port is refused; use separate state for another website port. Stop the service group before enabling the website on an already-running stack. The terminal manager uses the same saved configuration.
 
-New website configurations use `http://localhost:<port>` while the server listens only on IPv4 loopback. Browser passkey relying-party IDs must be domain names; `localhost` is the supported local HTTP exception ([Chrome RP ID guidance](https://web.dev/articles/webauthn-rp-id), [Chromium origins](https://chromium.googlesource.com/chromium/src/+/main/content/browser/webauth/origins.md)). The [local CLI approval flow](./local-browser.md) verifies a public browser request against that origin. The browser setup UI and authenticated browser acceptance remain separate work.
+New website configurations use `http://localhost:<port>` while the server listens only on IPv4 loopback. Browser passkey relying-party IDs must be domain names; `localhost` is the supported local HTTP exception ([Chrome RP ID guidance](https://web.dev/articles/webauthn-rp-id), [Chromium origins](https://chromium.googlesource.com/chromium/src/+/main/content/browser/webauth/origins.md)). The [local browser setup flow](./local-browser.md) creates a public request and requires CLI approval against that origin, followed by browser passkey sign-in. That handoff is exercised with a virtual authenticator; physical passkey and complete workflow acceptance remain open.
 
 Existing configurations that recorded only a port retain their original `http://127.0.0.1:<port>` origin. Changing the host is explicit and requires stopped services. Local, from the same public checkout and selected state directory:
 
@@ -32,7 +32,7 @@ The port, chain, owner keys and application data are retained. Browser storage s
 
 The existing service supervisor owns the website process group, private logs and isolated home. It starts the prepared Next server with the active broker origin and permits exactly the website origin on the broker, storage workers and classifier. It never builds or installs dependencies implicitly and refuses `.env*` files in the application or repository root. A port owned by another process is left untouched; partial startup cleans up only owned children. No second supervisor, backend-address resolver or Docker controller is added.
 
-`status` and `doctor` check a bounded, uncached website health response against the current instance and selected backend. This proves website delivery and configuration, not authenticated browser readiness. Audit service wiring and browser enrollment remain open; the local classifier is supervised and qualified separately. `stack stop` and `restart` include the website and preserve data. Private diagnostics are included in `services logs` and `stack logs`.
+`status` and `doctor` check a bounded, uncached website health response against the current instance and selected backend. This proves website delivery and configuration, not authenticated browser readiness. Secure audit archive integration and physical browser acceptance remain open; the local classifier is supervised and qualified separately. `stack stop` and `restart` include the website and preserve data. Private diagnostics are included in `services logs` and `stack logs`.
 
 ## Standalone website process
 
@@ -45,7 +45,7 @@ AGENT_TERRIER_WEB_BACKEND=core \
   --port "${AGENT_TERRIER_WEB_PORT:?Choose the local website port}"
 ```
 
-This starts the website only. The broker and workers must separately permit the exact website origin for cross-origin browser requests. The managed startup above owns that wiring. Complete browser enrollment and auxiliary-service integration remain open; successful HTML delivery is not an authenticated application acceptance result.
+This starts the website only. The broker and workers must separately permit the exact website origin for cross-origin browser requests. The managed startup above owns that wiring. Browser enrollment uses the managed flow above. Complete auxiliary-service integration remains open; successful HTML delivery is not an authenticated application acceptance result.
 
 ## Configuration ownership
 

@@ -7,13 +7,13 @@ const mocks = vi.hoisted(() => ({ create: vi.fn(), sign: vi.fn(), assertion: vi.
 vi.mock('../hostedIdentity', () => ({ createHostedIdentity: mocks.create, signHostedEnrollment: mocks.sign }));
 vi.mock('../webauthn', () => ({ getAssertionOverHash: mocks.assertion }));
 const start = vi.fn(), status = vi.fn(), publish = vi.fn(), ready = vi.fn();
-const identity = { credentialId: 'browser-key', deviceKeyHash: 'browser-device', secretHex: 'RAM-master-secret', consoleSecretHex: 'RAM-console-secret', publicKeyX: 'x', publicKeyY: 'y' };
+const identity = { omni: 'operator', credentialId: 'browser-key', deviceKeyHash: 'browser-device', secretHex: 'RAM-master-secret', consoleSecretHex: 'RAM-console-secret', publicKeyX: 'x', publicKeyY: 'y' };
 let container: HTMLDivElement, root: Root;
 async function click(label: string) { const button = [...container.querySelectorAll('button')].find((button) => button.textContent === label); expect(button).toBeDefined(); await act(async () => button!.click()); }
 beforeEach(async () => {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true); vi.stubGlobal('localStorage', { length: 0, setItem: vi.fn() });
   mocks.create.mockReset().mockResolvedValue(identity); mocks.sign.mockReset().mockResolvedValue('public-proof'); mocks.assertion.mockReset().mockResolvedValue({ credential_id: 'browser-key' });
-  start.mockReset().mockResolvedValue({ challenge: 'challenge', intent: { expires_at: Date.now() / 1000 + 600, origin: 'https://console.test', device_key_hash: 'browser-device' } });
+  start.mockReset().mockImplementation(async (request) => ({ challenge: 'challenge', intent: { ...request, operator_omni: 'operator', expires_at: Date.now() / 1000 + 600 } }));
   status.mockReset().mockResolvedValue({ active: false, device_active: false });
   publish.mockReset().mockImplementation(async (approval) => ({ id: 'request', approval })); ready.mockReset();
   container = document.createElement('div'); document.body.appendChild(container); root = createRoot(container);
@@ -38,7 +38,7 @@ it('shows denied publication without exposing keys or entering the console', asy
   expect(container.textContent).not.toContain('RAM-'); expect(localStorage.length).toBe(0);
 });
 it('expires requests and can refresh them without creating another browser identity', async () => {
-  start.mockResolvedValueOnce({ challenge: 'expired', intent: { expires_at: 1, origin: 'https://console.test', device_key_hash: 'browser-device' } });
+  start.mockImplementationOnce(async (request) => ({ challenge: 'expired', intent: { ...request, operator_omni: 'operator', expires_at: 1 } }));
   await click('Set up browser access');
   expect(container.textContent).toContain('request expired'); expect(ready).not.toHaveBeenCalled();
   await click('Refresh approval request');
