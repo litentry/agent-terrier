@@ -1351,6 +1351,7 @@ enum AgentAction {
 
 #[derive(Subcommand)]
 enum LocalAction {
+    Browser(agentkeys_cli::local_browser::BrowserOptions),
     Channel(agentkeys_cli::local_channel::ChannelOptions),
     Credential(agentkeys_cli::local_data::CredentialOptions),
     Agent(agentkeys_cli::local_agent::AgentOptions),
@@ -1778,6 +1779,11 @@ async fn main() {
         },
         Commands::Chain { action } => cmd_chain(&ctx, action).await,
         Commands::Models { action } => cmd_models(action).await,
+        Commands::Local {
+            action: LocalAction::Browser(options),
+        } => agentkeys_cli::local_browser::approve(&ctx, options)
+            .await
+            .and_then(|result| serde_json::to_string(&result).map_err(Into::into)),
         Commands::Local {
             action: LocalAction::Channel(options),
         } => agentkeys_cli::local_channel::execute(&ctx, options)
@@ -2295,6 +2301,11 @@ async fn main() {
         Err(err) => {
             if let Some(incomplete) =
                 err.downcast_ref::<agentkeys_cli::local_agent::IncompleteOperation>()
+            {
+                println!("{}", incomplete.0);
+            }
+            if let Some(incomplete) =
+                err.downcast_ref::<agentkeys_cli::local_browser::IncompleteApproval>()
             {
                 println!("{}", incomplete.0);
             }

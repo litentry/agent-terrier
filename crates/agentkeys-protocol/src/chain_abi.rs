@@ -133,3 +133,32 @@ mod tests {
         }
     }
 }
+
+#[derive(Debug)]
+pub struct AccountSignerRecord {
+    pub pub_x: [u8; 32],
+    pub pub_y: [u8; 32],
+    pub rp_id_hash: [u8; 32],
+    pub active: bool,
+    pub generation: Option<u64>,
+}
+
+pub fn decode_account_signer(raw: &[u8]) -> Result<AccountSignerRecord, String> {
+    if !matches!(raw.len(), 128 | 160) {
+        return Err(format!(
+            "signers() returned {} bytes; expected 128 or 160",
+            raw.len()
+        ));
+    }
+    Ok(AccountSignerRecord {
+        pub_x: raw[..32].try_into().unwrap(),
+        pub_y: raw[32..64].try_into().unwrap(),
+        rp_id_hash: raw[64..96].try_into().unwrap(),
+        active: decode_bool(&raw[96..128]).map_err(str::to_owned)?,
+        generation: if raw.len() == 160 {
+            Some(decode_u64(&raw[128..160]).map_err(str::to_owned)?)
+        } else {
+            None
+        },
+    })
+}

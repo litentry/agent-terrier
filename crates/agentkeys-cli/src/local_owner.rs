@@ -84,29 +84,10 @@ pub async fn login(context: &CommandContext, options: &OwnerLoginOptions) -> Res
         .development
         .require_local_service(&options.broker_url)?;
     let operator = fixed::<32>(&options.operator_omni)?;
-    let registry = chain.contract("SidecarRegistry")?;
-    let registered = chain
-        .call(&registry, &operator_master_wallet_calldata(&operator))
-        .await?;
-    ensure!(
-        registered != [0; 32] && registered[..12] == [0; 12],
-        "owner has no registered account"
-    );
-    let account = hex_value(&registered[12..]);
     let request_key = agentkeys_core::device_crypto::DeviceKey::load(&options.device_key_file)?;
     let device_key_hash = request_key.device_key_hash()?;
-    let device = chain
-        .device(&registry, &fixed::<32>(&device_key_hash)?)
-        .await?;
-    ensure!(
-        device.is_registered()
-            && !device.revoked
-            && device.operator_omni == operator
-            && device.actor_omni == operator
-            && device.tier == TIER_MASTER
-            && device.roles & LOCAL_MASTER_ROLES == LOCAL_MASTER_ROLES,
-        "owner request key does not match the active on-chain master binding"
-    );
+    let registered = chain.owner_binding(&operator, &request_key).await?;
+    let account = hex_value(&registered);
     let broker = agentkeys_web_core::broker::BrokerClient::with_client(
         chain.client.clone(),
         &options.broker_url,
@@ -116,7 +97,7 @@ pub async fn login(context: &CommandContext, options: &OwnerLoginOptions) -> Res
         .await
         .map_err(|_| anyhow!("local broker refused the owner login challenge"))?;
     ensure!(
-        fixed::<20>(&challenge.account)? == registered[12..],
+        fixed::<20>(&challenge.account)? == registered,
         "broker login challenge names a different account"
     );
     let assertion = crate::k11_webauthn::software_browser_assertion(
@@ -170,25 +151,53 @@ pub struct OwnerPlan {
     pub rpc_user_op: Option<RpcUserOp>,
 }
 
-struct LocalChain {
-    profile: ChainProfile,
-    development: DevelopmentSigning,
+pub(crate) struct LocalChain {
+    pub(crate) profile: ChainProfile,
+    pub(crate) development: DevelopmentSigning,
     endpoint: String,
-    client: reqwest::Client,
+    pub(crate) client: reqwest::Client,
 }
 
-fn hex_value(value: &[u8]) -> String {
+pub(crate) fn hex_value(value: &[u8]) -> String {
     format!("0x{}", hex::encode(value))
 }
 
-fn fixed<const SIZE: usize>(value: &str) -> Result<[u8; SIZE]> {
+pub(crate) fn fixed<const SIZE: usize>(value: &str) -> Result<[u8; SIZE]> {
     hex::decode(value.strip_prefix("0x").unwrap_or(value))?
         .try_into()
         .map_err(|_| anyhow!("expected {SIZE}-byte hexadecimal value"))
 }
 
 impl LocalChain {
-    async fn connect(context: &CommandContext) -> Result<Self> {
+    pub(crate) async fn owner_binding(
+        &self,
+        operator: &[u8; 32],
+        request_key: &agentkeys_core::device_crypto::DeviceKey,
+    ) -> Result<[u8; 20]> {
+        let registry = self.contract("SidecarRegistry")?;
+        let registered = self
+            .call(&registry, &operator_master_wallet_calldata(operator))
+            .await?;
+        ensure!(
+            registered != [0; 32] && registered[..12] == [0; 12],
+            "owner has no registered account"
+        );
+        let device_key_hash = request_key.device_key_hash()?;
+        let device = self
+            .device(&registry, &fixed::<32>(&device_key_hash)?)
+            .await?;
+        ensure!(
+            device.is_registered()
+                && !device.revoked
+                && device.operator_omni == *operator
+                && device.actor_omni == *operator
+                && device.tier == TIER_MASTER
+                && device.roles & LOCAL_MASTER_ROLES == LOCAL_MASTER_ROLES,
+            "owner request key does not match the active on-chain master binding"
+        );
+        Ok(registered[12..].try_into()?)
+    }
+    pub(crate) async fn connect(context: &CommandContext) -> Result<Self> {
         let development = context.development_signing()?;
         let profile = context.chain_profile()?.clone();
         let endpoint = rpc_http_override(&profile.name, |name| std::env::var(name).ok())
@@ -224,7 +233,7 @@ impl LocalChain {
         Ok(chain)
     }
 
-    async fn rpc(&self, method: &str, parameters: Value) -> Result<Value> {
+    pub(crate) async fn rpc(&self, method: &str, parameters: Value) -> Result<Value> {
         let response: Value = self
             .client
             .post(&self.endpoint)
@@ -244,7 +253,7 @@ impl LocalChain {
             .context("local chain RPC result missing")
     }
 
-    fn contract(&self, name: &str) -> Result<[u8; 20]> {
+    pub(crate) fn contract(&self, name: &str) -> Result<[u8; 20]> {
         let address = fixed(
             &self
                 .profile
@@ -256,7 +265,7 @@ impl LocalChain {
         Ok(address)
     }
 
-    async fn call(&self, contract: &[u8; 20], data: &[u8]) -> Result<[u8; 32]> {
+    pub(crate) async fn call(&self, contract: &[u8; 20], data: &[u8]) -> Result<[u8; 32]> {
         let result = self
             .rpc(
                 "eth_call",
@@ -277,7 +286,7 @@ impl LocalChain {
         Ok(!hex::decode(code)?.is_empty())
     }
 
-    async fn device(&self, registry: &[u8; 20], hash: &[u8; 32]) -> Result<DeviceProbe> {
+    pub(crate) async fn device(&self, registry: &[u8; 20], hash: &[u8; 32]) -> Result<DeviceProbe> {
         let result = self.rpc("eth_call", json!([{"to":hex_value(registry), "data":hex_value(&device_probe_calldata(hash))}, "latest"])).await?;
         parse_device_probe(result.as_str().context("invalid registry response")?)
     }

@@ -9,11 +9,12 @@ use crate::development_signing::DevelopmentSigning;
 
 const RECORD_VERSION: u32 = 1;
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentOperationKind {
     Spawn,
     Archive,
+    BrowserEnrollment,
 }
 
 impl AgentOperationKind {
@@ -21,6 +22,7 @@ impl AgentOperationKind {
         match self {
             Self::Spawn => "spawn",
             Self::Archive => "archive",
+            Self::BrowserEnrollment => "browser_enrollment",
         }
     }
 }

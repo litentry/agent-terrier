@@ -3,55 +3,17 @@ use crate::error::BrokerError;
 use crate::handlers::accept::{eth_call, selector};
 use base64::Engine;
 
-/// One live signer row from `P256Account.signers(credIdHash)` +
-/// `signerGeneration()` — everything `verifyAssertion` needs.
-pub(crate) struct LiveSigner {
-    pub(crate) credential_hash: [u8; 32],
-    pub(crate) pub_x: [u8; 32],
-    pub(crate) pub_y: [u8; 32],
-    pub(crate) rp_id_hash: [u8; 32],
-}
+pub(crate) use agentkeys_core::browser_enrollment::EnrollmentSigner as LiveSigner;
+pub(crate) use agentkeys_protocol::chain_abi::decode_account_signer as decode_signer_row;
 
-/// Decoded `signers(bytes32)` return. The deployed fleet has TWO layouts
-/// (verified live on Heima prod, 2026-06-10): the current 5-word struct
-/// `(pubX, pubY, rpIdHash, active, generation)` and the legacy pre-recovery
-/// 4-word struct without `generation` — the live factory was deployed from a
-/// pre-final #164 revision and never redeployed (VERSION stayed 0.3, so the
-/// by-VERSION idempotency skipped it). Legacy accounts also have NO
-/// `signerGeneration()` selector (the call reverts), so `generation: None`
-/// means the caller must skip that cross-check entirely — `active` is the
-/// whole liveness story on those accounts.
-#[derive(Debug)]
-pub(crate) struct SignerRow {
-    pub(crate) pub_x: [u8; 32],
-    pub(crate) pub_y: [u8; 32],
-    pub(crate) rp_id_hash: [u8; 32],
-    pub(crate) active: bool,
-    pub(crate) generation: Option<u64>,
-}
-
-pub(crate) fn decode_signer_row(raw: &[u8]) -> Result<SignerRow, String> {
-    let generation = match raw.len() {
-        160 => Some(abi_u64(raw, 4)?),
-        128 => None,
-        n => {
-            return Err(format!(
-                "signers() returned {n} bytes — expected 160 (current 5-field Signer) or 128 \
-                 (legacy pre-recovery 4-field Signer)"
-            ))
-        }
-    };
-    Ok(SignerRow {
-        pub_x: word_at(raw, 0)?,
-        pub_y: word_at(raw, 1)?,
-        rp_id_hash: word_at(raw, 2)?,
-        active: match abi_u64(raw, 3)? {
-            0 => false,
-            1 => true,
-            _ => return Err("invalid ABI signer active flag".into()),
-        },
-        generation,
-    })
+pub(crate) fn enrollment_error(
+    error: agentkeys_core::browser_enrollment::EnrollmentProofError,
+) -> BrokerError {
+    use agentkeys_core::browser_enrollment::EnrollmentProofError;
+    match error {
+        EnrollmentProofError::Invalid(message) => BrokerError::BadRequest(message),
+        EnrollmentProofError::Denied(message) => BrokerError::Forbidden(message),
+    }
 }
 
 pub(crate) fn word_at(raw: &[u8], i: usize) -> Result<[u8; 32], String> {
@@ -258,15 +220,7 @@ pub(crate) async fn verify_assertion(
 }
 
 pub(crate) fn credential_hash(credential_id: &str) -> Result<[u8; 32], BrokerError> {
-    let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(credential_id)
-        .map_err(|e| BrokerError::BadRequest(format!("credential_id base64url: {e}")))?;
-    if raw.is_empty() || raw.len() > 1024 {
-        return Err(BrokerError::BadRequest(
-            "credential_id must contain 1 to 1024 bytes".into(),
-        ));
-    }
-    Ok(agentkeys_core::erc4337::credential_id_hash(&raw))
+    agentkeys_core::browser_enrollment::credential_hash(credential_id).map_err(enrollment_error)
 }
 
 pub(crate) async fn resolve_assertion_signer(

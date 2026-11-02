@@ -9,7 +9,7 @@ Agent Terrier local development tools
 | Argument | Required | Choices | Description |
 | --- | --- | --- | --- |
 | -h, --help | no |  | show this help message and exit |
-| subcommand | yes | manage, stack, test, models, contracts, chain, services, channel, cred, agent, owner, device | Select a command below. |
+| subcommand | yes | manage, stack, test, models, contracts, chain, services, channel, cred, agent, browser, owner, device | Select a command below. |
 
 ## terrier manage
 
@@ -165,6 +165,16 @@ Agent Terrier local development tools
 | --method | no | GET, POST |  |
 | --json-stdin | no |  |  |
 | --timeout-seconds | no |  |  |
+
+## terrier browser
+
+| Argument | Required | Choices | Description |
+| --- | --- | --- | --- |
+| -h, --help | no |  | show this help message and exit |
+| action | yes | approve |  |
+| --name | yes |  | Existing local owner name |
+| --request-file | yes |  | Public approval request downloaded from the browser |
+| --confirm-device-key-hash | yes |  | Full device fingerprint independently compared with the browser |
 
 ## terrier owner
 
