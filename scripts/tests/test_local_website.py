@@ -15,7 +15,7 @@ class WebsiteTests(unittest.TestCase):
         manifest = {"version":7, "initialized":True, "website":configured}
         self.assertEqual(website.configuration(manifest), configured)
         self.assertEqual(website.configuration(manifest, True), configured)
-        self.assertEqual(website.endpoint(configured), "http://127.0.0.1:12345")
+        self.assertEqual(website.endpoint(configured), "http://localhost:12345")
         with self.assertRaisesRegex(ValueError, "bound to browser storage"):
             website.configuration(manifest, True, 12346)
         with self.assertRaisesRegex(ValueError, "requires --website"):
@@ -25,6 +25,21 @@ class WebsiteTests(unittest.TestCase):
         for port in (True, 0, -1, 65536, "12345"):
             with self.assertRaises(ValueError):
                 website.configuration({}, True, port)
+
+    def test_legacy_origin_is_preserved_until_explicit_host_selection(self):
+        legacy = {"website": {"port": 12345}}
+        self.assertEqual(website.configuration(legacy, True), legacy["website"])
+        self.assertEqual(website.endpoint(legacy["website"]), "http://127.0.0.1:12345")
+        selected = website.configuration(legacy, True, host="localhost")
+        self.assertEqual(website.endpoint(selected), "http://localhost:12345")
+        self.assertEqual(legacy["website"], {"port": 12345})
+        for host in ("example.test", "localhost.example.test", "0.0.0.0", "localhost:12345", ""):
+            with self.assertRaises(ValueError):
+                website.configuration({}, True, host=host)
+            with self.assertRaises(ValueError):
+                website.validate_configuration({"port": 12345, "host": host})
+        with self.assertRaisesRegex(ValueError, "requires --website"):
+            website.configuration(legacy, host="localhost")
 
     def test_managed_launch_refuses_environment_files_and_missing_build_before_spawning(self):
         with tempfile.TemporaryDirectory() as temporary:

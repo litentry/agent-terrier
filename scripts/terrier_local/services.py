@@ -68,7 +68,7 @@ def validate_manifest(manifest, fingerprint):
         raise ValueError("Service state belongs to another deployment or has an invalid manifest")
 
 
-def prepare(repository, state, binaries, port, runtime_image=None, docker_socket=None, model_directory=None, model_binary=None, enable_website=None, web_port=None, runtime_disk_policy=None):
+def prepare(repository, state, binaries, port, runtime_image=None, docker_socket=None, model_directory=None, model_binary=None, enable_website=None, web_port=None, runtime_disk_policy=None, web_host=None):
     running_chain, profile, fingerprint = deployment.active_profile(repository, state)
     directory = local_state.private_directory(state / "services")
     manifest_path = directory / "manifest.json"
@@ -87,7 +87,7 @@ def prepare(repository, state, binaries, port, runtime_image=None, docker_socket
         local_state.write_json(manifest_path, manifest)
     runtime = runtime_configuration(manifest, runtime_image, docker_socket, runtime_disk_policy)
     model_runner = models.configuration(manifest, model_directory, model_binary)
-    web_configuration = website.configuration(manifest, enable_website, web_port)
+    web_configuration = website.configuration(manifest, enable_website, web_port, web_host)
     if web_configuration is not None:
         website.prepared_application(repository)
     broker_directory = local_state.private_directory(directory / "broker")
@@ -234,7 +234,7 @@ def prepare_submitter(state, binaries, manifest, running_chain, profile):
         chain.rpc(running_chain["rpc_http"], "anvil_setBalance", [address, hex(funding)])
 
 
-def start(repository, state, configured=None, port=None, runtime_image=None, docker_socket=None, model_directory=None, model_binary=None, enable_website=None, web_port=None, runtime_disk_policy=None):
+def start(repository, state, configured=None, port=None, runtime_image=None, docker_socket=None, model_directory=None, model_binary=None, enable_website=None, web_port=None, runtime_disk_policy=None, web_host=None):
     current = status(state)
     if current["running"]:
         if current.get("service_schema") != MANIFEST_VERSION:
@@ -251,13 +251,13 @@ def start(repository, state, configured=None, port=None, runtime_image=None, doc
             requested = models.configuration({"model_runner":current.get("model_runner")}, model_directory, model_binary)
             if requested != current.get("model_runner"):
                 raise ValueError("Stop local services before changing model runner configuration")
-        if enable_website is not None or web_port is not None:
-            requested = website.configuration({"website":current.get("website")}, enable_website, web_port)
+        if enable_website is not None or web_port is not None or web_host is not None:
+            requested = website.configuration({"website":current.get("website")}, enable_website, web_port, web_host)
             if requested != current.get("website"):
                 raise ValueError("Stop local services before changing website configuration")
         return current
     binaries = binary_directory(repository, configured)
-    prepare(repository, state, binaries, port, runtime_image, docker_socket, model_directory, model_binary, enable_website, web_port, runtime_disk_policy)
+    prepare(repository, state, binaries, port, runtime_image, docker_socket, model_directory, model_binary, enable_website, web_port, runtime_disk_policy, web_host)
     log = local_state.open_private(state / "services-supervisor.log", os.O_CREAT | os.O_WRONLY | os.O_APPEND)
     environment = contracts.tool_environment()
     environment["AGENT_TERRIER_STATE_DIR"] = str(state)

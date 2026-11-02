@@ -13,9 +13,12 @@ from . import chain, contracts, local_state
 
 START_TIMEOUT = 30
 RESPONSE_LIMIT = 4096
+BIND_HOST = "127.0.0.1"
+DEFAULT_BROWSER_HOST = "localhost"
+BROWSER_HOSTS = (DEFAULT_BROWSER_HOST, BIND_HOST)
 
 
-def configuration(manifest, enabled=None, port=None):
+def configuration(manifest, enabled=None, port=None, host=None):
     if manifest.get("version", 0) >= 7 and manifest.get("initialized") and "website" not in manifest:
         raise ValueError("Existing website configuration is missing; restore the service manifest")
     previous = manifest.get("website")
@@ -25,28 +28,36 @@ def configuration(manifest, enabled=None, port=None):
         validate_configuration({"port": port})
         if enabled is not True:
             raise ValueError("--web-port requires --website")
+    if host is not None:
+        if host not in BROWSER_HOSTS:
+            raise ValueError("Website host must be localhost or the IPv4 loopback address")
+        if enabled is not True:
+            raise ValueError("--web-host requires --website")
     if enabled is not True:
         return previous
     if previous:
         if port is not None and port != previous["port"]:
             raise ValueError("Website port is bound to browser storage; retain it or use separate local state")
+        if host is not None and host != previous.get("host", BIND_HOST):
+            return dict(previous, host=host)
         return previous
     if port is None:
         with socket.socket() as listener:
-            listener.bind(("127.0.0.1", 0))
+            listener.bind((BIND_HOST, 0))
             port = listener.getsockname()[1]
-    return {"port": port}
+    return {"port": port, "host": host or DEFAULT_BROWSER_HOST}
 
 
 def validate_configuration(configuration):
-    if (not isinstance(configuration, dict) or set(configuration) != {"port"}
+    if (not isinstance(configuration, dict) or set(configuration) not in ({"port"}, {"port", "host"})
+            or configuration.get("host", BIND_HOST) not in BROWSER_HOSTS
             or type(configuration["port"]) is not int or not 1 <= configuration["port"] <= 65535):
         raise ValueError("Website configuration requires a valid loopback port")
 
 
 def endpoint(configuration):
     validate_configuration(configuration)
-    return f"http://127.0.0.1:{configuration['port']}"
+    return f"http://{configuration.get('host', BIND_HOST)}:{configuration['port']}"
 
 
 def prepared_application(repository):
@@ -100,14 +111,14 @@ def launch(repository, configuration, broker, directory, children):
     with socket.socket() as reservation:
         reservation.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
-            reservation.bind(("127.0.0.1", configuration["port"]))
+            reservation.bind((BIND_HOST, configuration["port"]))
         except OSError:
             raise ValueError("Website port is occupied; the existing listener was left untouched") from None
     instance = secrets.token_hex(16)
     selected_environment = environment(directory, broker, instance)
     log = local_state.open_private(directory / "website.log", os.O_CREAT | os.O_WRONLY | os.O_APPEND)
     try:
-        process = subprocess.Popen([node, str(executable), "start", "--hostname", "127.0.0.1",
+        process = subprocess.Popen([node, str(executable), "start", "--hostname", BIND_HOST,
             "--port", str(configuration["port"])], cwd=application, env=selected_environment,
             stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True, umask=0o077)
     finally:

@@ -17,7 +17,18 @@ After preparing the [local service binaries](./local-services.md), local from th
 ./terrier stack status
 ```
 
-The website URL appears under `services.services.website.url`. An optional `--web-port` with `--website` selects the port on the first start. Otherwise a free loopback port is chosen and persisted in the existing service manifest. Later starts and restarts retain that origin because browser storage belongs to it. A changed port is refused; use separate state for another website origin. Stop the service group before enabling the website on an already-running stack. The terminal manager uses the same saved configuration.
+The website URL appears under `services.services.website.url`. An optional `--web-port` with `--website` selects the port on the first start. Otherwise a free loopback port is chosen and persisted in the existing service manifest. Later starts and restarts retain that origin because browser storage belongs to it. A changed port is refused; use separate state for another website port. Stop the service group before enabling the website on an already-running stack. The terminal manager uses the same saved configuration.
+
+New website configurations use `http://localhost:<port>` while the server listens only on IPv4 loopback. Browser passkey relying-party IDs must be domain names; `localhost` is the supported local HTTP exception ([Chrome RP ID guidance](https://web.dev/articles/webauthn-rp-id), [Chromium origins](https://chromium.googlesource.com/chromium/src/+/main/content/browser/webauth/origins.md)). This origin preparation does not complete CLI browser approval or authenticated browser acceptance.
+
+Existing configurations that recorded only a port retain their original `http://127.0.0.1:<port>` origin. Changing the host is explicit and requires stopped services. Local, from the same public checkout and selected state directory:
+
+```sh
+./terrier stack stop
+./terrier stack start --website --web-host localhost
+```
+
+The port, chain, owner keys and application data are retained. Browser storage stays with its original origin, and passkeys remain scoped to their original relying-party ID. They are not transferred; the new origin needs its own browser setup. `--web-host` accepts only `localhost` and `127.0.0.1`, requires `--website`, and is also available to `services start`. A running service group refuses an origin change without changing its saved configuration. Later starts without that flag preserve the explicit selection. Broker and worker access is rebuilt for the selected exact origin; the old origin is not kept as an implicit alias.
 
 The existing service supervisor owns the website process group, private logs and isolated home. It starts the prepared Next server with the active broker origin and permits exactly the website origin on the broker, storage workers and classifier. It never builds or installs dependencies implicitly and refuses `.env*` files in the application or repository root. A port owned by another process is left untouched; partial startup cleans up only owned children. No second supervisor, backend-address resolver or Docker controller is added.
 
