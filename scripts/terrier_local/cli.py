@@ -4,7 +4,7 @@ from pathlib import Path
 import subprocess
 import sys
 
-from . import agent, chain, contracts, data, deployment, local_state, models, owner, services, stack, manager, test_lanes, affected, reset, website
+from . import browser, agent, chain, contracts, data, deployment, local_state, models, owner, services, stack, manager, test_lanes, affected, reset, website
 
 
 def build_parser():
@@ -94,6 +94,11 @@ def build_parser():
             operation.add_argument("--device-key-hash", required=True)
         else:
             operation.add_argument("--user-op-hash", required=True)
+    browser_parser = commands.add_parser("browser", help="Approve a localhost browser using the existing local owner")
+    browser_parser.add_argument("action", choices=["approve"])
+    browser_parser.add_argument("--name", required=True, help="Existing local owner name")
+    browser_parser.add_argument("--request-file", required=True, type=Path, help="Public approval request downloaded from the browser")
+    browser_parser.add_argument("--confirm-device-key-hash", required=True, help="Full device fingerprint independently compared with the browser")
     owner_parser = commands.add_parser("owner", help="Real local owner registration and scope operations")
     owner_parser.add_argument("action", choices=["register", "grant", "revoke", "bind", "unbind", "login"])
     owner_parser.add_argument("--name", required=True, help="Local owner name")
@@ -156,6 +161,9 @@ def main(argv=None):
                               else stack.execute(repository, state, arguments.action, *configuration))
             print(json.dumps(result, indent=2))
             return 0 if result["success"] else 1
+        if arguments.command == "browser":
+            with local_state.exclusive_lock(state / "operation.lock"):
+                return browser.approve(repository, state, arguments)
         if arguments.command == "agent":
             with local_state.exclusive_lock(state / "operation.lock"):
                 return agent.execute(repository, state, arguments)

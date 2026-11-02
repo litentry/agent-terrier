@@ -46,7 +46,7 @@ QUALIFICATIONS = {
     "chain": ("qualify_local_chain.py", "qualify_local_signing.py", "qualify_local_binding.py", "qualify_local_owner.py", "qualify_local_login.py", "qualify_local_bundler.py"),
     "services": ("qualify_local_services.py", "qualify_local_classify.py"),
     "agents": ("qualify_local_agents.py",),
-    "website": ("qualify_local_website.py",),
+    "website": ("qualify_local_website.py", "qualify_local_browser.py"),
     "ui": ("qualify_public_web.py",),
     "storage": (
         "qualify_local_storage.py", "qualify_local_credentials.py", "qualify_local_config.py",

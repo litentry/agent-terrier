@@ -4,7 +4,6 @@ use agentkeys_core::erc4337::{
 };
 use agentkeys_protocol::hosted_signer::*;
 use axum::{extract::State, http::HeaderMap, Json};
-use sha2::{Digest, Sha256};
 
 use crate::accept_assertion::decode_assertion_parts;
 use crate::account_signer::{
@@ -12,8 +11,8 @@ use crate::account_signer::{
 };
 use crate::error::BrokerError;
 use crate::handlers::accept::{
-    addr20, bearer, call_entrypoint_nonce, call_operator_master_wallet, eth_call,
-    load_accept_config, load_chain_read_config, selector, SPONSOR_WINDOW_SECS,
+    bearer, call_entrypoint_nonce, call_operator_master_wallet, eth_call, load_accept_config,
+    load_chain_read_config, selector, SPONSOR_WINDOW_SECS,
 };
 use crate::sponsored_accept::{
     assemble_hosted_signer_userop, AcceptUserOpParams, BuildAcceptResponse,
@@ -88,25 +87,6 @@ async fn operator_nonce(
     .map_err(BrokerError::BackendUnreachable)?;
     word_at(&raw, 0).map_err(BrokerError::BackendUnreachable)
 }
-fn validate_origin(
-    origin: &str,
-    rp_id: &str,
-    allowed_origins: &[String],
-) -> Result<(), BrokerError> {
-    let url = reqwest::Url::parse(origin)
-        .map_err(|error| BrokerError::BadRequest(format!("origin: {error}")))?;
-    let local = matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "[::1]"));
-    if url.origin().ascii_serialization() != origin
-        || url.host_str() != Some(rp_id)
-        || !(url.scheme() == "https" || (url.scheme() == "http" && local))
-        || !allowed_origins.iter().any(|allowed| allowed == origin)
-    {
-        return Err(BrokerError::Forbidden(
-            "origin must be an allowed browser origin and rp_id must equal its host".into(),
-        ));
-    }
-    Ok(())
-}
 fn allowed_origins() -> Vec<String> {
     agentkeys_protocol::browser_origins::parse_browser_origins(
         &std::env::var(crate::env::BROKER_BROWSER_ORIGINS).unwrap_or_default(),
@@ -125,38 +105,16 @@ fn validate_intent(
     current_time: u64,
     origins: &[String],
 ) -> Result<LiveSigner, BrokerError> {
-    if word(&intent.operator_omni, "operator_omni")? != *omni
-        || addr20(&intent.account, "account").map_err(BrokerError::BadRequest)? != *account
-        || intent.chain_id != chain_id
-        || word(&intent.operator_nonce, "operator_nonce")? != *nonce
-    {
-        return Err(BrokerError::Forbidden(
-            "enrollment belongs to another operator, account, chain, or stale operator nonce"
-                .into(),
-        ));
-    }
-    if intent.expires_at <= current_time
-        || intent.expires_at > current_time.saturating_add(HOSTED_SIGNER_TTL_SECONDS)
-    {
-        return Err(BrokerError::BadRequest(
-            "enrollment expired or has an invalid lifetime; restart on the new browser".into(),
-        ));
-    }
-    validate_origin(&intent.origin, &intent.rp_id, origins)?;
-    word(&intent.device_key_hash, "device_key_hash")?;
-    let public_key_x = word(&intent.public_key_x, "public_key_x")?;
-    let public_key_y = word(&intent.public_key_y, "public_key_y")?;
-    let mut encoded = vec![4];
-    encoded.extend_from_slice(&public_key_x);
-    encoded.extend_from_slice(&public_key_y);
-    p256::ecdsa::VerifyingKey::from_sec1_bytes(&encoded)
-        .map_err(|_| BrokerError::BadRequest("invalid P-256 public key".into()))?;
-    Ok(LiveSigner {
-        credential_hash: credential_hash(&intent.credential_id)?,
-        pub_x: public_key_x,
-        pub_y: public_key_y,
-        rp_id_hash: Sha256::digest(intent.rp_id.as_bytes()).into(),
-    })
+    agentkeys_core::browser_enrollment::validate_intent(
+        intent,
+        omni,
+        account,
+        chain_id,
+        nonce,
+        current_time,
+        origins,
+    )
+    .map_err(crate::account_signer::enrollment_error)
 }
 fn validate_public_proofs(
     intent: &HostedSignerIntent,
@@ -638,8 +596,10 @@ pub async fn dismiss(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agentkeys_core::browser_enrollment::validate_origin;
     use agentkeys_core::device_crypto::device_key_hash;
     use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+    use sha2::{Digest, Sha256};
 
     #[test]
     fn local_browser_setup_requires_all_development_boundaries() {
