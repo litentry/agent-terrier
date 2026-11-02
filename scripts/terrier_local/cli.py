@@ -4,7 +4,7 @@ from pathlib import Path
 import subprocess
 import sys
 
-from . import agent, chain, contracts, data, deployment, local_state, models, owner, services, stack, manager, test_lanes, affected
+from . import agent, chain, contracts, data, deployment, local_state, models, owner, services, stack, manager, test_lanes, affected, reset
 
 
 def build_parser():
@@ -12,7 +12,8 @@ def build_parser():
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("manage", help="Open the lightweight terminal manager for the local backend stack")
     stack_parser = commands.add_parser("stack", help="Compose the existing local chain and service controllers")
-    stack_parser.add_argument("action", choices=["start", "status", "doctor", "logs", "stop", "restart"])
+    stack_parser.add_argument("action", choices=["start", "status", "doctor", "logs", "stop", "restart", "reset"])
+    stack_parser.add_argument("--confirm-state", type=Path, help="Required for reset: exact absolute selected local state directory")
     stack_parser.add_argument("--chain-port", type=int, help="Loopback RPC port; defaults to the saved profile")
     stack_parser.add_argument("--bin-dir", type=Path)
     stack_parser.add_argument("--broker-port", type=int)
@@ -118,8 +119,9 @@ def main(argv=None):
     repository = Path(__file__).resolve().parents[2]
     try:
         if arguments.command == "manage":
-            print(f"Local state: {local_state.state_directory(repository)}")
-            return manager.run(main)
+            state = local_state.state_directory(repository)
+            print(f"Local state: {state}")
+            return manager.run(main, state=state)
         if arguments.command == "test":
             changed_files = arguments.changed_file
             if arguments.changed_files_json:
@@ -136,6 +138,8 @@ def main(argv=None):
             return 0
         state = local_state.state_directory(repository)
         if arguments.command == "stack":
+            if arguments.confirm_state is not None and arguments.action != "reset":
+                raise ValueError("--confirm-state is only valid for stack reset")
             configuration = (arguments.chain_port, arguments.bin_dir, arguments.broker_port,
                              arguments.runtime_image, arguments.docker_socket, arguments.model_dir, arguments.model_binary, arguments.website, arguments.web_port, arguments.runtime_disk_policy)
             if arguments.action not in ("start", "restart") and any(value is not None for value in configuration):
@@ -146,7 +150,8 @@ def main(argv=None):
                 result = stack.execute(repository, state, arguments.action)
             else:
                 with local_state.exclusive_lock(state / "operation.lock"):
-                    result = stack.execute(repository, state, arguments.action, *configuration)
+                    result = (reset.execute(repository, state, arguments.confirm_state) if arguments.action == "reset"
+                              else stack.execute(repository, state, arguments.action, *configuration))
             print(json.dumps(result, indent=2))
             return 0 if result["success"] else 1
         if arguments.command == "agent":

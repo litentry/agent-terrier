@@ -42,7 +42,7 @@ Run locally from the same repository root and with the same state/cache settings
 ./terrier chain deploy --offline --resume
 ```
 
-An incomplete deployment blocks a fresh attempt. Explicit resume uses Foundry's recorded transactions; it refuses changed source inputs, version, deployer or endpoint. Successful recovery verifies deployed code before publishing the profile. If no transactions were recorded, or a recorded transaction cannot be resumed, keep the state for diagnosis. Automatic destructive reset and contract migration are not implemented yet.
+An incomplete deployment blocks a fresh attempt. Explicit resume uses Foundry's recorded transactions; it refuses changed source inputs, version, deployer or endpoint. Successful recovery verifies deployed code before publishing the profile. If no transactions were recorded, or a recorded transaction cannot be resumed, keep the state for diagnosis. Neither destructive reset nor contract migration happens automatically. A valid deployed stack can be erased with the explicitly confirmed [stack reset](./local-manager.md#explicit-development-reset); an interrupted deployment without a valid profile must be restored or retained for diagnosis first.
 
 ## Qualification
 

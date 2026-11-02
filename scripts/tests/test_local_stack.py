@@ -81,3 +81,11 @@ class StackTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "requires a terminal"):
             manager.run(dispatch, io.StringIO("3\n"), output)
         self.assertEqual(dispatch.call_count, 2)
+
+    def test_manager_reset_requires_the_selected_state_before_cli_dispatch(self):
+        state = Path("/synthetic/local-state")
+        output = Terminal()
+        dispatch = mock.Mock(return_value=0)
+        manager.run(dispatch, Terminal(f"7\nwrong\n7\n{state}\nq\n"), output, state=state)
+        dispatch.assert_called_once_with(["stack", "reset", "--confirm-state", str(state)])
+        self.assertIn("Reset cancelled", output.getvalue())

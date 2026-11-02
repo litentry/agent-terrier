@@ -40,6 +40,12 @@ class LocalServicesQualification(LocalOwnerFixture):
         self.assertEqual(result.returncode == 0, success, result.stderr or result.stdout)
         return json.loads(result.stdout)
 
+    def runtime_arguments(self):
+        image = os.environ.get("AGENT_TERRIER_TEST_AGENT_IMAGE")
+        docker_socket = os.environ.get("AGENT_TERRIER_TEST_DOCKER_SOCKET")
+        self.assertEqual(image is None, docker_socket is None, "qualification image/socket must be paired")
+        return ["--runtime-image", image, "--docker-socket", docker_socket] if image else []
+
     def test_stack_start_failure_recovery_and_saved_chain_port(self):
         with tempfile.TemporaryDirectory(prefix="terrier-stack-", dir="/tmp") as temporary:
             state = Path(temporary).resolve() / "state"
@@ -64,6 +70,38 @@ class LocalServicesQualification(LocalOwnerFixture):
                 self.services(state, "stop")
                 self.invoke(state, "stop")
 
+    def test_explicit_reset_discards_only_selected_development_state(self):
+        with tempfile.TemporaryDirectory(prefix="terrier-reset-", dir="/tmp") as temporary:
+            root = Path(temporary).resolve()
+            state, other = root / "state", root / "other"
+            try:
+                started = self.stack(state, "start", "--chain-port", str(available_port()), *self.runtime_arguments())
+                other_chain = self.invoke(other, "start", "--port", str(available_port()))
+                owner = self.owner(state, "register", "--name", "reset-owner")
+                original = (state / "owners/reset-owner/passkey.pem").read_bytes()
+                environment = contracts.tool_environment()
+                environment["AGENT_TERRIER_STATE_DIR"] = str(state)
+                for confirmation in [[], ["--confirm-state", str(other)]]:
+                    refused = subprocess.run([sys.executable, str(REPOSITORY / "terrier"), "stack", "reset", *confirmation],
+                        env=environment, capture_output=True, text=True, timeout=15)
+                    self.assertNotEqual(refused.returncode, 0)
+                    self.assertTrue((state / "owners/reset-owner/passkey.pem").read_bytes() == original, "refused reset changed the owner key")
+                    self.assertEqual(self.stack(state, "status")["chain"]["instance_id"], started["chain"]["instance_id"])
+                reset = self.stack(state, "reset", "--confirm-state", str(state))
+                self.assertTrue(reset["success"])
+                self.assertFalse(reset["state_preserved"])
+                self.assertFalse((state / "owners").exists())
+                self.assertEqual(self.invoke(other, "status")["instance_id"], other_chain["instance_id"])
+                self.assertTrue(self.stack(state, "reset", "--confirm-state", str(state))["success"])
+                fresh = self.stack(state, "start", "--chain-port", str(available_port()))
+                self.assertTrue(fresh["deployment"]["deployed"])
+                fresh_owner = self.owner(state, "register", "--name", "reset-owner")
+                self.assertNotEqual(fresh_owner["operator_omni"], owner["operator_omni"])
+                self.assertTrue((state / "owners/reset-owner/passkey.pem").read_bytes() != original, "fresh registration reused the deleted owner key")
+            finally:
+                self.stack(state, "stop")
+                self.invoke(other, "stop")
+
     def test_service_lifecycle_real_credentials_and_failure_cleanup(self):
         with tempfile.TemporaryDirectory(prefix="terrier-services-", dir="/tmp") as temporary:
             root = Path(temporary).resolve()
@@ -74,8 +112,7 @@ class LocalServicesQualification(LocalOwnerFixture):
                 self.services(state, "doctor", success=False)
                 image = os.environ.get("AGENT_TERRIER_TEST_AGENT_IMAGE")
                 docker_socket = os.environ.get("AGENT_TERRIER_TEST_DOCKER_SOCKET")
-                self.assertEqual(image is None, docker_socket is None, "qualification image/socket must be paired")
-                runtime_arguments = ["--runtime-image", image, "--docker-socket", docker_socket] if image else []
+                runtime_arguments = self.runtime_arguments()
                 running = self.services(state, "start", *runtime_arguments)
                 runtime_configuration = running["runtime"]
                 if image:

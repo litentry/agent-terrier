@@ -11,7 +11,7 @@ Local, from the public checkout, prepare dependencies and binaries:
 cargo build -p agentkeys-cli -p agentkeys-broker-server -p agentkeys-local-store \
   -p agentkeys-worker-creds -p agentkeys-worker-config \
   -p agentkeys-worker-memory -p agentkeys-worker-channel -p agentkeys-worker-classify -p agentkeys-mock-server \
-  -p agentkeys-gate -p agentkeys-bundler
+  -p agentkeys-gate -p agentkeys-bundler -p agentkeys-runtime
 ./terrier chain start
 ./terrier chain deploy
 ./terrier services start
@@ -111,7 +111,7 @@ Local, from the same checkout and state directory:
 
 `status` reports the owned supervisor, component endpoints, health and chain/profile consistency. `doctor` returns a nonzero exit status if the supervised services are unavailable or unhealthy. Logs are private files with bounded tail output. A stopped or failed component is reported as unhealthy; it is not silently replaced. Inspect the error, stop the group and start it again after correcting the cause.
 
-`services stop` preserves keys, databases and the chain. Restarting services uses the original keys and reads the same encrypted data. Stop the chain separately with `terrier chain stop` when finished. The shared `stack restart` command also restarts the chain while preserving state. Destructive reset and automatic recovery remain separate work. Missing keys are never regenerated over existing service state.
+`services stop` preserves keys, databases and the chain. Restarting services uses the original keys and reads the same encrypted data. Stop the chain separately with `terrier chain stop` when finished. The shared `stack restart` command also restarts the chain while preserving state. Use the explicitly confirmed [stack reset](./local-manager.md#explicit-development-reset) to erase a selected development installation. Automatic recovery remains separate work. Missing keys are never regenerated over existing service state.
 
 ## Qualification
 

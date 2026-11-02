@@ -13,6 +13,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 mod disk;
 mod managed;
 pub use disk::DiskPolicy;
+mod reset;
 mod state_volume;
 use crate::managed_agent::{RuntimeBootstrap, BOOTSTRAP_VERSION};
 pub use managed::ManagedDockerConfig;
@@ -412,18 +413,22 @@ pub struct DockerRuntime {
 }
 
 impl DockerRuntime {
-    pub async fn connect(config: DockerConfig) -> Result<Self> {
+    fn local(config: DockerConfig) -> Self {
         let command = Arc::new(LocalDockerCommand {
             socket: config.socket.clone(),
         });
-        let runtime = Self {
+        Self {
             config,
             command,
             locks: DelegateLocks::default(),
             endpoints: RwLock::default(),
             managed_config: None,
             managed_leases: RwLock::default(),
-        };
+        }
+    }
+
+    pub async fn connect(config: DockerConfig) -> Result<Self> {
+        let runtime = Self::local(config);
         runtime.current_image().await?;
         Ok(runtime)
     }
@@ -1558,6 +1563,46 @@ mod tests {
         );
         runtime.kill_for_device(&device).await.unwrap();
         assert!(!engine.network_exists.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn namespace_reset_preflights_ownership_and_removes_only_owned_state() {
+        for invalid in [false, true] {
+            let engine = Arc::new(FakeEngine::default());
+            *engine.container.lock().unwrap() =
+                Some(container("test-runtime", &actor(), None, true));
+            engine.network_exists.store(true, Ordering::SeqCst);
+            engine.foreign_network.store(invalid, Ordering::SeqCst);
+            let runtime = runtime(engine.clone());
+            if invalid {
+                assert!(runtime
+                    .reset_owned_state()
+                    .await
+                    .unwrap_err()
+                    .to_string()
+                    .contains("ownership or isolation mismatch"));
+                assert!(engine.container.lock().unwrap().is_some());
+                assert!(engine.volume.lock().unwrap().is_some());
+                assert!(!engine
+                    .calls
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|(arguments, _)| arguments[1] == "rm"));
+            } else {
+                assert_eq!(runtime.reset_owned_state().await.unwrap(), 1);
+                assert!(engine.container.lock().unwrap().is_none());
+                assert!(engine.volume.lock().unwrap().is_none());
+                assert!(!engine.network_exists.load(Ordering::SeqCst));
+                assert_eq!(runtime.reset_owned_state().await.unwrap(), 0);
+                assert!(!engine
+                    .calls
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|(arguments, _)| arguments[0] == "image"));
+            }
+        }
     }
 
     #[tokio::test]

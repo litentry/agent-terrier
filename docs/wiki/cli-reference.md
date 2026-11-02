@@ -22,7 +22,8 @@ Agent Terrier local development tools
 | Argument | Required | Choices | Description |
 | --- | --- | --- | --- |
 | -h, --help | no |  | show this help message and exit |
-| action | yes | start, status, doctor, logs, stop, restart |  |
+| action | yes | start, status, doctor, logs, stop, restart, reset |  |
+| --confirm-state | no |  | Required for reset: exact absolute selected local state directory |
 | --chain-port | no |  | Loopback RPC port; defaults to the saved profile |
 | --bin-dir | no |  |  |
 | --broker-port | no |  |  |
