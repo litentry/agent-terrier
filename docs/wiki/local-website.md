@@ -50,6 +50,8 @@ Only the selected kind and public origin are serialized into the page. No key, t
 
 The former `NEXT_PUBLIC_AGENTKEYS_BACKEND`, `NEXT_PUBLIC_AGENTKEYS_BROKER_URL` and `NEXT_PUBLIC_AGENTKEYS_DAEMON_URL` settings are refused with migration guidance. Remove them and use the server settings above. The console needs its Node server; the old static-export switch is refused. [Next.js runtime environment guidance](https://nextjs.org/docs/app/guides/environment-variables#runtime-environment-variables) explains why public build-time variables cannot select a new endpoint after compilation.
 
+The broker's console configuration reports `audit_url: null` when no audit archive is configured and no endpoint can be derived. This does not prevent sign-in configuration or access to unrelated services. Required service URLs and cross-stack validation still apply. Archive append and envelope retrieval return “Audit archive is not configured” before making a request; there is no substitute archive or silently successful write. On-chain audit history retains its authenticated broker route. Secure local archive integration remains open.
+
 ## Verification
 
 Local, from the prepared public repository root:

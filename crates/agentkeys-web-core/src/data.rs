@@ -15,7 +15,7 @@ pub struct DataEndpoints {
     pub config_url: String,
     pub memory_url: String,
     pub credential_url: String,
-    pub audit_url: String,
+    pub audit_url: Option<String>,
     pub classify_url: Option<String>,
 }
 
@@ -503,13 +503,21 @@ impl DataClient {
         Ok(())
     }
 
+    fn audit_endpoint(&self) -> Result<&str, DataError> {
+        self.endpoints
+            .audit_url
+            .as_deref()
+            .filter(|endpoint| !endpoint.trim().is_empty())
+            .ok_or_else(|| DataError::Invalid("Audit archive is not configured".into()))
+    }
+
     pub async fn audit_append(
         &self,
         envelope: &AuditAppendV2,
     ) -> Result<AuditAppendV2Resp, DataError> {
         self.send(
             self.http
-                .post(endpoint(&self.endpoints.audit_url, "/v1/audit/append/v2"))
+                .post(endpoint(self.audit_endpoint()?, "/v1/audit/append/v2"))
                 .json(envelope),
         )
         .await
@@ -525,7 +533,7 @@ impl DataClient {
         let response = self
             .http
             .get(endpoint(
-                &self.endpoints.audit_url,
+                self.audit_endpoint()?,
                 &format!("/v1/audit/envelope/{hash}"),
             ))
             .send()
@@ -817,10 +825,79 @@ mod tests {
             config_url: endpoint.clone(),
             memory_url: endpoint.clone(),
             credential_url: endpoint.clone(),
-            audit_url: endpoint,
+            audit_url: Some(endpoint),
             classify_url: None,
         });
         (client, state, task)
+    }
+
+    #[tokio::test]
+    async fn optional_audit_archive_refuses_reads_and_writes_without_transport() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let requests = Arc::new(AtomicUsize::new(0));
+        let content = b"synthetic-audit-envelope".to_vec();
+        let hash = format!(
+            "0x{}",
+            hex::encode(agentkeys_device_core::keccak256(&content))
+        );
+        let get_requests = requests.clone();
+        let post_requests = requests.clone();
+        let response_hash = hash.clone();
+        let response_content = content.clone();
+        let routes = Router::new()
+            .route(
+                "/v1/audit/envelope/:hash",
+                axum::routing::get(move || {
+                    let requests = get_requests.clone();
+                    let content = response_content.clone();
+                    async move {
+                        requests.fetch_add(1, Ordering::SeqCst);
+                        content
+                    }
+                }),
+            )
+            .route(
+                "/v1/audit/append/v2",
+                post(move || {
+                    let requests = post_requests.clone();
+                    let hash = response_hash.clone();
+                    async move {
+                        requests.fetch_add(1, Ordering::SeqCst);
+                        Json(json!({"ok":true,"envelope_hash":hash}))
+                    }
+                }),
+            );
+        let (mut client, _, task) = setup_with_routes(routes).await;
+        let envelope = AuditAppendV2 {
+            version: agentkeys_protocol::ENVELOPE_VERSION,
+            ts_unix: 1234,
+            actor_omni: "ab".repeat(32),
+            operator_omni: "ab".repeat(32),
+            op_kind: 1,
+            op_body: json!({"fixture":true}),
+            result: 0,
+            intent_text: None,
+            intent_commitment: None,
+        };
+        assert_eq!(client.audit_fetch(&hash).await.unwrap(), content);
+        assert_eq!(
+            client.audit_append(&envelope).await.unwrap().envelope_hash,
+            hash
+        );
+        assert_eq!(requests.load(Ordering::SeqCst), 2);
+        for endpoint in [None, Some(String::new())] {
+            client.endpoints.audit_url = endpoint;
+            for error in [
+                client.audit_fetch(&hash).await.unwrap_err(),
+                client.audit_append(&envelope).await.unwrap_err(),
+            ] {
+                assert!(
+                    matches!(error, DataError::Invalid(ref message) if message == "Audit archive is not configured")
+                );
+            }
+            assert_eq!(requests.load(Ordering::SeqCst), 2);
+        }
+        task.abort();
     }
 
     #[tokio::test]

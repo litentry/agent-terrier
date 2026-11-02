@@ -86,7 +86,17 @@ class LocalWebsiteQualification(LocalOwnerFixture):
                     denied = request(endpoint + "/healthz", method, foreign_origin)
                     self.assertEqual(positive[2].get("Access-Control-Allow-Origin"), address)
                     self.assertIsNone(denied[2].get("Access-Control-Allow-Origin"))
+            config_status, config_body, config_headers = request(broker + "/v1/console/config", origin=address)
+            self.assertEqual(config_status, 200, config_body)
+            configuration = json.loads(config_body)
+            self.assertIsNone(configuration["audit_url"])
+            self.assertEqual(config_headers.get("Access-Control-Allow-Origin"), address)
+            for field, service_name in (("signer_url", "signer"), ("config_url", "config"),
+                    ("memory_url", "memory"), ("credential_url", "credentials"), ("channel_url", "channel"),
+                    ("classify_url", "classify")):
+                self.assertEqual(configuration[field], group["services"][service_name]["url"])
             self.assertEqual(request(broker + "/v1/auth/session", origin=address)[0], 401)
+            self.assertEqual(request(broker + "/v1/console/audit", origin=address)[0], 401)
             manifest = local_state.read_json(state / "services/manifest.json")
             restarted = self.stack(state, "restart")
             self.assertTrue(restarted["ready"])
