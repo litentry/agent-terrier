@@ -21,6 +21,7 @@ mod gateway_device;
 mod hardening;
 mod hosted_signer;
 mod knowledge_history;
+mod knowledge_recall;
 mod lifecycle;
 mod master_session;
 mod memory_mirror;

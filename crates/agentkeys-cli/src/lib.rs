@@ -16,6 +16,7 @@ pub mod local_agent;
 pub mod local_browser;
 pub mod local_channel;
 pub mod local_data;
+pub mod local_memory;
 pub mod local_owner;
 
 use agentkeys_core::actor_omni::actor_omni_hex;

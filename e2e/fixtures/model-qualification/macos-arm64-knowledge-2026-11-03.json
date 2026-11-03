@@ -1,0 +1,87 @@
+{
+  "qualification": "supervised-local-model-application",
+  "external_network_denied": true,
+  "local_unix_control_sockets_allowed": true,
+  "recipe": {
+    "base_url": "http://127.0.0.1:11434/v1",
+    "chat": {
+      "digest": "8f68893c685c3ddff2aa3fffce2aa60a30bb2da65ca488b61fff134a4d1730e7",
+      "model": "qwen3:1.7b"
+    },
+    "embedding": {
+      "digest": "0a109f422b47e3a30ba2b10eca18548e944e8a23073ee3f3e947efcf3c45e59f",
+      "dimension": 768,
+      "model": "nomic-embed-text:v1.5"
+    },
+    "runtime": {
+      "context_length": 4096,
+      "max_loaded_models": 1,
+      "name": "ollama",
+      "parallel_requests": 1,
+      "version": "0.34.4"
+    }
+  },
+  "architecture": "arm64",
+  "operating_system": "15.7.4",
+  "application": {
+    "qualification": "local-agent-application",
+    "real_chain": true,
+    "protected_owner_login": true,
+    "signer_custody": true,
+    "managed_docker": true,
+    "image_id": "sha256:1a9375255bf7af213d70c8fb8a0abc28d2b7aa4ba7ad4d4a6923b076cb59de98",
+    "container_network": "none",
+    "real_model_chat": true,
+    "restart_recall": true,
+    "foreign_chat_denied": true,
+    "denied_chat_usage_unchanged": true,
+    "revocation": true,
+    "retained_data": true,
+    "model_runner_supervised": true,
+    "model_runner_restart_verified": true,
+    "model_publish_tool": true,
+    "ungranted_tool_denied": true,
+    "chain_grant_enables_tool": true,
+    "chain_scope_removal_denies_tool": true,
+    "denied_tool_channel_unchanged": true,
+    "owner_channel_to_agent_reply": true,
+    "channel_reply_correlated": true,
+    "knowledge_stage_before_channel_reply": "degraded",
+    "channel_startup_wait_seconds": 19.52,
+    "channel_reply_seconds": 2.389,
+    "persistent_semantic_knowledge": true,
+    "knowledge_cli_uses_shared_documents": true,
+    "knowledge_cross_owner_isolation": true,
+    "knowledge_grant_and_revocation": true,
+    "knowledge_restart_retrieval": true,
+    "retrieval_preserves_canonical_data": true,
+    "not_qualified": [
+      "browser",
+      "independent clean install"
+    ]
+  },
+  "seconds": 129.41,
+  "qualification_date": "2026-11-03",
+  "hardware": "Apple M3 Pro",
+  "physical_memory_bytes": 19327352832,
+  "source_base": "ec6f1ccaa2bb792243a8dc15a75836f936b0985b",
+  "source_sha256": {
+    "crates/agentkeys-daemon/src/knowledge_recall.rs": "9b7679c10bd9e9fdaab1a3b7ab508f6c84d747b2059659e2f70a88f079a6ed61",
+    "crates/agentkeys-daemon/src/ui_bridge.rs": "b2b05a5fe07d27f879a8c4e33813f73ceed3ffb173ad3e849233d30e526505ee",
+    "crates/agentkeys-daemon/src/memory_mirror.rs": "2d7e077e00a8b361c8e3bf2b5553ab0436847ee6bf8d1dddfcf39d0e6c9d9a86",
+    "crates/agentkeys-cli/src/local_memory.rs": "aaa7dc180ba5d6ef58df5db2052e8220b50302ce466079d0498d45118fbe1921",
+    "crates/agentkeys-protocol/src/sandbox_actions.rs": "c986a2db39a3a5e90880266209d60c87a13155ece1168ce4535d85fad837ebf1",
+    "crates/agentkeys-core/src/models/embedding.rs": "74c056720ac0699a904e63763099b66538bb03819252380e6cf7e2714bc8b8da",
+    "scripts/tests/qualify_local_agents.py": "5a11887ba35c389c3e3d4c37b4d9dc0ba93aed7b10a2662c0e74298d208d8323",
+    "scripts/tests/qualify_local_models.py": "b3ecc685c0fb663fab597cb253dc1745efb61ecc5c740486717410e81a251b03",
+    "packages/agent-terrier-runtime/Dockerfile": "f369f545816fc7d2cfdeba9b2f7470ccd5f6c7adb13179c51d852a59496281a8",
+    "packages/agent-terrier-runtime/Dockerfile.dockerignore": "8efb9e80a1ecf3d628ba7951a1f02c1a016397b1a89e484152ab48a6458d1368",
+    "presets/local-models.json": "4c80774a83e010716483fae6a8753b41dfad73b6caefbf6e0438f15ceda5837e"
+  },
+  "notes": [
+    "Cached dependencies, compiler, images and models; setup downloads and image build time excluded.",
+    "Canonical memory and per-request embeddings are qualified. The optional memory engine is not composed; its legacy lifecycle status remained degraded.",
+    "A fresh model conversation repeats authorized persistent knowledge retrieval after runtime recreation; the planted booking code never appears in the query.",
+    "The disposable application state, containers and volumes were removed after success."
+  ]
+}

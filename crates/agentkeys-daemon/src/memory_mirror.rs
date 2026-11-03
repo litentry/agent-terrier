@@ -259,7 +259,7 @@ async fn mirror_namespace(
     );
     let client = credential.configure_client(client);
     let dkh = credential.device_key_hash();
-    match fetch_canonical(&client, cfg, ns, &dkh, bearer).await {
+    match fetch_canonical(&client, &cfg.chat, ns, &dkh, bearer).await {
         Ok(content) => {
             let items = mirror_units(&content);
             NamespaceOutcome::Reconciled(
@@ -400,9 +400,9 @@ fn truncate(s: &str, max: usize) -> String {
 /// Errors carry the STAGE that produced them — a bare 403 is ambiguous between
 /// the broker's cap-mint (session/device/scope) and the worker's independent
 /// re-verify, and the two have different fixes.
-async fn fetch_canonical(
+pub(crate) async fn fetch_canonical(
     client: &BackendClient,
-    cfg: &MirrorConfig,
+    cfg: &ChatLoopConfig,
     namespace: &str,
     device_key_hash: &str,
     bearer: &str,
@@ -417,8 +417,8 @@ async fn fetch_canonical(
         .cap_mint(
             CapMintOp::MemoryCanonicalGet,
             CapMintRequest {
-                operator_omni: normalize_omni_0x(&cfg.chat.operator_omni),
-                actor_omni: normalize_omni_0x(&cfg.chat.actor_omni),
+                operator_omni: normalize_omni_0x(&cfg.operator_omni),
+                actor_omni: normalize_omni_0x(&cfg.actor_omni),
                 service: service.clone(),
                 device_key_hash: device_key_hash.to_string(),
                 ttl_seconds: 300,
@@ -978,7 +978,7 @@ pub(crate) async fn fetch_own_context(
     );
     let client = credential.configure_client(client);
     let dkh = credential.device_key_hash();
-    let blob = match fetch_canonical(&client, cfg, own_ns, &dkh, bearer).await {
+    let blob = match fetch_canonical(&client, &cfg.chat, own_ns, &dkh, bearer).await {
         Ok(b) => b,
         Err((_, BackendError::Http { status: 404, .. })) => return Ok(None),
         Err((stage, e)) => return Err(format!("{stage}: {e}")),

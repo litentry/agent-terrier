@@ -21,6 +21,7 @@ This document describes the public source tree. The complete local runtime is st
 | Agent runtime plugins | `packages/agentkeys-dsh` | Agent environments |
 | Local agent composition and image | `agentkeys-runtime::managed_agent` configuration and `agent-terrier-runtime` process owner; `packages/agent-terrier-runtime` agent loop and image | Local component development and image qualification |
 | Runtime lifecycle and Docker ownership | `crates/agentkeys-runtime` | Broker and local runtime controllers |
+| Persistent knowledge retrieval | Canonical memory worker, `agentkeys-daemon::knowledge_recall`, shared model transport and action contract | Generic agent action plugin |
 | Protocol examples | `e2e/fixtures` | Shared drift and conformance checks |
 
 The device-core crate contains reusable protocol and cryptographic primitives. It does not require firmware or a hardware toolchain for the public workspace build.
@@ -50,6 +51,8 @@ The card schema has one owner in `agentkeys-protocol::card`. Its TypeScript outp
 Independent checks at broker, worker and storage boundaries remain necessary even when they share types and pure helpers.
 
 The native backend client owns base-URL joining for broker, storage and audit routes, including endpoints with a trailing slash. The local owner credential, agent and channel commands share one protected-session validator. Channel publish/poll reuses `agentkeys-web-core::broker::ChannelWorkerClient` with an explicitly proxy-free, redirect-refusing native transport; the native backend client owns capability minting. The local command wrapper shares profile, identity and service resolution. See [local channels](wiki/local-channels.md).
+
+The local knowledge CLI reuses `ConsoleDocuments` and `DataClient` from the browser core, with the same protected owner-session validator as other local data commands. It has no independent document store or merge logic. `recall_knowledge` is a read-only daemon action declared in `agentkeys-protocol::sandbox_actions`; the generic agent action plugin registers it. Each request fetches authorized canonical entries, embeds them through the configured model relay and rechecks authority and source equality before returning a bounded semantic result. No persistent vector index or optional memory engine is required. Shared stored-entry types and browser conversion helpers keep the write/read format identical. See [local knowledge](wiki/local-knowledge.md) for bounds, privacy and qualification.
 
 The protected local agent CLI exposes the same broker bridge as the console through the existing `BridgeProxyBody` wire type. It shares owner-session validation, requires a local development profile, bounds JSON input/output and rejects redirects/proxy inheritance. The broker remains the owner of route and live-instance authorization. See [headless agent calls](wiki/local-agents.md#call-an-agent-without-a-browser).
 

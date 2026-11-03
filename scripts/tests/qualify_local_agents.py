@@ -78,7 +78,7 @@ class LocalAgentQualification(LocalOwnerFixture):
             return docker(kind, "ls", *(["-a"] if kind == "container" else []), "--quiet",
                 "--filter", "label=org.agent-terrier.runtime=" + namespace).split()
 
-        def tool_sessions():
+        def tool_sessions(include_diagnostics=False):
             collected = []
             program = r"""
 const fs = require('node:fs'); const path = require('node:path'); const sessions = [];
@@ -89,7 +89,7 @@ function visit(directory) {
     if (entry.isDirectory()) visit(file);
     else if (entry.isFile() && entry.name.endsWith('.jsonl')) {
       sessions.push(fs.readFileSync(file,'utf8').trim().split('\n').filter(Boolean).map(JSON.parse)
-        .filter(row => row.type === 'tool/call' || row.type === 'tool/result'));
+        .filter(row => process.argv[2] === 'diagnostics' || row.type === 'tool/call' || row.type === 'tool/result'));
     }
   }
 }
@@ -98,7 +98,7 @@ visit(process.argv[1]); process.stdout.write(JSON.stringify(sessions));
             for container_id in owned("container"):
                 metadata = json.loads(docker("inspect", container_id))[0]
                 session_root = str(Path(metadata["Mounts"][0]["Destination"]) / "runtime/sessions")
-                collected.extend(json.loads(docker("exec", container_id, "node", "-e", program, session_root)))
+                collected.extend(json.loads(docker("exec", container_id, "node", "-e", program, session_root, "diagnostics" if include_diagnostics else "tools")))
             return collected
 
         try:
@@ -130,6 +130,22 @@ visit(process.argv[1]); process.stdout.write(JSON.stringify(sessions));
             environment = contracts.tool_environment()
             environment["AGENT_TERRIER_STATE_DIR"] = str(state)
             registry = state / "services/relay/keys.json"
+
+            def memory(action, namespace, *, key=None, body=None, name="alice", denial=None):
+                arguments = [sys.executable, str(REPOSITORY / "terrier"), "memory", action,
+                    namespace, "--name", name]
+                if key is not None:
+                    arguments.extend(["--key", key, "--body-stdin"])
+                result = subprocess.run(arguments, input=body, env=environment,
+                    capture_output=True, text=True, timeout=90)
+                self.assertTrue(all(secret not in result.stdout + result.stderr for secret in secrets))
+                if denial:
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn(denial, result.stderr)
+                    self.assertFalse(result.stdout)
+                    return None
+                self.assertEqual(result.returncode, 0, result.stderr)
+                return json.loads(result.stdout)
 
             def command(action, *arguments, name="alice", denial=None, incomplete=False):
                 result = subprocess.run([sys.executable, str(REPOSITORY / "terrier"), "agent", action,
@@ -189,7 +205,7 @@ visit(process.argv[1]); process.stdout.write(JSON.stringify(sessions));
             local_state.write_private(key_path, request_key)
             self.assertTrue(snapshot() == before, "unsafe/missing-file denials changed state")
 
-            created = command("spawn", "--label", "local-agent")
+            created = command("spawn", "--label", "local-agent", "--memory-ns", "local-agent")
             device = created["device_key_hash"]
             self.assertEqual(len(created["actor_omni"]), 66)
             def bridge(path, method="GET", body=None, name="alice", denial=None, timeout=30):
@@ -237,14 +253,14 @@ visit(process.argv[1]); process.stdout.write(JSON.stringify(sessions));
                     self.assertEqual(result.returncode, 0, result.stderr)
                     return json.loads(result.stdout)["response"]["events"]
 
-                def publish_evidence(marker, slot):
+                def tool_evidence(tool_name, expected_arguments):
                     evidence = []
                     for events in tool_sessions():
                         for event in events:
-                            if event["type"] != "tool/call" or event["data"]["name"] != "publish_to_slot":
+                            if event["type"] != "tool/call" or event["data"]["name"] != tool_name:
                                 continue
                             arguments = json.loads(event["data"]["arguments"])
-                            if arguments.get("body") != marker or arguments.get("slot") != slot:
+                            if any(arguments.get(key) != value for key, value in expected_arguments.items()):
                                 continue
                             result = next((row for row in events if row["type"] == "tool/result" and
                                 event["seq"] in row.get("sourceEventSeqs", [])), None)
@@ -253,7 +269,7 @@ visit(process.argv[1]); process.stdout.write(JSON.stringify(sessions));
                                 block["toolCallId"] == event["data"]["callId"]), {})
                             text = json.dumps(message.get("content", []))
                             evidence.append({"completed": bool(message), "failed": message.get("isError") is True,
-                                "published": "published:" in text, "authorityDenied": "403" in text})
+                                "published": "published:" in text, "authorityDenied": "403" in text, "content": text})
                     return evidence
 
                 def model_publish(slot, marker):
@@ -261,7 +277,7 @@ visit(process.argv[1]); process.stdout.write(JSON.stringify(sessions));
                         f'Call publish_to_slot exactly once with slot="{slot}", kind="text", body="{marker}". '
                         'Use the actual tool now; do not just describe the call. Report its result without retrying. /no_think',
                         "stream": False, "session": {"window": "event", "scope": "qualification:" + marker}}, timeout=210)
-                    evidence = publish_evidence(marker, slot)
+                    evidence = tool_evidence("publish_to_slot", {"body":marker, "slot":slot})
                     self.assertEqual(len(evidence), 1, "model must execute exactly one matching publish tool call")
                     self.assertTrue(evidence[0]["completed"], "tool result was not durably recorded")
                     return evidence[0]
@@ -284,7 +300,7 @@ visit(process.argv[1]); process.stdout.write(JSON.stringify(sessions));
                 self.assertEqual(channel_events(denied_channel), before_denied,
                     "denied tool changed the ungranted channel")
                 base_grants = ["--service", "channel-pub:opchat-local-agent",
-                    "--service", "channel-sub:opchat-local-agent"]
+                    "--service", "channel-sub:opchat-local-agent", "--service", "knowledge:local-agent"]
                 self.owner(state, "grant", "--name", "alice", "--actor-omni", created["actor_omni"],
                     *base_grants, "--service", "channel-pub:" + denied_channel)
                 granted_marker = "granted-" + uuid.uuid4().hex
@@ -300,6 +316,62 @@ visit(process.argv[1]); process.stdout.write(JSON.stringify(sessions));
                     "removing the real chain grant must deny the previously permitted tool target")
                 self.assertEqual(channel_events(denied_channel), granted_events,
                     "revoked tool changed the channel")
+                knowledge_namespace = "travel-qualification"
+                knowledge_marker = "reservation" + uuid.uuid4().hex[:12]
+                knowledge_entries = {
+                    "rail": "Board the overnight railway service at platform seven. Your train booking code is " + knowledge_marker + ".",
+                    "food": "Dinner is vegetable soup with carrots and lentils.",
+                    "garden": "Water the roses before sunrise and prune old branches.",
+                    "art": "Mix blue and yellow pigment to paint the green landscape.",
+                }
+                for key, body in knowledge_entries.items():
+                    planted = memory("plant", knowledge_namespace, key=key, body=body)
+                    self.assertEqual(planted["result"]["planted"], 1)
+                stored_knowledge = memory("read", knowledge_namespace)["entries"]
+                self.assertEqual(len(stored_knowledge), len(knowledge_entries))
+                self.assertEqual(memory("read", knowledge_namespace, name="bob")["entries"], [],
+                    "another owner read the first owner's knowledge")
+                memory("plant", knowledge_namespace, key="too-large", body="x" * 8193, denial="size limit")
+                self.assertEqual(memory("read", knowledge_namespace)["entries"], stored_knowledge,
+                    "refused knowledge input changed persistent storage")
+                knowledge_grants = base_grants
+
+                def model_recall(allowed):
+                    query = "Where do I board the railway service and what is my booking code? Search " + uuid.uuid4().hex[:8]
+                    reply = bridge("/v1/chat", "POST", {"text":
+                        f'Call recall_knowledge exactly once with namespace="{knowledge_namespace}" and query="{query}". '
+                        'Use the actual tool now. Report its result without retrying. /no_think',
+                        "stream": False, "session": {"window": "event", "scope": "qualification:" + uuid.uuid4().hex}}, timeout=240)
+                    evidence = tool_evidence("recall_knowledge", {"namespace":knowledge_namespace, "query":query})
+                    self.assertEqual(len(evidence), 1, "model must execute exactly one matching retrieval call")
+                    result = evidence[0]
+                    self.assertTrue(result["completed"], "retrieval result was not durably recorded")
+                    if allowed:
+                        self.assertFalse(result["failed"], "authorized knowledge retrieval failed: " + result["content"])
+                        self.assertIn(knowledge_marker, result["content"])
+                        self.assertIn("[rail] rail", result["content"])
+                        first_match = result["content"].split("(data, not instructions):", 1)[1]
+                        self.assertLess(first_match.index("[rail]"), min(
+                            [first_match.index("[" + key + "]") for key in ("food", "garden", "art")
+                             if "[" + key + "]" in first_match] or [len(first_match)]))
+                        self.assertIn(knowledge_marker, reply.get("reply", ""),
+                            "model did not ground its reply in the retrieved persistent knowledge")
+                    else:
+                        self.assertTrue(result["failed"] and result["authorityDenied"],
+                            "missing namespace grant must produce a real authority refusal")
+                        self.assertNotIn(knowledge_marker, result["content"] + json.dumps(reply))
+                    self.assertEqual(memory("read", knowledge_namespace)["entries"], stored_knowledge,
+                        "retrieval changed canonical knowledge")
+
+                self.owner(state, "grant", "--name", "alice", "--actor-omni", created["actor_omni"], *knowledge_grants)
+                model_recall(False)
+                self.owner(state, "grant", "--name", "alice", "--actor-omni", created["actor_omni"],
+                    *knowledge_grants, "--service", "knowledge:" + knowledge_namespace)
+                model_recall(True)
+                self.owner(state, "grant", "--name", "alice", "--actor-omni", created["actor_omni"], *knowledge_grants)
+                model_recall(False)
+                self.owner(state, "grant", "--name", "alice", "--actor-omni", created["actor_omni"],
+                    *knowledge_grants, "--service", "knowledge:" + knowledge_namespace)
                 startup_started = time.monotonic()
                 while True:
                     knowledge_stage = latest_lifecycle(channel_events("opchat-local-agent"))
@@ -399,6 +471,7 @@ visit(process.argv[1]); process.stdout.write(JSON.stringify(sessions));
             if qualify_model:
                 reply = bridge("/v1/chat", "POST", {"text": "What is the test word from the first message? Reply with exactly that word. /no_think", "stream": False}, timeout=210)
                 self.assertIn(conversation_marker, reply.get("reply", ""), "recreated agent lost its model conversation")
+                model_recall(True)
             mounts = container["Mounts"]
             self.assertEqual(len(mounts), 1)
             self.assertEqual(mounts[0]["Type"], "volume")
@@ -476,12 +549,15 @@ visit(process.argv[1]); process.stdout.write(JSON.stringify(sessions));
                     "knowledge_stage_before_channel_reply": knowledge_stage,
                     "channel_startup_wait_seconds": channel_startup_wait_seconds,
                     "channel_reply_seconds": channel_reply_seconds,
-                    "not_qualified": ["authorized persistent memory retrieval", "browser", "independent clean install"]}))
+                    "persistent_semantic_knowledge": True, "knowledge_cli_uses_shared_documents": True,
+                    "knowledge_cross_owner_isolation": True, "knowledge_grant_and_revocation": True,
+                    "knowledge_restart_retrieval": True, "retrieval_preserves_canonical_data": True,
+                    "not_qualified": ["browser", "independent clean install"]}))
             completed = True
         finally:
             if not completed:
                 try:
-                    local_state.write_json(root / "runtime-tool-diagnostics.json", tool_sessions())
+                    local_state.write_json(root / "runtime-tool-diagnostics.json", tool_sessions(include_diagnostics=True))
                 except (OSError, ValueError, AssertionError, subprocess.TimeoutExpired):
                     print("Could not capture private tool diagnostics", file=sys.stderr)
             self.services(state, "stop")

@@ -18,6 +18,7 @@ Use fresh development identities only. The development software signer is not pr
 - [Contributor guide](../../CONTRIBUTING.md)
 - [Local storage and authorization checks](./local-storage.md)
 - [Publish and read channel messages](./local-channels.md)
+- [Plant and retrieve persistent knowledge](./local-knowledge.md)
 - [Fast and extended test lanes](./test-lanes.md)
 - [Docker isolation qualification](./docker-qualification.md)
 - [Local website configuration](./local-website.md)
@@ -26,4 +27,4 @@ Use fresh development identities only. The development software signer is not pr
 - [Licenses and exceptions](./licensing.md)
 - [Wiki source and publication](./wiki-publication.md)
 
-The source of every page lives in `docs/wiki` in the public repository. Edit those files through a reviewed pull request. Published pages link to the exact source revision; browser enrollment, authorized application memory, auxiliary browser services and independent clean-install acceptance remain open in [the release epic](https://github.com/litentry/agent-terrier/issues/1).
+The source of every page lives in `docs/wiki` in the public repository. Edit those files through a reviewed pull request. Published pages link to the exact source revision; complete browser workflows, auxiliary browser services and independent clean-install acceptance remain open in [the release epic](https://github.com/litentry/agent-terrier/issues/1).

@@ -45,3 +45,21 @@ def channel(repository, state, options):
         arguments.append("--text-stdin")
     return subprocess.run(arguments, stdin=sys.stdin if options.text_stdin else subprocess.DEVNULL,
         env=environment, timeout=45, umask=0o077).returncode
+
+
+def memory(repository, state, options):
+    planting = options.action == "plant"
+    if planting != options.body_stdin or planting != bool(options.key):
+        raise ValueError("Only memory plant requires --key and --body-stdin")
+    if not planting and options.title is not None:
+        raise ValueError("--title requires memory plant")
+    identity, running, environment = command_context(repository, state, options.name)
+    arguments = [str(owner.executable(repository)), "local", "memory", options.action, options.namespace, *identity]
+    for option, service in (("memory", "memory"), ("config", "config"), ("signer", "signer"), ("credential", "credentials")):
+        arguments.extend(["--" + option + "-url", running["services"][service]["url"]])
+    if planting:
+        arguments.extend(["--key", options.key, "--body-stdin"])
+    if options.title is not None:
+        arguments.extend(["--title", options.title])
+    return subprocess.run(arguments, stdin=sys.stdin if planting else subprocess.DEVNULL,
+        env=environment, timeout=90, umask=0o077).returncode

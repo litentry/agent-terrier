@@ -38,7 +38,7 @@ pub fn publish_slots(app: &AppRuntimeConfig) -> Vec<String> {
     slots
 }
 
-/// The advertised list for this env: the two verbs over the publishable
+/// The advertised list for this env: the actions over the publishable
 /// slots and the propose default (`None` = none derivable — the description
 /// then carries no default note and the daemon refuses a namespace-less
 /// proposal at push time).
@@ -233,7 +233,11 @@ mod tests {
         let app =
             AppRuntimeConfig::from_lookup(lookup(&[("AGENTKEYS_BOUND_CHANNELS", bound.as_str())]));
         let actions = advertised_for(&app, Some("app-chef"));
-        assert_eq!(actions.len(), 2);
+        assert_eq!(actions.len(), 3);
+        assert_eq!(
+            actions[2].name,
+            agentkeys_protocol::sandbox_actions::RECALL_ACTION
+        );
         assert_eq!(actions[0].name, PUBLISH_ACTION);
         assert!(actions[0].description.contains("kitchen_screen, opchat"));
         assert_eq!(actions[1].name, PROPOSE_ACTION);

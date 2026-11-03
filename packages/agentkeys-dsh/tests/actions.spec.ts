@@ -49,9 +49,10 @@ beforeAll(async () => {
         if (advertiseMode === 'garbage') return json(200, { actions: [{ name: 'Bad Name' }] });
         return json(200, fixture.advertised.response);
       }
-      if (req.method === 'POST' && (path === '/v1/sandbox/self/publish' || path === '/v1/sandbox/self/propose')) {
+      if (req.method === 'POST' && (path === '/v1/sandbox/self/publish' || path === '/v1/sandbox/self/propose' || path === '/v1/sandbox/self/recall')) {
         hits.push({ method: 'POST', path, authorization: String(req.headers.authorization ?? ''), body: JSON.parse(raw || '{}') as Record<string, unknown> });
         if (verbMode === 'refuse') return json(502, { error: 'publish: cap-mint: HTTP 403 service_not_in_scope channel-pub:family-chat is not granted to this delegate' });
+        if (path.endsWith('/recall')) return json(200, { outcome: 'recalled', namespace: 'notes', matches: [], summary: 'No stored knowledge.' });
         return json(200, path.endsWith('/publish') ? fixture.publish_receipt : fixture.propose_receipt);
       }
       json(404, { error: `unexpected ${req.method} ${path}` });
@@ -92,12 +93,16 @@ const publishSpec = () => parseAdvertised(fixture.advertised.response)[0];
 const proposeSpec = () => parseAdvertised(fixture.advertised.response)[1];
 
 describe('the advertisement (pure)', () => {
-  it('parses the shared fixture into the two verbs with their grant families and parameters', () => {
+  it('parses the shared fixture into the actions with their grant families and parameters', () => {
     const actions = parseAdvertised(fixture.advertised.response);
-    expect(actions.map((a) => a.name)).toEqual([PUBLISH_ACTION, PROPOSE_ACTION]);
+    expect(actions.map((a) => a.name)).toEqual([PUBLISH_ACTION, PROPOSE_ACTION, 'recall_knowledge']);
     expect(actions[0].route).toBe('/v1/sandbox/self/publish');
     expect(actions[0].requires_grant_prefix).toBe('channel-pub:');
     expect(actions[1].requires_grant_prefix).toBe('proposal:');
+    expect(actions[2].requires_grant_prefix).toBe('knowledge:');
+    expect(actions[2].route).toBe('/v1/sandbox/self/recall');
+    expect(toolParameters(actions[2]).namespace.required).toBe(true);
+    expect(toolParameters(actions[2]).query.required).toBe(true);
     const params = toolParameters(actions[0]);
     expect(params.slot).toEqual({ type: 'string', required: true, description: expect.stringContaining('kitchen_screen, family_chat, opchat') });
     expect(params.kind.enum).toEqual(['text', 'image', 'audio-clip', 'frame', 'command', 'doc']);
@@ -140,6 +145,15 @@ describe('the advertisement (pure)', () => {
 });
 
 describe(`${PUBLISH_ACTION} + ${PROPOSE_ACTION} — through the real dsh tool runtime`, () => {
+  it('registers knowledge retrieval from the shared advertisement without a second plugin', async () => {
+    granted = ['knowledge:notes'];
+    const context = await boot();
+    const result = await context.tools.execute(call('recall_knowledge', { namespace: 'notes', query: 'Recall dinner' }));
+    expect(result.isError).toBe(false);
+    expect(result.value).toMatchObject({ outcome: 'recalled', namespace: 'notes' });
+    expect(hits).toEqual([{method: 'POST', path: '/v1/sandbox/self/recall', authorization: 'Bearer sbt1_test', body: {namespace: 'notes', query: 'Recall dinner'}}]);
+  });
+
   it('registers the advertised verbs and runs a publish as ONE bearer-gated POST with the contract body', async () => {
     granted = ['channel-pub:kitchen-display', 'proposal:app-chef'];
     const c = await boot();

@@ -3,6 +3,7 @@
 //! ```text
 //! cargo run -p agentkeys-backend-client --bin dump-protocol-fixtures
 //! cargo run -p agentkeys-backend-client --bin dump-protocol-fixtures -- --check
+//! cargo run -p agentkeys-backend-client --bin dump-protocol-fixtures -- --actions
 //! ```
 //!
 //! Default: (re)writes `e2e/fixtures/backend-protocol/<name>.json` from the
@@ -37,6 +38,13 @@ fn pretty(body: &serde_json::Value) -> String {
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let check = args.iter().any(|a| a == "--check");
+    if args.iter().any(|argument| argument == "--actions") {
+        if args.iter().any(|argument| argument == "--out") {
+            eprintln!("--actions cannot be combined with --out");
+            return ExitCode::FAILURE;
+        }
+        return actions_fixture(check);
+    }
     let out_dir = args
         .iter()
         .position(|a| a == "--out")
@@ -83,4 +91,35 @@ fn main() -> ExitCode {
     } else {
         ExitCode::SUCCESS
     }
+}
+
+fn actions_fixture(check: bool) -> ExitCode {
+    use agentkeys_backend_client::protocol::sandbox_actions::{
+        advertised_actions, SandboxActionsResponse,
+    };
+    let path = default_out_dir()
+        .parent()
+        .expect("fixture directory")
+        .join("bridge-protocol/actions_contract.json");
+    let source = std::fs::read_to_string(&path).expect("read actions fixture");
+    let mut fixture: serde_json::Value =
+        serde_json::from_str(&source).expect("parse actions fixture");
+    let slots: Vec<String> =
+        serde_json::from_value(fixture["advertised"]["pub_slots"].clone()).expect("fixture slots");
+    let namespace = fixture["advertised"]["own_namespace"].as_str();
+    fixture["advertised"]["response"] = serde_json::to_value(SandboxActionsResponse {
+        actions: advertised_actions(&slots, namespace),
+    })
+    .expect("actions serialize");
+    let wanted = pretty(&fixture);
+    if check {
+        if wanted != source {
+            eprintln!("actions fixture drift; regenerate with --actions");
+            return ExitCode::FAILURE;
+        }
+    } else if let Err(error) = std::fs::write(&path, wanted) {
+        eprintln!("cannot write actions fixture: {error}");
+        return ExitCode::FAILURE;
+    }
+    ExitCode::SUCCESS
 }

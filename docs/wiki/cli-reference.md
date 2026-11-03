@@ -9,7 +9,7 @@ Agent Terrier local development tools
 | Argument | Required | Choices | Description |
 | --- | --- | --- | --- |
 | -h, --help | no |  | show this help message and exit |
-| subcommand | yes | manage, stack, test, models, contracts, chain, services, channel, cred, agent, browser, owner, device | Select a command below. |
+| subcommand | yes | manage, stack, test, models, contracts, chain, services, channel, memory, cred, agent, browser, owner, device | Select a command below. |
 
 ## terrier manage
 
@@ -107,6 +107,18 @@ Agent Terrier local development tools
 | --text-stdin | no |  | Read exact UTF-8 text for publish |
 | --after | no |  | Poll after this opaque cursor |
 | --wait-seconds | no | 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25 | Bounded long poll; 0 returns immediately |
+
+## terrier memory
+
+| Argument | Required | Choices | Description |
+| --- | --- | --- | --- |
+| -h, --help | no |  | show this help message and exit |
+| action | yes | plant, read |  |
+| namespace | yes |  |  |
+| --name | yes |  |  |
+| --key | no |  | Stable entry key; required for plant |
+| --title | no |  |  |
+| --body-stdin | no |  | Read exact UTF-8 knowledge body for plant |
 
 ## terrier cred
 

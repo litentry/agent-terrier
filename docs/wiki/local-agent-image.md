@@ -1,4 +1,4 @@
-The public runtime composition and image are available for component development. They reuse the shared agent loop, authenticated bridge, grant guards and session persistence. The image starts and supervises the daemon and agent from explicit configuration. The Docker lifecycle connects it to selected local services. It is not yet the complete localhost deployment: authorized persistent application memory, browser acceptance and an independent clean install remain open in [epic #1](https://github.com/litentry/agent-terrier/issues/1).
+The public runtime composition and image are available for component development. They reuse the shared agent loop, authenticated bridge, grant guards and session persistence. The image starts and supervises the daemon and agent from explicit configuration. The Docker lifecycle connects it to selected local services. It is not yet the complete localhost deployment: browser acceptance and an independent clean install remain open; [persistent knowledge retrieval](./local-knowledge.md) has separate offline application evidence in [epic #1](https://github.com/litentry/agent-terrier/issues/1).
 
 ## Build and test
 

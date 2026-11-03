@@ -61,6 +61,29 @@ class LocalCredentialQualification(LocalOwnerFixture):
                         self.assertNotIn("secret", receipt)
                     return receipt
 
+                def memory_command(action, denial=None, name="alice", body=None):
+                    arguments = [sys.executable, str(REPOSITORY / "terrier"), "memory", action, "notes", "--name", name]
+                    if action == "plant":
+                        arguments.extend(["--key", "dinner", "--body-stdin"])
+                    result = subprocess.run(arguments, env=environment, input=body,
+                        capture_output=True, text=True, timeout=90)
+                    self.assertNotIn(bearer, result.stdout + result.stderr)
+                    if denial:
+                        self.assertNotEqual(result.returncode, 0)
+                        self.assertIn(denial, result.stderr)
+                        self.assertFalse(result.stdout)
+                        return None
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    return json.loads(result.stdout)
+
+                memory_body = "Dinner is vegetable soup."
+                self.assertEqual(memory_command("plant", body=memory_body)["result"]["planted"], 1)
+                self.assertEqual(memory_command("plant", body=memory_body)["result"]["planted"], 0)
+                self.assertEqual(memory_command("read")["entries"][0]["body"], memory_body)
+                self.assertEqual(memory_command("read", name="bob")["entries"], [])
+                memory_command("plant", "size limit", body="x" * 8193)
+                memory_command("plant", "must not be empty", body=" ")
+
                 channel_text = "synthetic local channel\nsecond line\n"
 
                 def channel_command(action, denial=None, name="alice", text=None, after=""):
@@ -98,6 +121,8 @@ class LocalCredentialQualification(LocalOwnerFixture):
                 self.assertEqual(base64.b64decode(events["events"][0]["body"]).decode(), channel_text)
                 self.assertEqual(channel_command("poll", after=events["cursor"])["events"], [])
                 self.assertEqual(channel_command("poll", name="bob")["events"], [])
+                memory_before = snapshot("memory")
+                config_before = snapshot("config")
                 channel_before = snapshot("channel")
                 self.assertTrue(channel_before)
                 self.assertTrue(all(channel_text.encode() not in row[1] for row in channel_before))
@@ -118,8 +143,11 @@ class LocalCredentialQualification(LocalOwnerFixture):
                 for changed, denial in mutations:
                     local_state.write_json(session_path, changed)
                     command("store", denial, payload="must-not-be-stored")
+                    memory_command("plant", denial, body="must-not-be-stored")
                     channel_command("publish", denial, text="must-not-be-published")
                     self.assertEqual(snapshot("channel"), channel_before)
+                    self.assertEqual(snapshot("memory"), memory_before)
+                    self.assertEqual(snapshot("config"), config_before)
                     self.assertTrue(snapshot() == before, "denied store changed persisted data")
                 local_state.write_json(session_path, session)
                 session_path.chmod(0o644)
