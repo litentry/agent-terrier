@@ -2,6 +2,8 @@ Agent Terrier is a local development platform with on-chain authority, protected
 
 ## Start here
 
+Follow the [complete local quickstart](./quickstart.md) for preparation, startup, owner registration, a CLI model reply and browser access. The focused guides below explain each component.
+
 1. [Prepare contracts](./contract-development.md) and the [local chain](./local-chain.md).
 2. Build and start [local services](./local-services.md), or use the [lightweight terminal manager](./local-manager.md).
 3. Register and log in a [development owner](./local-owner.md).
