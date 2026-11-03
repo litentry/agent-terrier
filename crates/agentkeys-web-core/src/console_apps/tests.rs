@@ -14,6 +14,7 @@ struct Calls {
     receipt: usize,
     fleet: usize,
     submit_error: bool,
+    receipt_error: bool,
 }
 fn config(base: &str) -> ConsoleConfig {
     serde_json::from_value(json!({"chain":{"name":"fixture","display":"Fixture","chainId":1,"rpc":base,"wss":"","explorer":"","tokenSymbol":"TEST","tokenDecimals":18,"finality":"fixture","contracts":[],"daemonChain":"fixture","daemonBroker":base},"signer_url":base,"config_url":base,"memory_url":base,"credential_url":base,"audit_url":base,"channel_url":base,"classify_url":base})).unwrap()
@@ -67,7 +68,7 @@ fn stash(apps: &ConsoleApps, body: &Value, operator: &str, receipt: Option<Value
 }
 async fn fixture() -> (ConsoleApps, Arc<Mutex<Calls>>, tokio::task::JoinHandle<()>) {
     let calls = Arc::new(Mutex::new(Calls::default()));
-    let router=Router::new().route("/v1/agent/spawn/submit",post(|State(calls):State<Arc<Mutex<Calls>>>|async move{let mut calls=calls.lock().unwrap();calls.submit+=1;if calls.submit_error{(StatusCode::BAD_GATEWAY,Json(json!({"error":"fixture response lost after dispatch"})))}else{(StatusCode::OK,Json(json!({"ok":true,"pending":true,"user_op_hash":"fixture-hash"})))}})).route("/v1/accept/receipt",post(|State(calls):State<Arc<Mutex<Calls>>>|async move{calls.lock().unwrap().receipt+=1;Json(json!({"ok":true,"pending":false,"user_op_hash":"fixture-hash","tx_hash":"fixture-tx"}))})).route("/v1/console/fleet",get(|State(calls):State<Arc<Mutex<Calls>>>|async move{calls.lock().unwrap().fleet+=1;(StatusCode::SERVICE_UNAVAILABLE,Json(json!({"error":"fixture metadata unavailable after confirmation"})))})).with_state(calls.clone());
+    let router=Router::new().route("/v1/agent/spawn/submit",post(|State(calls):State<Arc<Mutex<Calls>>>|async move{let mut calls=calls.lock().unwrap();calls.submit+=1;if calls.submit_error{(StatusCode::BAD_GATEWAY,Json(json!({"error":"fixture response lost after dispatch"})))}else{(StatusCode::OK,Json(json!({"ok":true,"pending":true,"user_op_hash":"fixture-hash"})))}})).route("/v1/accept/receipt",post(|State(calls):State<Arc<Mutex<Calls>>>|async move{let mut calls=calls.lock().unwrap();calls.receipt+=1;if calls.receipt_error{(StatusCode::SERVICE_UNAVAILABLE,Json(json!({"error":"fixture recovery unavailable"})))}else{(StatusCode::OK,Json(json!({"ok":true,"pending":false,"user_op_hash":"fixture-hash","tx_hash":"fixture-tx"})))}})).route("/v1/console/fleet",get(|State(calls):State<Arc<Mutex<Calls>>>|async move{calls.lock().unwrap().fleet+=1;(StatusCode::SERVICE_UNAVAILABLE,Json(json!({"error":"fixture metadata unavailable after confirmation"})))})).with_state(calls.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
     let task = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
@@ -105,10 +106,43 @@ async fn pending_receipt_does_not_write_metadata_or_rebroadcast() {
         .is_err());
     {
         let calls = calls.lock().unwrap();
-        assert_eq!((calls.submit, calls.receipt, calls.fleet), (1, 1, 2));
+        assert_eq!((calls.submit, calls.receipt, calls.fleet), (1, 2, 2));
     }
     task.abort();
 }
+#[tokio::test]
+async fn confirmed_pending_action_refreshes_runtime_before_retrying_metadata() {
+    let (apps, calls, task) = fixture().await;
+    let device = DeviceIdentity::from_random_bytes(&[7; 32]).unwrap();
+    let session = session(&device, "operator-a");
+    let body = operation();
+    stash(
+        &apps,
+        &body,
+        session.operator_omni,
+        Some(json!({"ok":true,"tx_hash":"fixture-confirmed"})),
+    );
+    calls.lock().unwrap().receipt_error = true;
+    let error = apps
+        .submit(&session, "/v1/agent/spawn/submit", body.clone())
+        .await
+        .unwrap_err();
+    assert!(matches!(error, DataError::Http { status: 503, .. }));
+    {
+        let mut calls = calls.lock().unwrap();
+        assert_eq!((calls.submit, calls.receipt, calls.fleet), (0, 1, 0));
+        calls.receipt_error = false;
+    }
+    let error = apps
+        .submit(&session, "/v1/agent/spawn/submit", body)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("post_confirm_failed"));
+    let calls = calls.lock().unwrap();
+    assert_eq!((calls.submit, calls.receipt, calls.fleet), (0, 2, 1));
+    task.abort();
+}
+
 #[tokio::test]
 async fn failed_ceremony_is_recovered_through_receipt_without_rebroadcast() {
     let (apps, calls, task) = fixture().await;
