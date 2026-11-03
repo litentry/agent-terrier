@@ -2,7 +2,7 @@
 
 Agent Terrier is an open-source agent platform with on-chain authorization, a shared Rust core, a command-line client and a web console.
 
-The standalone local development environment is being built in [epic #1](https://github.com/litentry/agent-terrier/issues/1). Local contracts, owner login, supervised storage, Docker agent lifecycle and offline model chat with restart recall are runnable; channel/tool-authority/browser and complete release acceptance remain unfinished.
+Run the [local development quickstart](docs/wiki/quickstart.md) for contracts, owner login, scoped storage, Docker agents, local models and the website. Real-model tools, channel replies, authorized persistent knowledge and stateful restart have offline qualification. Browser checks cover CLI-approved sign-in, agent creation, chat, notes and interrupted-operation recovery using a virtual authenticator. Physical authenticator and independent release acceptance remain tracked in [epic #1](https://github.com/litentry/agent-terrier/issues/1).
 
 ## Development
 
