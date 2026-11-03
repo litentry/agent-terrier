@@ -125,13 +125,25 @@ class LocalWebsiteQualification(LocalOwnerFixture):
             self.assertEqual(chain.rpc(started["chain"]["rpc_http"], "eth_blockNumber"), before,
                 "Public challenge requests must not register an identity or write chain state")
             foreign_origin = "http://unrelated.example.test"
-            for name in ("broker", *services.WORKERS, *services.COMPUTE_WORKERS):
+            for name in ("broker", "signer", *services.WORKERS, *services.COMPUTE_WORKERS):
                 endpoint = group["services"][name]["url"]
                 for method in ("GET", "OPTIONS"):
                     positive = request(endpoint + "/healthz", method, address)
                     denied = request(endpoint + "/healthz", method, foreign_origin)
                     self.assertEqual(positive[2].get("Access-Control-Allow-Origin"), address)
                     self.assertIsNone(denied[2].get("Access-Control-Allow-Origin"))
+            signer_key = state / "services/signer/master.key"
+            original_key = signer_key.read_bytes()
+            signer_url = group["services"]["signer"]["url"]
+            for origin in (address, foreign_origin):
+                denied_status, denied_body, denied_headers = request(signer_url + "/dev/sign-message", "POST", origin,
+                    {"omni_account": owner["operator_omni"], "message_hex": "00"})
+                self.assertEqual(denied_status, 401)
+                self.assertEqual(json.loads(denied_body)["error"], "unauthorized")
+                self.assertNotIn("signature", json.loads(denied_body))
+                self.assertEqual(denied_headers.get("Access-Control-Allow-Origin"), address if origin == address else None)
+            self.assertTrue(signer_key.read_bytes() == original_key, "Browser-origin checks changed the signer key")
+            self.assertEqual(chain.rpc(started["chain"]["rpc_http"], "eth_blockNumber"), before)
             config_status, config_body, config_headers = request(broker + "/v1/console/config", origin=address)
             self.assertEqual(config_status, 200, config_body)
             configuration = json.loads(config_body)
@@ -147,6 +159,8 @@ class LocalWebsiteQualification(LocalOwnerFixture):
             restarted = self.stack(state, "restart")
             self.assertTrue(restarted["ready"])
             self.assertEqual(restarted["services"]["services"]["website"]["url"], address)
+            for name in ("signer", *services.WORKERS, *services.COMPUTE_WORKERS):
+                self.assertEqual(restarted["services"]["services"][name]["url"], group["services"][name]["url"], name)
             self.assertEqual(local_state.read_json(state / "services/manifest.json"), manifest)
             next_health = json.loads(request(address + "/api/healthz")[1])
             self.assertNotEqual(next_health["instance"], health["instance"])
@@ -155,12 +169,32 @@ class LocalWebsiteQualification(LocalOwnerFixture):
             self.assertTrue(self.stack(state, "stop")["state_preserved"])
             self.assertFalse(website.healthy(address, broker, next_health["instance"]))
             self.assertFalse(self.stack(state, "doctor", success=False)["ready"])
+            signer_port = manifest["browser_ports"]["signer"]
+            occupied_signer = ThreadingHTTPServer(("127.0.0.1", signer_port), ForeignListener)
+            occupied_thread = threading.Thread(target=occupied_signer.serve_forever, daemon=True)
+            occupied_thread.start()
+            try:
+                requests_before = list(requests)
+                refused_signer = self.stack(state, "start", success=False)
+                self.assertEqual(refused_signer["failed_stage"], "services")
+                self.assertEqual(requests, requests_before, "Occupied signer listener must not be probed")
+                self.assertFalse(refused_signer["chain"]["running"])
+                self.assertFalse(refused_signer["services"]["running"])
+                self.assertEqual(local_state.read_json(state / "services/manifest.json"), manifest)
+                self.assertEqual(request(f"http://127.0.0.1:{signer_port}/")[1], b"unrelated-listener")
+            finally:
+                occupied_signer.shutdown()
+                occupied_signer.server_close()
+                occupied_thread.join(timeout=5)
             switched = self.stack(state, "start", "--website", "--web-host", "127.0.0.1")
             selected_address = switched["services"]["services"]["website"]["url"]
             self.assertEqual(selected_address, f"http://127.0.0.1:{web_port}")
             selected_broker = switched["services"]["services"]["broker"]["url"]
             self.assertEqual(request(selected_broker + "/healthz", origin=selected_address)[2].get("Access-Control-Allow-Origin"), selected_address)
             self.assertIsNone(request(selected_broker + "/healthz", origin=address)[2].get("Access-Control-Allow-Origin"))
+            selected_signer = switched["services"]["services"]["signer"]["url"]
+            self.assertEqual(request(selected_signer + "/dev/sign-message", "OPTIONS", selected_address)[2].get("Access-Control-Allow-Origin"), selected_address)
+            self.assertIsNone(request(selected_signer + "/dev/sign-message", "OPTIONS", address)[2].get("Access-Control-Allow-Origin"))
             self.assertEqual(self.stack(state, "restart")["services"]["services"]["website"]["url"], selected_address)
             completed = True
         finally:

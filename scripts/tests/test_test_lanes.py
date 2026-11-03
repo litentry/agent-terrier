@@ -72,6 +72,10 @@ class TestLaneExecutionTests(unittest.TestCase):
         plan, status = test_lanes.run(Path("."), "qualification", ["storage"], plan=True)
         self.assertEqual(status, 0)
         self.assertIn("qualify_public_web", test_lanes.run(Path("."), "qualification", ["ui"], plan=True)[0]["selected"])
+        website_plan = test_lanes.run(Path("."), "qualification", ["website"], plan=True)[0]
+        self.assertIn("browser-approval", website_plan["selected"])
+        self.assertNotIn("qualify_local_browser", website_plan["selected"])
+        self.assertEqual(test_lanes.selection("qualification", ["website"])[0][-1], "--ignored")
         self.assertIn("worker-authority", plan["selected"])
         self.assertIn("qualify_local_broker_storage", plan["selected"])
         self.assertIn("qualify_local_channel", plan["selected"])

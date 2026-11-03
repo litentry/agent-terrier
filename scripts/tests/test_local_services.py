@@ -10,6 +10,52 @@ from terrier_local import deployment, local_state, services
 
 
 class LocalServicesTests(unittest.TestCase):
+    def test_browser_ports_are_persistent_and_invalid_state_is_not_repaired(self):
+        original = {"version":9, "initialized":True, "broker_port":12345}
+        selected = services.browser_ports(original, {"port":12346})
+        self.assertEqual(set(selected), set(services.BROWSER_SERVICES))
+        self.assertEqual(len(set(selected.values())), len(selected))
+        current = dict(original, version=services.MANIFEST_VERSION, browser_ports=selected)
+        with mock.patch.object(services.socket, "socket") as allocate:
+            self.assertEqual(services.browser_ports(current, {"port":12346}), selected)
+            for invalid in (None, {}, dict(selected, signer=True), dict(selected, signer=0),
+                            dict(selected, signer=65536), dict(selected, signer=12345),
+                            dict(selected, signer=12346), dict(selected, signer=selected["config"]),
+                            dict(selected, unknown=12347)):
+                with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                    services.browser_ports(dict(current, browser_ports=invalid), {"port":12346})
+            allocate.assert_not_called()
+
+    def test_running_legacy_ports_are_captured_before_shutdown_without_replacing_keys(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            directory = local_state.private_directory(state / "services")
+            manifest = {"version":9, "development_only":True, "profile_identity":"test-deployment",
+                        "broker_port":12345, "initialized":True, "website":{"port":12346}}
+            local_state.write_json(directory / "manifest.json", manifest)
+            local_state.write_json(state / "chain-profile.json", {})
+            current = {"running":True, "service_schema":9, "services":{
+                "broker":{"url":"http://127.0.0.1:12345"},
+                **{name:{"url":f"http://127.0.0.1:{12350 + index}"}
+                   for index, name in enumerate(services.BROWSER_SERVICES)}}}
+            with mock.patch.object(services, "status", return_value=current), \
+                    mock.patch.object(deployment, "profile_identity", return_value="test-deployment"), \
+                    mock.patch.object(services.chain, "control", return_value={"running":False}) as control:
+                self.assertFalse(services.stop(state)["running"])
+                saved = local_state.read_json(directory / "manifest.json")
+                self.assertEqual(saved.pop("browser_ports"), {name:12350 + index for index, name in enumerate(services.BROWSER_SERVICES)})
+                self.assertEqual(saved, manifest)
+                control.assert_called_once_with(state, "stop", services.SOCKET_NAME)
+                for endpoint in ("https://foreign.example:12350", "http://127.0.0.1:12350/path", "http://127.0.0.1:12345"):
+                    control.reset_mock()
+                    local_state.write_json(directory / "manifest.json", manifest)
+                    before = (directory / "manifest.json").read_bytes()
+                    current["services"]["signer"]["url"] = endpoint
+                    with self.assertRaises(ValueError):
+                        services.stop(state)
+                    self.assertEqual((directory / "manifest.json").read_bytes(), before)
+                    control.assert_not_called()
+
     def test_runtime_configuration_is_explicit_persistent_and_engine_bound(self):
         manifest = {"version":4, "initialized":True}
         self.assertIsNone(services.runtime_configuration(manifest))
