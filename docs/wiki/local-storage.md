@@ -1,4 +1,4 @@
-The local storage implementation serves credentials, configuration, memory and channel messages through independently verified capabilities. The real broker-login/credential journey and each worker's real-contract qualification have separate evidence. Client-encrypted delegated credential decryption and full application acceptance remain release work; they are not implied by storage qualification.
+The local storage implementation serves credentials, configuration, memory and channel messages through independently verified capabilities. The real broker-login/credential journey and each worker's real-contract qualification have separate evidence. Delegated decryption of owner-encrypted v3 credentials remains unavailable. The [qualification record](./qualification.md) lists separate application and browser-to-CLI acceptance; storage checks alone do not imply those results.
 
 ## Run locally
 

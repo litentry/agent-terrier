@@ -88,6 +88,8 @@ Use `--ollama` to select an installed executable. The qualifier refuses a differ
 
 ## Recorded evidence
 
+The dated results below retain their original scope and limitations. The [current qualification record](./qualification.md) adds the independent public install and browser evidence; later results do not rewrite earlier measurements.
+
 The [2026-10-31 report](../../e2e/fixtures/model-qualification/macos-arm64-2026-10-31.json) records macOS 15.7.4 on an Apple M3 Pro with 18 GiB physical RAM, Ollama 0.34.4, and both exact model digests. Its measured run used 1,633,595,894 model bytes (about 1.52 GiB), took 17.836 seconds to start the runner and 3.321 seconds for the probe. Within the probe: chat 1.491 seconds, streaming 0.411 seconds, tool round trip 0.765 seconds and embeddings 0.597 seconds. It received 29 stream events, executed addition returning 42, and retrieved the matching document from 768-dimensional embeddings.
 
 Sampled runner-process RSS peaked at 1,911,104 KiB (about 1.82 GiB). This is process RSS sampled every half second, not total unified/GPU memory or a minimum RAM requirement. Installation and model download time are excluded. These are one-machine measurements, not CI performance promises.
