@@ -2,7 +2,7 @@ use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 
 use agentkeys_core::{chain_profile::ChainProfile, protected_file};
 use agentkeys_mock_server::{
-    create_signer_router, db, dev_key_service::DevKeyService, state::AppState,
+    create_signer_router, db, dev_key_service::DevKeyService, signer_browser_cors, state::AppState,
 };
 use anyhow::{ensure, Context, Result};
 use clap::Parser;
@@ -23,6 +23,8 @@ struct Options {
     master_secret_file: String,
     #[arg(long, default_value = DEFAULT_LISTEN)]
     listen: SocketAddr,
+    #[arg(long, default_value = "")]
+    browser_origins: String,
 }
 
 #[tokio::main]
@@ -52,6 +54,7 @@ async fn main() -> Result<()> {
         "{}",
         serde_json::json!({"listen": listener.local_addr()?, "development_only": true})
     );
-    axum::serve(listener, create_signer_router(state)).await?;
+    let router = signer_browser_cors(create_signer_router(state), &options.browser_origins);
+    axum::serve(listener, router).await?;
     Ok(())
 }

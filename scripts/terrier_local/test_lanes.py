@@ -46,7 +46,7 @@ QUALIFICATIONS = {
     "chain": ("qualify_local_chain.py", "qualify_local_signing.py", "qualify_local_binding.py", "qualify_local_owner.py", "qualify_local_login.py", "qualify_local_bundler.py"),
     "services": ("qualify_local_services.py", "qualify_local_classify.py"),
     "agents": ("qualify_local_agents.py",),
-    "website": ("qualify_local_website.py", "qualify_local_browser.py"),
+    "website": ("qualify_local_website.py",),
     "ui": ("qualify_public_web.py",),
     "storage": (
         "qualify_local_storage.py", "qualify_local_credentials.py", "qualify_local_config.py",
@@ -56,7 +56,8 @@ QUALIFICATIONS = {
 }
 QUALIFICATION_RUST = {
     "security": [],
-    "contracts": [], "provisioner": [], "chain": [], "services": [], "agents": [], "website": [],
+    "contracts": [], "provisioner": [], "chain": [], "services": [], "agents": [],
+    "website": [("browser-approval", "agentkeys-cli", "--test", "local_browser_qualification", "--ignored")],
     "ui": [],
     "storage": [*RUST_COMPONENTS["storage"],
                 ("worker-authority", "agentkeys-worker-creds", "--test", "local_storage", "")],
@@ -278,6 +279,7 @@ def run(repository, lane, components, online=False, report_path=None, plan=False
             check("workspace-native", "execution", command, rust_test=True, timeout_seconds=REGRESSION_TIMEOUT_SECONDS)
     for package, binary in builds:
         check(package + "-compile", "build", ["cargo", "check", "--offline", "--locked", "-p", package, "--bin", binary])
+    qualification_environment = {name: os.environ[name] for name in ("AGENT_TERRIER_CACHE_DIR", "AGENT_TERRIER_SOLC", "AGENT_TERRIER_FORGE") if name in os.environ}
     if rust:
         if metadata is None:
             resolved, log_path = check("native-metadata", "build",
@@ -296,8 +298,8 @@ def run(repository, lane, components, online=False, report_path=None, plan=False
                     for name, _, _, _, test_filter in rust:
                         if name not in qualification_only:
                             executable, directory = executables[name]
-                            check(name, "execution", [executable, test_filter], directory, rust_test=True)
-    qualification_environment = {name: os.environ[name] for name in ("AGENT_TERRIER_CACHE_DIR", "AGENT_TERRIER_SOLC", "AGENT_TERRIER_FORGE") if name in os.environ}
+                            check(name, "execution", [executable, test_filter], directory, rust_test=True,
+                                  extra_environment=qualification_environment if lane == "qualification" else None)
     for component in dict.fromkeys(components):
         if component == "contracts":
             build_command = [sys.executable, "terrier", "contracts", "build"]

@@ -34,7 +34,9 @@ SIGNER_BINARY = "agentkeys-local-signer"
 RELAY_BINARY = "agentkeys-gate"
 BUNDLER_BINARY = "agentkeys-bundler"
 BINARIES = (BROKER_BINARY, STORE_BINARY, SIGNER_BINARY, RELAY_BINARY, BUNDLER_BINARY, *WORKERS.values(), *COMPUTE_WORKERS.values())
-MANIFEST_VERSION = 9
+BROWSER_PORTS_VERSION = 10
+MANIFEST_VERSION = BROWSER_PORTS_VERSION
+BROWSER_SERVICES = ("signer", *WORKERS, *COMPUTE_WORKERS)
 
 
 def binary_directory(repository, configured=None):
@@ -50,6 +52,25 @@ def status(state):
 
 
 def stop(state):
+    current = status(state)
+    if current.get("running") and current.get("service_schema", MANIFEST_VERSION) < BROWSER_PORTS_VERSION:
+        manifest_path = state / "services/manifest.json"
+        manifest = local_state.read_json(manifest_path)
+        profile = local_state.read_json(state / "chain-profile.json")
+        validate_manifest(manifest, deployment.profile_identity(profile))
+        endpoints = current.get("services", {})
+        if endpoints.get("broker", {}).get("url") != f'http://127.0.0.1:{manifest["broker_port"]}':
+            raise ValueError("Running service endpoints do not match the saved deployment")
+        ports = {}
+        for name in BROWSER_SERVICES:
+            endpoint = endpoints.get(name, {}).get("url", "")
+            port = endpoint.removeprefix("http://127.0.0.1:")
+            if not endpoint.startswith("http://127.0.0.1:") or not port.isascii() or not port.isdigit():
+                raise ValueError("Running browser service endpoint is not a loopback port")
+            ports[name] = int(port)
+        manifest["browser_ports"] = ports
+        browser_ports(manifest, manifest.get("website"))
+        local_state.write_json(manifest_path, manifest)
     return chain.control(state, "stop", SOCKET_NAME)
 
 
@@ -60,12 +81,39 @@ def available_port():
 
 
 def validate_manifest(manifest, fingerprint):
-    if (not isinstance(manifest, dict) or manifest.get("version") not in (1, 2, 3, 4, 5, 6, 7, 8, MANIFEST_VERSION) or manifest.get("development_only") is not True
+    if (not isinstance(manifest, dict) or manifest.get("version") not in (1, 2, 3, 4, 5, 6, 7, 8, 9, MANIFEST_VERSION) or manifest.get("development_only") is not True
             or manifest.get("profile_identity") != fingerprint
             or type(manifest.get("initialized")) is not bool
             or type(manifest.get("broker_port")) is not int
             or not 1 <= manifest["broker_port"] <= 65535):
         raise ValueError("Service state belongs to another deployment or has an invalid manifest")
+
+
+def browser_ports(manifest, web_configuration):
+    previous = manifest.get("browser_ports")
+    excluded = {manifest["broker_port"]}
+    if web_configuration is not None:
+        excluded.add(web_configuration["port"])
+    if previous is not None:
+        if (not isinstance(previous, dict) or set(previous) != set(BROWSER_SERVICES)
+                or any(type(port) is not int or not 1 <= port <= 65535 for port in previous.values())
+                or len(set(previous.values())) != len(previous)
+                or excluded.intersection(previous.values())):
+            raise ValueError("Saved browser service ports are invalid or overlap")
+        return previous
+    if manifest.get("version", 0) >= BROWSER_PORTS_VERSION and manifest.get("initialized"):
+        raise ValueError("Existing browser service ports are missing; restore the service manifest")
+    selected = {}
+    with ExitStack() as reservations:
+        for name in BROWSER_SERVICES:
+            while True:
+                listener = reservations.enter_context(socket.socket())
+                listener.bind(("127.0.0.1", 0))
+                port = listener.getsockname()[1]
+                if port not in excluded:
+                    selected[name] = port
+                    break
+    return selected
 
 
 def prepare(repository, state, binaries, port, runtime_image=None, docker_socket=None, model_directory=None, model_binary=None, enable_website=None, web_port=None, runtime_disk_policy=None, web_host=None):
@@ -140,6 +188,7 @@ def prepare(repository, state, binaries, port, runtime_image=None, docker_socket
     manifest["runtime"] = runtime
     manifest["model_runner"] = model_runner
     manifest["website"] = web_configuration
+    manifest["browser_ports"] = browser_ports(manifest, web_configuration)
     manifest["version"] = MANIFEST_VERSION
     manifest["initialized"] = True
     local_state.write_json(manifest_path, manifest)
@@ -409,7 +458,7 @@ def serve(repository, state, configured):
             for name in ("broker", "signer", *WORKERS, *COMPUTE_WORKERS):
                 listener = reservations.enter_context(socket.socket())
                 listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                listener.bind(("127.0.0.1", manifest["broker_port"] if name == "broker" else 0))
+                listener.bind(("127.0.0.1", manifest["broker_port"] if name == "broker" else manifest["browser_ports"][name]))
                 listener.listen(1)
                 reserved_listeners[name] = listener
             endpoints = {name:f"http://127.0.0.1:{listener.getsockname()[1]}" for name, listener in reserved_listeners.items()}
@@ -453,7 +502,8 @@ def serve(repository, state, configured):
                 raise ValueError("Broker listener differs from the persisted session issuer")
             components["signer"] = launch_reserved("signer", binaries / SIGNER_BINARY,
                 ["--development", "--profile", profile_path, "--broker-public-key", public_key,
-                 "--master-secret-file", directory / "signer/master.key"],
+                 "--master-secret-file", directory / "signer/master.key",
+                 "--browser-origins", browser_origin],
                 contracts.tool_environment())
             for data_class, worker_binary in WORKERS.items():
                 worker_directory = directory / data_class
