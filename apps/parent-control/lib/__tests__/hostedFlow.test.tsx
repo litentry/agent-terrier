@@ -6,13 +6,13 @@ import { App } from '../../app/_components/App';
 import { CoreBackend } from '../client/core';
 import { resetActiveStackForTests } from '../identityStore';
 
-const mocks = vi.hoisted(() => ({ emailRequest: vi.fn(), finishEmailLogin: vi.fn(), sessionInfo: vi.fn(), createIdentity: vi.fn(), signerStatus: vi.fn(), request: vi.fn() }));
+const mocks = vi.hoisted(() => ({ localEnrollment: vi.fn(), emailRequest: vi.fn(), finishEmailLogin: vi.fn(), sessionInfo: vi.fn(), createIdentity: vi.fn(), signerStatus: vi.fn(), request: vi.fn() }));
 vi.mock('../hostedIdentity', () => ({ listHostedIdentities: () => [], loadHostedIdentity: () => null, createHostedIdentity: mocks.createIdentity, signHostedEnrollment: vi.fn() }));
 vi.mock('../client/wasm-module', () => ({ loadWasmModule: async () => ({ WebCore: class {
   emailRequest = mocks.emailRequest;
   finishEmailLogin = mocks.finishEmailLogin;
   sessionInfo = mocks.sessionInfo;
-}, HostedSignerClient: class { status = mocks.signerStatus; free() {} }, ConsoleClient: class { request = mocks.request; free() {} }, consoleConfiguration: async () => ({ chain: { name: 'test', display: 'Test', chainId: 1, rpc: '', wss: '', explorer: '', tokenSymbol: 'T', tokenDecimals: 18, finality: 'latest', contracts: [], daemonChain: 'test', daemonBroker: 'https://broker.example.test' } }) }) }));
+}, HostedSignerClient: class { localEnrollmentEnabled = mocks.localEnrollment; status = mocks.signerStatus; free() {} }, ConsoleClient: class { request = mocks.request; free() {} }, consoleConfiguration: async () => ({ chain: { name: 'test', display: 'Test', chainId: 1, rpc: '', wss: '', explorer: '', tokenSymbol: 'T', tokenDecimals: 18, finality: 'latest', contracts: [], daemonChain: 'test', daemonBroker: 'https://broker.example.test' } }) }) }));
 let client: CoreBackend;
 vi.mock('../ClientProvider', () => ({
   useClient: () => client,
@@ -57,6 +57,7 @@ describe('hosted parent-control flow', () => {
     localStorage.clear();
     resetActiveStackForTests();
     client = new CoreBackend('https://broker.example.test');
+    mocks.localEnrollment.mockResolvedValue(false);
     mocks.emailRequest.mockResolvedValue({ request_id: 'approved-request', expires_in_seconds: 300 });
     mocks.finishEmailLogin.mockResolvedValue(null);
     mocks.sessionInfo.mockResolvedValue(info);
@@ -123,6 +124,26 @@ describe('hosted parent-control flow', () => {
     await mount();
     expect(container.querySelector('#ak-email')).not.toBeNull();
     expect(container.querySelector('nav')).toBeNull();
+  });
+  it('offers local CLI approval without an email form when the broker enables it', async () => {
+    mocks.localEnrollment.mockResolvedValue(true);
+    await mount();
+    expect(container.querySelector('#local-owner-id')).not.toBeNull();
+    expect(container.querySelector('#ak-email')).toBeNull();
+    expect(container.querySelector('nav')).toBeNull();
+    expect(mocks.emailRequest).not.toHaveBeenCalled();
+  });
+  it('fails closed on configuration errors and retries without falling back to email', async () => {
+    mocks.localEnrollment.mockRejectedValue(new Error('Sign-in configuration unavailable.'));
+    await mount();
+    expect(container.textContent).toContain('Sign-in configuration unavailable');
+    expect(container.querySelector('#ak-email')).toBeNull();
+    expect(container.querySelector('#local-owner-id')).toBeNull();
+    expect(container.querySelector('nav')).toBeNull();
+    mocks.localEnrollment.mockResolvedValue(true);
+    await click('Retry sign-in check');
+    expect(container.querySelector('#local-owner-id')).not.toBeNull();
+    expect(mocks.emailRequest).not.toHaveBeenCalled();
   });
   it('keeps a denied address at login without demo verification', async () => {
     mocks.emailRequest.mockRejectedValue(new Error('403 not approved'));

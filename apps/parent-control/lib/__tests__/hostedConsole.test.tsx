@@ -19,12 +19,12 @@ describe('hosted console admission', () => {
     selectedClient = new CoreBackend('https://broker.example.test');
   });
 
-  it('offers email sign-in without exposing demo registration', () => {
+  it('waits for broker sign-in configuration without exposing a default login form', () => {
     expect(renderToStaticMarkup(<App />)).toContain('Restoring session…');
     const markup = renderToStaticMarkup(<OnboardingScreen onComplete={() => {}} />);
-    expect(markup).toContain('Welcome back.');
-    expect(markup).toContain('Access is limited to approved email addresses');
-    expect(markup).toContain('id="ak-email"');
+    expect(markup).toContain('Checking sign-in configuration');
+    expect(markup).not.toContain('id="ak-email"');
+    expect(markup).not.toContain('id="local-owner-id"');
     expect(markup).not.toContain('Set up your master identity.');
     expect(markup).not.toContain('Email verified');
   });

@@ -150,6 +150,22 @@ export class CoreBackend extends MappedBackend {
       stacks: [{ name: info.data.display, chain: info.data.name, brokerUrl: this.brokerUrl, active: true, healthy: (await this.status()).kind === 'connected' }] } } : info;
   }
 
+  async localBrowserEnrollmentEnabled(): Promise<boolean> {
+    const signer = new (await loadWasmModule()).HostedSignerClient(this.brokerUrl);
+    try { return await signer.localEnrollmentEnabled(); } finally { signer.free(); }
+  }
+
+  async localBrowserAccount(omni: string): Promise<string> {
+    const signer = new (await loadWasmModule()).HostedSignerClient(this.brokerUrl);
+    try { return (await signer.passkeyStart(omni)).account; } finally { signer.free(); }
+  }
+
+  async localBrowserStart(omni: string, enrollment: HostedSignerStartRequest): Promise<HostedSignerChallenge> {
+    const request: import('../generated/LocalBrowserStartRequest').LocalBrowserStartRequest = { operator_omni: omni, enrollment };
+    const signer = new (await loadWasmModule()).HostedSignerClient(this.brokerUrl);
+    try { return await signer.localStart(request); } finally { signer.free(); }
+  }
+
   async hostedSignerStart(request: HostedSignerStartRequest): Promise<HostedSignerChallenge> {
     if (!this.masterSession) throw new Error('Sign in with your approved email first.');
     const wasm = await loadWasmModule();
@@ -185,9 +201,9 @@ export class CoreBackend extends MappedBackend {
   async signInWithPasskey(omni?: string): Promise<HostedBrowserIdentity> {
     const identities = listHostedIdentities(this.brokerUrl);
     const selectedOmni = omni ?? this.browserIdentity?.omni;
-    if (!selectedOmni && identities.length > 1) throw new Error('Sign in by email to select your account.');
+    if (!selectedOmni && identities.length > 1) throw new Error('Select your owner account before signing in.');
     const credential = selectedOmni ? loadHostedIdentity(this.brokerUrl, selectedOmni) : identities[0];
-    if (!credential) throw new Error('Sign in by email to enable this browser first.');
+    if (!credential) throw new Error('Set up browser access for this owner before signing in.');
     this.clearHostedSession();
     const generation = this.loginGeneration;
     const wasm = await loadWasmModule();

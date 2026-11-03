@@ -7,8 +7,8 @@ import type { HostedSignerChallenge } from '@/lib/generated/HostedSignerChalleng
 import type { HostedSignerStartRequest } from '@/lib/generated/HostedSignerStartRequest';
 import type { HostedSignerStatusRequest } from '@/lib/generated/HostedSignerStatusRequest';
 import type { HostedSignerStatus } from '@/lib/generated/HostedSignerStatus';
-import { createHostedIdentity, signHostedEnrollment, type HostedBrowserIdentity } from '@/lib/hostedIdentity';
-import { getAssertionOverHash } from '@/lib/webauthn';
+import { createHostedIdentity, type HostedBrowserIdentity } from '@/lib/hostedIdentity';
+import { buildBrowserApproval } from '@/lib/browserEnrollment';
 
 export interface HostedBrowserEnrollmentProps {
   brokerUrl: string;
@@ -34,11 +34,7 @@ export function HostedBrowserEnrollment({ brokerUrl, omni, start, publish, statu
       setIdentity(currentIdentity);
       const current = await status({ credential_id: currentIdentity.credentialId, device_key_hash: currentIdentity.deviceKeyHash });
       if (current.active && current.device_active) { await onReady(currentIdentity); return; }
-      const enrollment = await start({ credential_id: currentIdentity.credentialId, public_key_x: currentIdentity.publicKeyX, public_key_y: currentIdentity.publicKeyY,
-        device_key_hash: currentIdentity.deviceKeyHash, origin: location.origin, rp_id: location.hostname });
-      const proof = await getAssertionOverHash(enrollment.challenge, [currentIdentity.credentialId]);
-      const device_proof = await signHostedEnrollment(currentIdentity, enrollment.challenge);
-      const approval: HostedSignerApproval = { enrollment, proof, device_proof };
+      const approval = await buildBrowserApproval(currentIdentity, start);
       setRequest(await publish(approval));
       setMessage('Waiting for approval in your original console. This browser will continue automatically when approval is confirmed.');
     } catch (failure) { setError(String(failure)); } finally { setBusy(false); }

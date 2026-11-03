@@ -1,8 +1,15 @@
-**Scope:** the local CLI can approve a public browser enrollment request using an existing development owner. The browser setup screen is still being integrated; command availability does not yet mean the complete browser onboarding journey is ready.
+**Scope:** the local website prepares a public browser request for approval by an existing development owner through the CLI. It needs no email account. The browser-to-CLI approval and sign-in flow has been exercised with a temporary virtual authenticator against fresh local contracts. Physical authenticator support and complete browser workflow parity remain pending.
 
 ## Approval
 
 Start the [managed website](./local-website.md) at its saved `http://localhost:<port>` origin. Register and log in a [local owner](./local-owner.md). The approval uses that owner's protected session, request key and development passkey. It does not export those files to the browser.
+
+1. Paste the `operator_omni` from owner registration into **Owner ID** on the website.
+2. Select **Create approval request** and complete the browser passkey prompts. The existing owner is checked before passkey creation. The browser/authenticator must support passkey PRF; unsupported or cancelled prompts leave access blocked.
+3. Select **Download public request**. Compare the displayed account, website and complete device fingerprint before approving it with the command below.
+4. After a successful CLI receipt, select **Approved in CLI — sign in** and authenticate with the browser's passkey. Approval alone does not create a browser session.
+
+For a returning browser, use **Sign in with existing passkey**. If a request expires, **Refresh approval request** reuses this browser identity and creates fresh public proofs. The browser saves only public credential metadata; device secrets and the authenticated session remain in memory. A failed sign-in configuration check offers retry and does not silently select email onboarding.
 
 The request uses the shared `HostedSignerApproval` schema: browser public keys, account/origin, expiry and public possession proofs. Compare the entire device fingerprint with the browser that you intend to authorize. A file by itself is not a trusted confirmation. The selected account and website origin must also match.
 
@@ -43,4 +50,6 @@ Locally, from the repository root after preparing contracts, native services and
 python3 terrier test qualification --component website
 ```
 
-The ordinary fast lane runs pure proof/payload and file-safety tests without starting a browser or chain. The real qualification is explicit and belongs in extended scheduled checks.
+A manual localhost browser check exercised actual passkey PRF, public-request download, rejection before approval, CLI approval, sign-in, logout and repeat sign-in using a temporary Chrome virtual authenticator. This is separate from the software-key CLI scenario and does not certify a physical authenticator or every console workflow.
+
+The ordinary fast lane runs pure proof/payload, file-safety and DOM component tests without starting a browser or chain. DOM tests cover public-only downloads, account preflight, changed account/origin/identity refusals before either proof is signed, cancelled prompts, refresh, and the post-approval login requirement. The real qualification is explicit and belongs in extended scheduled checks. Neither DOM mocks nor the software-key CLI fixture demonstrate a physical passkey's PRF support.
