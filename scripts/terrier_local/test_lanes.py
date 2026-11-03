@@ -1,4 +1,5 @@
 """CLI test selection and timing; qualification scenarios retain their owners."""
+from contextlib import ExitStack
 import json
 import os
 from pathlib import Path
@@ -72,15 +73,17 @@ SOURCE_COMMANDS = (
 RUST_RESULT = re.compile(r"test result: (?:ok|FAILED)\. (\d+) passed; (\d+) failed; (\d+) ignored;")
 
 
-def execute(command, directory, log_path, timeout_seconds=600, extra_environment=None):
+def execute(command, directory, log_path, timeout_seconds=600, extra_environment=None, stdout_path=None):
     started = time.monotonic()
     status = "passed"
-    with log_path.open("xb") as output:
+    with ExitStack() as resources:
+        output = resources.enter_context(log_path.open("xb"))
+        stdout = resources.enter_context(stdout_path.open("xb")) if stdout_path else output
         try:
             environment = contracts.tool_environment()
             environment.update(extra_environment or {})
             process = subprocess.Popen(command, cwd=directory, env=environment,
-                stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.STDOUT, start_new_session=True)
+                stdin=subprocess.DEVNULL, stdout=stdout, stderr=output if stdout_path else subprocess.STDOUT, start_new_session=True)
         except OSError:
             return {"status": "unavailable", "exit_code": None, "seconds": round(time.monotonic() - started, 3)}
         try:
@@ -250,7 +253,18 @@ def run(repository, lane, components, online=False, report_path=None, plan=False
 
     def check(name, phase, command, directory=repository, rust_test=False, extra_environment=None, python_test=False, contract_test=False, timeout_seconds=600):
         log_path = diagnostics / f"{len(checks):02d}-{name}.log"
-        result = execute(command, directory, log_path, timeout_seconds=timeout_seconds, extra_environment=extra_environment)
+        output_path = log_path.with_suffix(".json") if command[:2] == ["cargo", "metadata"] else None
+        arguments = {"stdout_path": output_path} if output_path else {}
+        result = execute(command, directory, log_path, timeout_seconds=timeout_seconds, extra_environment=extra_environment, **arguments)
+        if output_path:
+            result["output"] = output_path.name
+            if result["status"] == "passed":
+                try:
+                    metadata = json.loads(output_path.read_text())
+                    if not isinstance(metadata, dict) or not isinstance(metadata.get("packages"), list):
+                        raise ValueError("Invalid Cargo metadata shape")
+                except (OSError, ValueError):
+                    result["status"] = "invalid-metadata"
         if rust_test:
             rust_counts(result, log_path.read_text(errors="replace"))
         if contract_test:
@@ -260,7 +274,7 @@ def run(repository, lane, components, online=False, report_path=None, plan=False
         result.update(name=name, phase=phase, log=log_path.name)
         checks.append(result)
         print(f"{name}: {result['status']} ({result['seconds']:.3f}s)", file=sys.stderr)
-        return result, log_path
+        return result, output_path or log_path
 
     if online and (rust or builds or "managed" in components or lane == "regression"):
         setup, _ = check("dependencies", "setup", ["cargo", "fetch", "--locked"])
