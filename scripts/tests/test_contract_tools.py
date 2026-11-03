@@ -141,7 +141,8 @@ class ContractToolsTests(unittest.TestCase):
             compiler = project / "local-solc"
             compiler.write_text("synthetic compiler fixture")
             compiler.chmod(0o700)
-            with mock.patch.dict(contracts.os.environ, {"AGENT_TERRIER_SOLC": str(compiler)}):
+            with mock.patch.dict(contracts.os.environ, {"AGENT_TERRIER_SOLC": str(compiler)}), \
+                    mock.patch.object(contracts, "foundry_binary", return_value="fixture-forge"):
                 with mock.patch.object(contracts.subprocess, "run") as execute:
                     execute.return_value.returncode = 0
                     execute.return_value.stdout = "solc compiler\nVersion: 0.8.20+synthetic\n"

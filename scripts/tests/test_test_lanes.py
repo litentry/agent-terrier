@@ -43,6 +43,38 @@ class TestLaneExecutionTests(unittest.TestCase):
             missing = test_lanes.execute([str(root / "absent")], root, root / "missing.log")
             self.assertEqual(missing["status"], "unavailable")
 
+    def test_metadata_stdout_is_separate_from_tool_diagnostics(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            diagnostics = root / "tool.log"
+            output = root / "metadata.json"
+            result = test_lanes.execute([sys.executable, "-c",
+                'import json,sys; print("toolchain diagnostic", file=sys.stderr); print(json.dumps(dict(packages=[])))'],
+                root, diagnostics, stdout_path=output)
+            self.assertEqual(result["status"], "passed")
+            self.assertEqual(json.loads(output.read_text()), {"packages": []})
+            self.assertIn("toolchain diagnostic", diagnostics.read_text())
+
+    def test_malformed_metadata_is_a_recorded_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository = root / "source"
+            repository.mkdir()
+            for index, output in enumerate(["", "tool diagnostic", "[]", '{"packages":null}']):
+                def execute(command, directory, log_path, **kwargs):
+                    log_path.write_text("private diagnostic")
+                    kwargs["stdout_path"].write_text(output)
+                    return {"status":"passed", "exit_code":0, "seconds":0}
+                report_path = root / f"report-{index}.json"
+                with patch.object(test_lanes, "SOURCE_COMMANDS", (("closure", ["cargo", "metadata"]),)), \
+                        patch.object(test_lanes, "execute", side_effect=execute):
+                    report, status = test_lanes.run(repository, "source", [], report_path=report_path)
+                self.assertEqual(status, 1)
+                self.assertFalse(report["success"])
+                self.assertEqual(report["checks"][0]["status"], "invalid-metadata")
+                self.assertEqual(json.loads(report_path.read_text()), report)
+                self.assertNotIn("private diagnostic", report_path.read_text())
+
     def test_timeout_kills_the_owned_process_group(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -179,7 +211,7 @@ class TestLaneExecutionTests(unittest.TestCase):
                         [("lib", "library"), ("test", "boundary"), ("test", "unselected")])
                 else:
                     output = "test result: ok. 1 passed; 0 failed; 0 ignored;"
-                log_path.write_text(output)
+                options.get("stdout_path", log_path).write_text(output)
                 return {"status": "passed", "exit_code": 0, "seconds": 0}
             with patch.object(test_lanes, "selection", return_value=suites), \
                     patch.object(test_lanes, "execute", side_effect=execute):
