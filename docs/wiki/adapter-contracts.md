@@ -31,4 +31,4 @@ For this development release, pin the source commit, Cargo/npm lockfiles, image 
 
 Local, from the prepared public checkout, use the [CLI test lanes](./test-lanes.md): `./terrier test affected --changed-file crates/agentkeys-core/src/signer_client.rs` for changed-source coverage (supply every changed path), `terrier test focused --component signer` for signer routes/startup, and explicit services/storage/Docker/model qualification for the adapter boundary touched. Real model and browser acceptance remain distinct from deterministic test doubles.
 
-This page defines ownership and compatibility policy. It does not certify the remaining browser, application-memory, clean-install or complete release gates in [epic #1](https://github.com/litentry/agent-terrier/issues/1).
+This page defines ownership and compatibility policy. The [qualification record](./qualification.md) separately identifies tested browser, persistent-memory and public-install behavior, together with remaining limits and the release gate.

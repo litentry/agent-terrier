@@ -1,0 +1,374 @@
+{
+  "schema_version": 1,
+  "date": "2026-11-03",
+  "scope": "local development acceptance; release history gate remains open",
+  "source": {
+    "repository": "https://github.com/litentry/agent-terrier",
+    "revision": "c274e54f670750a757fc05c37a15061b5ba6d476",
+    "independent_anonymous_public_checkout": true,
+    "private_source_inputs": false,
+    "input_sha256": {
+      "Cargo.lock": "fc31964cea6b383127e8a2e88333688de0455878d4f5d1f13c4c9fa4c33cd1f3",
+      "rust-toolchain.toml": "f1f77458ec761d3d1b67d248d3420ec71dd44c4974d2484906e3d3564c638307",
+      "package-lock.json": "32e58774b8f093a9103f5048b77d3e4fe4b7032e0f9050d1bc730ea035b6a035",
+      "packages/package-lock.json": "cd7fb9c77c3ffc0175e220cc7d00305511b29039f421303766fd3983ab5124cc",
+      "crates/agentkeys-chain/foundry.lock": "3538c60bd3a4d072dbf3c9e5eb64f7e9bc9744630aa2be9b25cedf8b06d43d34",
+      "crates/agentkeys-chain/VERSION": "aba951626c8690ce493cbc8f018205bb468003f61fbf00fd3d3c71cebabc0177",
+      "presets/local-models.json": "4c80774a83e010716483fae6a8753b41dfad73b6caefbf6e0438f15ceda5837e",
+      "packages/agent-terrier-runtime/Dockerfile": "f369f545816fc7d2cfdeba9b2f7470ccd5f6c7adb13179c51d852a59496281a8",
+      "packages/agent-terrier-runtime/Dockerfile.dockerignore": "8efb9e80a1ecf3d628ba7951a1f02c1a016397b1a89e484152ab48a6458d1368"
+    }
+  },
+  "versions": {
+    "rust": "1.96.0",
+    "contracts": "0.5.1",
+    "solidity": "0.8.20",
+    "models": {
+      "base_url": "http://127.0.0.1:11434/v1",
+      "chat": {
+        "digest": "8f68893c685c3ddff2aa3fffce2aa60a30bb2da65ca488b61fff134a4d1730e7",
+        "model": "qwen3:1.7b"
+      },
+      "embedding": {
+        "digest": "0a109f422b47e3a30ba2b10eca18548e944e8a23073ee3f3e947efcf3c45e59f",
+        "dimension": 768,
+        "model": "nomic-embed-text:v1.5"
+      },
+      "runtime": {
+        "context_length": 4096,
+        "max_loaded_models": 1,
+        "name": "ollama",
+        "parallel_requests": 1,
+        "version": "0.34.4"
+      }
+    }
+  },
+  "platform": {
+    "host": "macOS",
+    "version": "15.7.4",
+    "architecture": "arm64",
+    "processor": "Apple M3 Pro",
+    "physical_memory_gib": 18,
+    "container": "linux/arm64",
+    "minimum_hardware_requirement_established": false
+  },
+  "builds": {
+    "current_candidate": [
+      {
+        "phase": "native_build",
+        "success": true,
+        "seconds": 15.407,
+        "cached_build": true
+      },
+      {
+        "phase": "browser_core",
+        "success": true,
+        "seconds": 1.338,
+        "cached_build": true
+      },
+      {
+        "phase": "console",
+        "success": true,
+        "seconds": 4.64,
+        "cached_build": true
+      },
+      {
+        "phase": "display",
+        "success": true,
+        "seconds": 1.125,
+        "cached_build": true
+      },
+      {
+        "phase": "runtime_image",
+        "success": true,
+        "seconds": 104.757,
+        "cached_build": true
+      }
+    ],
+    "initial_public_checkout": {
+      "revision": "70f420676ea863132c2f239cbebc1fe4551ad106",
+      "native_seconds": 81.37,
+      "wasm_seconds": 32.545,
+      "console_seconds": 5.988,
+      "display_seconds": 2.072,
+      "fresh_native_output": true
+    },
+    "dependency_download_cache_reused": true,
+    "models_prepared": true,
+    "docker_compiler_cache_reused": true,
+    "cold_download_seconds": null
+  },
+  "offline_application": {
+    "qualification": "supervised-local-model-application",
+    "external_network_denied": true,
+    "local_unix_control_sockets_allowed": true,
+    "recipe": {
+      "base_url": "http://127.0.0.1:11434/v1",
+      "chat": {
+        "digest": "8f68893c685c3ddff2aa3fffce2aa60a30bb2da65ca488b61fff134a4d1730e7",
+        "model": "qwen3:1.7b"
+      },
+      "embedding": {
+        "digest": "0a109f422b47e3a30ba2b10eca18548e944e8a23073ee3f3e947efcf3c45e59f",
+        "dimension": 768,
+        "model": "nomic-embed-text:v1.5"
+      },
+      "runtime": {
+        "context_length": 4096,
+        "max_loaded_models": 1,
+        "name": "ollama",
+        "parallel_requests": 1,
+        "version": "0.34.4"
+      }
+    },
+    "architecture": "arm64",
+    "operating_system": "15.7.4",
+    "application": {
+      "qualification": "local-agent-application",
+      "real_chain": true,
+      "protected_owner_login": true,
+      "signer_custody": true,
+      "managed_docker": true,
+      "image_id": "sha256:71412c2f934a337b3ec9c3476948d81a3fb9d6f58048a8e8bc960acefce2b23c",
+      "container_network": "none",
+      "real_model_chat": true,
+      "restart_recall": true,
+      "foreign_chat_denied": true,
+      "denied_chat_usage_unchanged": true,
+      "revocation": true,
+      "retained_data": true,
+      "model_runner_supervised": true,
+      "model_runner_restart_verified": true,
+      "model_publish_tool": true,
+      "ungranted_tool_denied": true,
+      "chain_grant_enables_tool": true,
+      "chain_scope_removal_denies_tool": true,
+      "denied_tool_channel_unchanged": true,
+      "owner_channel_to_agent_reply": true,
+      "channel_reply_correlated": true,
+      "knowledge_stage_before_channel_reply": "ready",
+      "channel_startup_wait_seconds": 0.151,
+      "channel_reply_seconds": 2.245,
+      "persistent_semantic_knowledge": true,
+      "knowledge_cli_uses_shared_documents": true,
+      "knowledge_cross_owner_isolation": true,
+      "knowledge_grant_and_revocation": true,
+      "knowledge_restart_retrieval": true,
+      "retrieval_preserves_canonical_data": true,
+      "not_qualified": [
+        "browser",
+        "independent clean install"
+      ]
+    },
+    "seconds": 116.942
+  },
+  "quickstart_walkthrough": {
+    "revision": "585b68e901d5732ed12acbf3ed11c669884a9275",
+    "fresh_state": true,
+    "public_source_only": true,
+    "success": true,
+    "phases": [
+      {
+        "phase": "contracts_setup",
+        "success": true,
+        "seconds": 0.918
+      },
+      {
+        "phase": "contracts_test",
+        "success": true,
+        "seconds": 21.201
+      },
+      {
+        "phase": "stack_start",
+        "success": true,
+        "seconds": 16.585
+      },
+      {
+        "phase": "doctor",
+        "success": true,
+        "seconds": 0.074
+      },
+      {
+        "phase": "model_probe",
+        "success": true,
+        "seconds": 3.088
+      },
+      {
+        "phase": "owner_register",
+        "success": true,
+        "seconds": 0.212
+      },
+      {
+        "phase": "owner_login",
+        "success": true,
+        "seconds": 0.09
+      },
+      {
+        "phase": "agent_create",
+        "success": true,
+        "seconds": 1.048
+      },
+      {
+        "phase": "model_chat",
+        "success": true,
+        "seconds": 5.535
+      },
+      {
+        "phase": "knowledge_plant",
+        "success": true,
+        "seconds": 0.292
+      },
+      {
+        "phase": "knowledge_read",
+        "success": true,
+        "seconds": 0.123
+      },
+      {
+        "phase": "stack_stop",
+        "success": true,
+        "seconds": 0.103
+      },
+      {
+        "phase": "stack_restart",
+        "success": true,
+        "seconds": 1.246
+      },
+      {
+        "phase": "owner_login_after_restart",
+        "success": true,
+        "seconds": 0.096
+      },
+      {
+        "phase": "knowledge_after_restart",
+        "success": true,
+        "seconds": 0.117
+      }
+    ],
+    "state_survived_restart": true
+  },
+  "browser": {
+    "method": "Chrome computer use with a temporary virtual authenticator",
+    "physical_authenticator_qualified": false,
+    "synthetic_data_only": true,
+    "journeys": [
+      "public request download and owner CLI approval",
+      "rejection before approval",
+      "passkey PRF sign-in, logout and repeat sign-in",
+      "agent creation and real local-model chat",
+      "browser note read through owner CLI",
+      "CLI note displayed after full stack restart",
+      "browser-created credential read through owner CLI",
+      "interrupted metadata save followed by service restart and receipt recovery"
+    ],
+    "recovery": {
+      "revision": "dd28a60bafb619d3edf08659c82ca233698b6a53",
+      "chain_unchanged": true,
+      "runtime_context_count": 1,
+      "duplicate_submission": false
+    },
+    "credential_parity": {
+      "revision": "bf1e7daf209fd3d2c2a4839770836e245be10562",
+      "same_owner_read": true,
+      "foreign_owner_denied": true,
+      "invalid_session_denied": true,
+      "denied_ciphertext_unchanged": true
+    },
+    "product_source_identical_to_candidate_since_credential_parity": true,
+    "later_changes": [
+      "test orchestration",
+      "test fixtures",
+      "test-lane documentation"
+    ],
+    "screenshots_and_raw_traces_published": false
+  },
+  "artifact_privacy": {
+    "image_id": "sha256:71412c2f934a337b3ec9c3476948d81a3fb9d6f58048a8e8bc960acefce2b23c",
+    "platform": "linux/arm64",
+    "layers": 15,
+    "regular_files_scanned": 3144,
+    "metadata_and_history_scanned": true,
+    "printable_binary_strings_scanned": true,
+    "scanner_findings": 60,
+    "reviewed_unchanged_public_base_findings": 52,
+    "reviewed_unchanged_dependency_findings": 8,
+    "first_party_findings": 0,
+    "unreviewed_findings": 0,
+    "pinned_base": {
+      "reference": "public.ecr.aws/docker/library/node@sha256:8a32c8cf649a49915a66e81e7a609223c708d0adabf288ee3f4077d765542f85",
+      "image_id": "sha256:8a32c8cf649a49915a66e81e7a609223c708d0adabf288ee3f4077d765542f85",
+      "unchanged_layer_count": 4
+    },
+    "dependency_provenance": {
+      "@deepseek-ai/dsh-atomic-write": {
+        "version": "0.1.1-rc.2",
+        "resolved": "https://registry.npmjs.org/@deepseek-ai/dsh-atomic-write/-/dsh-atomic-write-0.1.1-rc.2.tgz",
+        "integrity": "sha512-QqNSF0+Ddn6qWY480dlilwEy6FLv3JKEWx1UQgoNJrxD4y54SDRzqBQB9yDXWKOoOGyC+05TN6/Px10GNIzMWA=="
+      },
+      "@koromix/koffi-linux-arm64": {
+        "version": "3.3.6",
+        "resolved": "https://registry.npmjs.org/@koromix/koffi-linux-arm64/-/koffi-linux-arm64-3.3.6.tgz",
+        "integrity": "sha512-8LuJcdH74wTg7JcZjnRnb3z+qWPKcEDSv8HRPkWTVD56TFm0CXZXgl/WJ4maDbWem6ZoXxc87a8nQEA+wABzNA=="
+      }
+    },
+    "console_static": {
+      "files": 15,
+      "findings": 0
+    },
+    "display_output": {
+      "files": 15,
+      "findings": 0
+    },
+    "wasm_package": {
+      "files": 6,
+      "findings": 0
+    },
+    "scan_limit": "Pattern scan plus source/diff and upstream provenance review; not a proof against arbitrary encoded secrets."
+  },
+  "timings": {
+    "main_ci": {
+      "url": "https://github.com/litentry/agent-terrier/actions/runs/41579666251",
+      "revision": "c274e54f670750a757fc05c37a15061b5ba6d476",
+      "created_to_completed_seconds": 172,
+      "core_job_seconds": 169,
+      "created_to_core_job_start_seconds": 3,
+      "setup_before_core_seconds": 14,
+      "core_lane_seconds": 119.617,
+      "core_phase_seconds": {
+        "setup": 4.173,
+        "build": 102.225,
+        "execution": 13.204
+      },
+      "report_upload_seconds": 2,
+      "cache_save_seconds": 30,
+      "post_action_cleanup_seconds_at_api_resolution": 0,
+      "fixture_cleanup": "included in test execution; not independently timed"
+    },
+    "ordinary_pr_ci": {
+      "url": "https://github.com/litentry/agent-terrier/actions/runs/41579580609",
+      "revision": "1718b00791ddc1cde961ebdcc843affb736bbb16",
+      "created_to_completed_seconds": 152,
+      "created_to_core_job_start_seconds": 8,
+      "core_job_seconds": 144
+    },
+    "local_core": {
+      "revision": "1718b00791ddc1cde961ebdcc843affb736bbb16",
+      "seconds": 35.615,
+      "build_seconds": 8.941,
+      "execution_seconds": 26.662
+    },
+    "queue_measurement": "Run creation to job start is an observed scheduling delay, not a provider-internal queue metric."
+  },
+  "limitations": [
+    "Local development software custody only; no production wallet or TEE claim.",
+    "Browser acceptance uses a virtual authenticator; physical PRF-capable devices and display enrollment are unqualified.",
+    "Owner-encrypted v3 credential delegation is unavailable; owner CLI reads work.",
+    "Optional audit archive, speech backend and OpenViking engine are not qualified local features.",
+    "Browser pending operations are in memory and do not survive reload or sign-out.",
+    "Disk controls refuse low space and stop excess use; they are not hard filesystem quotas.",
+    "No general production-state or cross-version migration guarantee; same-version restart and bounded port-manifest migration were tested.",
+    "Image was built locally from public source, not published to a binary registry; OCI image identity is recorded, not a bit-for-bit rebuild guarantee.",
+    "Other hosts and model pairs require qualification; historical hosted Linux results do not qualify this macOS real-model flow on Linux.",
+    "Full cold toolchain, dependency and model download timings were not measured.",
+    "Retained hosted historical-content removal remains externally gated under issue 2."
+  ]
+}

@@ -98,7 +98,7 @@ python3 scripts/tests/qualify_local_credentials.py
 
 It covers real registration, idempotence, grant/revoke, tampered-signature rejection with unchanged scope, wrong-owner rejection, inner-operation revert, protected key permissions, missing-key and wrong-request-key refusal and persistent restart. Fast CLI tests separately reject disabled development mode, a remote RPC and a production chain profile before writing a key.
 
-The credential qualifier uses the actual worker executable, SQLite service and local contracts. It exercises owner store/fetch, delegated fetch, worker restart, malformed/missing proof and broker-signed unauthorized requests, then real scope and device revocations while owner access stays available. Its capability issuer is a test fixture; real broker session and mint integration remains open.
+The credential qualifier uses the actual worker executable, SQLite service and local contracts. It exercises owner store/fetch, delegated fetch, worker restart, malformed/missing proof and broker-signed unauthorized requests, then real scope and device revocations while owner access stays available. Its capability issuer is a test fixture; real broker session and mint integration has separate protected CLI qualification.
 
 The binding qualification uses actual contracts for device and delegate registration, slot accounting, proof/lineage rejection without chain changes, channel-only device grants, atomic unbind, existing scope revocation and restart persistence. It also verifies that public enrollment output contains no private key.
 

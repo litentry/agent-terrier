@@ -1,4 +1,4 @@
-**Scope:** the local website prepares a public browser request for approval by an existing development owner through the CLI. It needs no email account. The browser-to-CLI approval and sign-in flow has been exercised with a temporary virtual authenticator against fresh local contracts. Physical authenticator support and complete browser workflow parity remain pending.
+**Scope:** the local website prepares a public browser request for approval by an existing development owner through the CLI. It needs no email account. The browser-to-CLI approval and sign-in flow has been exercised with a temporary virtual authenticator against fresh local contracts. The [qualification record](./qualification.md) also covers agent creation, chat, persistent notes, browser-created credentials read through the owner CLI and interrupted creation recovery. Physical authenticators and unlisted workflows remain unqualified.
 
 ## Approval
 

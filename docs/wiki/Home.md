@@ -1,4 +1,4 @@
-Agent Terrier is a local development platform with on-chain authority, protected development signing, scoped storage and Docker-managed agents. These guides are authored from the public implementation. The complete standalone release remains under development; each guide distinguishes qualified behavior from remaining acceptance work.
+Agent Terrier is a local development platform with on-chain authority, protected development signing, scoped storage and Docker-managed agents. These guides are authored from the public implementation. Start with the quickstart and consult the qualification record for the tested development configuration and remaining release gate.
 
 ## Start here
 
@@ -13,6 +13,8 @@ Follow the [complete local quickstart](./quickstart.md) for preparation, startup
 Use fresh development identities only. The development software signer is not production custody or hardware protection. Dependencies, images and models must be downloaded before offline qualification; startup never silently selects a hosted service.
 
 ## Develop and verify
+
+- [Qualification and limits](./qualification.md): exact source/image identities, measured results and unsupported capabilities.
 
 - [Architecture and canonical owners](../arch.md)
 - [Adapter contracts and compatibility](./adapter-contracts.md)
@@ -29,4 +31,4 @@ Use fresh development identities only. The development software signer is not pr
 - [Licenses and exceptions](./licensing.md)
 - [Wiki source and publication](./wiki-publication.md)
 
-The source of every page lives in `docs/wiki` in the public repository. Edit those files through a reviewed pull request. Published pages link to the exact source revision; complete browser workflows, auxiliary browser services and independent clean-install acceptance remain open in [the release epic](https://github.com/litentry/agent-terrier/issues/1).
+The source of every page lives in `docs/wiki` in the public repository. Edit those files through a reviewed pull request. Published pages link to the exact source revision; the [qualification record](./qualification.md) separates completed localhost acceptance from unsupported capabilities and the remaining release gate.
