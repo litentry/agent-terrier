@@ -27,6 +27,7 @@ export function AgentTabsPanel({ actor }: { actor: Actor }) {
   const [preset, setPreset] = useState<PresetSummary | null>(null);
 
   const rt = actor.runtimeStatus;
+  const modelAccessReady = rt?.gateStatus === 'provisioned' || rt?.gateStatus === 'recovered';
   const services = actor.services ?? [];
   const subscribedChannels = useMemo(
     () =>
@@ -86,10 +87,7 @@ export function AgentTabsPanel({ actor }: { actor: Actor }) {
         </span>
       }
     >
-      {/* #543 — the spawn ceremony's runtime/metering outcome, on EVERY tab:
-          a spawn-failed delegate's chat is silent and an unmetered one bills
-          nothing, and neither should require broker logs to notice. */}
-      {rt && (rt.spawnError || rt.gateStatus !== 'provisioned') ? (
+      {rt && (rt.spawnError || rt.gateError || !modelAccessReady) ? (
         <div
           style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center', marginBottom: 10 }}
         >
@@ -113,11 +111,11 @@ export function AgentTabsPanel({ actor }: { actor: Actor }) {
             </>
           ) : (
             <>
-              <Chip kind="warn">UNMETERED</Chip>
+              <Chip kind="warn">model access needs attention</Chip>
               <span className="muted" style={{ fontSize: 12 }}>
                 gate {rt.gateStatus}
-                {rt.gateError ? ` — ${rt.gateError}` : ''}; this agent&apos;s LLM turns bypass
-                the metering gate until re-provisioned.
+                {rt.gateError ? ` — ${rt.gateError}` : ''}; model access has not been confirmed.
+                Check the local services before retrying.
               </span>
             </>
           )}
