@@ -625,8 +625,7 @@ impl ConsoleApps {
         } else {
             "/v1/scope/submit"
         };
-        let receipt = match pending.receipt.clone() {
-            Some(receipt) if !receipt_needs_refresh(&receipt) => receipt,
+        let receipt: Value = match pending.receipt.clone() {
             Some(_) => {
                 let context_docs = pending
                     .build
