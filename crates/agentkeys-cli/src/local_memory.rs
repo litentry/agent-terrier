@@ -7,14 +7,13 @@ use agentkeys_backend_client::protocol::{
     web_api::{ApiMemoryEntry, MasterMemoryPlantRequest},
     ContextKind,
 };
-use agentkeys_core::{device_crypto::DeviceKey, protected_file};
+use agentkeys_core::device_crypto::DeviceKey;
 use agentkeys_web_core::{
     console_documents::ConsoleDocuments,
     data::{DataClient, DataEndpoints, DataError, DataSession},
-    device::DeviceIdentity,
     document_helpers::{valid_history_coords, ApiMemoryEntryExt},
 };
-use anyhow::{anyhow, ensure, Result};
+use anyhow::{ensure, Result};
 use serde_json::{json, Value};
 
 use crate::{local_data, CommandContext};
@@ -54,11 +53,7 @@ pub struct MemoryOptions {
 }
 
 fn request_error(error: DataError) -> anyhow::Error {
-    match error {
-        DataError::Http { status, .. } => anyhow!("local memory request failed (HTTP {status})"),
-        DataError::Transport(_) => anyhow!("local memory service is unreachable"),
-        _ => anyhow!("local memory response is invalid or unsupported"),
-    }
+    local_data::data_error(error, "memory")
 }
 
 pub async fn execute(context: &CommandContext, options: &MemoryOptions) -> Result<Value> {
@@ -98,13 +93,7 @@ pub async fn execute(context: &CommandContext, options: &MemoryOptions) -> Resul
         &key,
         now,
     )?;
-    let encoded = protected_file::read_text(&options.device_key_file)?;
-    let device = DeviceIdentity::from_secret_hex(&encoded)?;
-    ensure!(
-        device.device_key_hash()? == key.device_key_hash()?,
-        "owner request key changed during loading"
-    );
-    drop(encoded);
+    let device = local_data::browser_device(&options.device_key_file, &key)?;
     let documents = ConsoleDocuments::new(DataClient::with_client(
         reqwest::Client::builder()
             .no_proxy()

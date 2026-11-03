@@ -40,7 +40,7 @@ export function CredentialsPage({
       <PageHead
         crumb="credentials · per-service · catalog-categorized"
         title="credentials"
-        desc="Your vaulted credentials — the same data-class abstraction as knowledge. Each is categorized by the shared catalog (stripe → payments, openrouter → ai-services); sensitive categories (payments, access-control, health, …) are flagged. An agent fetches a credential only with a granted cred:<service> scope; the secret is decrypt-on-read and never shown here."
+        desc="Your vaulted credentials — the same data-class abstraction as knowledge. Each is categorized by the shared catalog (stripe → payments, openrouter → ai-services); sensitive categories (payments, access-control, health, …) are flagged. Secrets are encrypted and never displayed here. Browser-vaulted credentials can currently be read by their owner; agent access to this format is not yet available."
       />
 
       {!connected ? (
@@ -72,8 +72,7 @@ export function CredentialsPage({
               </button>
             </div>
             <div className="muted" style={{ fontSize: 11, marginTop: 8 }}>
-              Stored encrypted (AES-256-GCM, K3 KEK) at <code>bots/&lt;you&gt;/credentials/&lt;service&gt;.enc</code> via the real
-              chain (cap-mint → STS → cred worker → S3) — categorized on store by the catalog.
+              Encrypted before storage. Your current chain permissions control access; the catalog categorizes each service.
             </div>
           </Panel>
 

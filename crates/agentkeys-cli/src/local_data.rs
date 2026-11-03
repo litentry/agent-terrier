@@ -4,6 +4,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use agentkeys_backend_client::{BackendClient, BackendError, CapMintRequest};
 use agentkeys_core::{device_crypto::DeviceKey, protected_file};
+use agentkeys_web_core::{
+    data::{DataClient, DataEndpoints, DataError, DataSession},
+    device::DeviceIdentity,
+};
 use anyhow::{anyhow, ensure, Context, Result};
 use serde_json::{json, Value};
 use zeroize::Zeroizing;
@@ -33,6 +37,8 @@ pub struct CredentialOptions {
     pub broker_url: String,
     #[arg(long)]
     pub cred_url: String,
+    #[arg(long)]
+    pub signer_url: String,
     #[arg(
         long,
         help = "Read the exact UTF-8 credential from stdin; required for store"
@@ -90,10 +96,31 @@ pub(crate) fn request_error(error: anyhow::Error, operation: &str) -> anyhow::Er
     }
 }
 
+pub(crate) fn browser_device(path: &str, key: &DeviceKey) -> Result<DeviceIdentity> {
+    let encoded = Zeroizing::new(protected_file::read_text(path)?);
+    let device = DeviceIdentity::from_secret_hex(&encoded)?;
+    ensure!(
+        device.device_key_hash()? == key.device_key_hash()?,
+        "owner request key changed during loading"
+    );
+    Ok(device)
+}
+
+pub(crate) fn data_error(error: DataError, operation: &str) -> anyhow::Error {
+    match error {
+        DataError::Http { status, .. } => {
+            anyhow!("local {operation} request failed (HTTP {status})")
+        }
+        DataError::Transport(_) => anyhow!("local {operation} service is unreachable"),
+        _ => anyhow!("local {operation} response is invalid or unsupported"),
+    }
+}
+
 pub async fn credential(context: &CommandContext, options: &CredentialOptions) -> Result<Value> {
     let development = context.development_signing()?;
     development.require_local_service(&options.broker_url)?;
     development.require_local_service(&options.cred_url)?;
+    development.require_local_service(&options.signer_url)?;
     ensure!(
         matches!(options.action, CredentialAction::Store) == options.secret_stdin,
         "only credential store requires --secret-stdin"
@@ -101,12 +128,13 @@ pub async fn credential(context: &CommandContext, options: &CredentialOptions) -
     let key = Arc::new(
         DeviceKey::load(&options.device_key_file).context("load existing owner request key")?,
     );
+    let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
     let session = load_session(
         &options.session_file,
         &options.broker_url,
         &options.operator_omni,
         &key,
-        SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs(),
+        now,
     )?;
     let client = BackendClient::with_client(
         reqwest::Client::builder()
@@ -150,10 +178,37 @@ pub async fn credential(context: &CommandContext, options: &CredentialOptions) -
             )
         }
         CredentialAction::Fetch => {
-            let secret =
-                cred_admin::cred_fetch_with(&client, request, &session.session.session_jwt)
-                    .await
-                    .map_err(|error| request_error(error, "credential"))?;
+            let device = browser_device(&options.device_key_file, &key)?;
+            let data = DataClient::with_client(
+                reqwest::Client::builder()
+                    .no_proxy()
+                    .redirect(reqwest::redirect::Policy::none())
+                    .timeout(Duration::from_secs(15))
+                    .build()?,
+                DataEndpoints {
+                    broker_url: options.broker_url.clone(),
+                    credential_url: options.cred_url.clone(),
+                    signer_url: options.signer_url.clone(),
+                    config_url: String::new(),
+                    memory_url: String::new(),
+                    audit_url: None,
+                    classify_url: None,
+                },
+            );
+            let authority = DataSession {
+                bearer: &session.session.session_jwt,
+                operator_omni: &options.operator_omni,
+                actor_omni: &options.operator_omni,
+                device: &device,
+                now_unix_seconds: now,
+            };
+            let plaintext = data
+                .credential_fetch(&authority, &options.service)
+                .await
+                .map_err(|error| data_error(error, "credential"))?
+                .ok_or_else(|| anyhow!("local credential request failed (HTTP 404)"))?;
+            let secret = String::from_utf8(plaintext)
+                .map_err(|_| anyhow!("local credential response is invalid or unsupported"))?;
             Ok(json!({"development_only":true, "service":options.service, "secret":secret}))
         }
     }
@@ -182,6 +237,7 @@ mod tests {
                 .into(),
             broker_url: "http://127.0.0.1:12345".into(),
             cred_url: "http://127.0.0.1:12346".into(),
+            signer_url: "http://127.0.0.1:12347".into(),
             secret_stdin: false,
         };
         let record = LocalOwnerSession {

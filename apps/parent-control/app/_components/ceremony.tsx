@@ -630,7 +630,7 @@ export function OnboardingScreen({
   const emailValid = /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email.trim());
 
   // #207 item 1A — the onboarding setup step: author the default taxonomy behind a
-  // visible progress ceremony (init does cap-mint → STS → config worker → S3, so
+  // visible progress ceremony (init encrypts and stores through the config worker, so
   // it takes several seconds). `checking` runs the idempotency probe, `pick` shows
   // the preset picker, `authoring` runs the progress bar.
   const [setupStage, setSetupStage] = useState<'checking' | 'pick' | 'authoring'>('checking');
@@ -688,7 +688,7 @@ export function OnboardingScreen({
     },
     {
       label: 'Encrypt + store to Config',
-      sub: 'cap-mint → STS → config worker → S3 · AES-256-GCM · master-only',
+      sub: 'Encrypted storage · accessible only to your owner account',
       action: async () => {
         const r = await client.initConfigDefault(selectedPreset);
         if (r.ok) {
