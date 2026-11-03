@@ -375,10 +375,12 @@ visit(process.argv[1]); process.stdout.write(JSON.stringify(sessions));
                 startup_started = time.monotonic()
                 while True:
                     knowledge_stage = latest_lifecycle(channel_events("opchat-local-agent"))
-                    if knowledge_stage in ("ready", "pulling", "degraded"):
+                    self.assertNotEqual(knowledge_stage, "degraded",
+                        "the default runtime must not wait for an unconfigured memory engine")
+                    if knowledge_stage == "ready":
                         break
                     self.assertLess(time.monotonic() - startup_started, CHANNEL_STARTUP_TIMEOUT_SECONDS,
-                        "agent lifecycle never reached ready or explicit degraded operation")
+                        "agent lifecycle never reached ready")
                     time.sleep(0.5)
                 channel_startup_wait_seconds = round(time.monotonic() - startup_started, 3)
                 channel_marker = "channel" + uuid.uuid4().hex[:8]

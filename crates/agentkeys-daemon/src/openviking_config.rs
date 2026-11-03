@@ -6,13 +6,13 @@ use agentkeys_memory_openviking::server_config::{
 };
 use anyhow::{Context, Result};
 
-pub fn render_at_boot() -> Result<()> {
+pub fn render_at_boot() -> Result<bool> {
     render(|key| std::env::var(key).ok())
 }
 
-fn render(lookup: impl Fn(&str) -> Option<String>) -> Result<()> {
+fn render(lookup: impl Fn(&str) -> Option<String>) -> Result<bool> {
     if !engine_configured(&lookup) {
-        return Ok(());
+        return Ok(false);
     }
     let path = std::path::PathBuf::from(config_file_path(&lookup));
     match plan_server_config(lookup, |path| Path::new(path).is_file()) {
@@ -23,17 +23,18 @@ fn render(lookup: impl Fn(&str) -> Option<String>) -> Result<()> {
                 return Err(error.context("Cannot write private memory configuration"));
             }
             tracing::info!(%summary, "openviking: server configuration rendered");
+            Ok(true)
         }
         ServerConfigPlan::Disabled { reason } => {
             clear_stale(&path)?;
             tracing::info!(%reason, "openviking: disabled");
+            Ok(false)
         }
         ServerConfigPlan::Refused { reason } => {
             clear_stale(&path)?;
             anyhow::bail!("Memory configuration refused: {reason}");
         }
     }
-    Ok(())
 }
 
 fn write_server_config(path: &Path, config: &serde_json::Value) -> Result<()> {
@@ -142,6 +143,11 @@ mod tests {
     }
 
     #[test]
+    fn an_unconfigured_engine_does_not_enable_background_work() {
+        assert!(!render(|_| None).unwrap());
+    }
+
+    #[test]
     fn invalid_or_disabled_configuration_cannot_reuse_a_stale_file() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("ov.conf");
@@ -152,11 +158,17 @@ mod tests {
                 "OPENVIKING_EMBED_PROVIDER" => Some(provider.into()),
                 _ => None,
             });
-            assert_eq!(result.is_ok(), provider == "disabled");
+            if provider == "disabled" {
+                assert!(!result.unwrap());
+            } else {
+                assert!(result.is_err());
+            }
             assert!(!path.exists());
         }
-        render(|key| (key == "OPENVIKING_CONFIG_FILE").then(|| path.to_str().unwrap().into()))
-            .unwrap();
+        assert!(render(
+            |key| (key == "OPENVIKING_CONFIG_FILE").then(|| path.to_str().unwrap().into())
+        )
+        .unwrap());
         assert!(path.is_file());
     }
 

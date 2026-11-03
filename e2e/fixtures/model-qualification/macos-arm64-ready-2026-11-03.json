@@ -1,0 +1,76 @@
+{
+  "qualification": "supervised-local-model-application",
+  "external_network_denied": true,
+  "local_unix_control_sockets_allowed": true,
+  "recipe": {
+    "base_url": "http://127.0.0.1:11434/v1",
+    "chat": {
+      "digest": "8f68893c685c3ddff2aa3fffce2aa60a30bb2da65ca488b61fff134a4d1730e7",
+      "model": "qwen3:1.7b"
+    },
+    "embedding": {
+      "digest": "0a109f422b47e3a30ba2b10eca18548e944e8a23073ee3f3e947efcf3c45e59f",
+      "dimension": 768,
+      "model": "nomic-embed-text:v1.5"
+    },
+    "runtime": {
+      "context_length": 4096,
+      "max_loaded_models": 1,
+      "name": "ollama",
+      "parallel_requests": 1,
+      "version": "0.34.4"
+    }
+  },
+  "architecture": "arm64",
+  "operating_system": "15.7.4",
+  "application": {
+    "qualification": "local-agent-application",
+    "real_chain": true,
+    "protected_owner_login": true,
+    "signer_custody": true,
+    "managed_docker": true,
+    "image_id": "sha256:7d8b335bff08e5cbdd2f0a0d0f2545f2f2d001140eb4e4cf00a72774e5582a1d",
+    "container_network": "none",
+    "real_model_chat": true,
+    "restart_recall": true,
+    "foreign_chat_denied": true,
+    "denied_chat_usage_unchanged": true,
+    "revocation": true,
+    "retained_data": true,
+    "model_runner_supervised": true,
+    "model_runner_restart_verified": true,
+    "model_publish_tool": true,
+    "ungranted_tool_denied": true,
+    "chain_grant_enables_tool": true,
+    "chain_scope_removal_denies_tool": true,
+    "denied_tool_channel_unchanged": true,
+    "owner_channel_to_agent_reply": true,
+    "channel_reply_correlated": true,
+    "knowledge_stage_before_channel_reply": "ready",
+    "channel_startup_wait_seconds": 0.144,
+    "channel_reply_seconds": 3.096,
+    "persistent_semantic_knowledge": true,
+    "knowledge_cli_uses_shared_documents": true,
+    "knowledge_cross_owner_isolation": true,
+    "knowledge_grant_and_revocation": true,
+    "knowledge_restart_retrieval": true,
+    "retrieval_preserves_canonical_data": true,
+    "not_qualified": [
+      "browser",
+      "independent clean install"
+    ]
+  },
+  "seconds": 109.125,
+  "qualification_date": "2026-11-03",
+  "hardware": "Apple M3 Pro",
+  "physical_memory_bytes": 19327352832,
+  "source_base": "385b1c55acac306470c21415f636cb984a5678eb",
+  "source_sha256": {
+    "crates/agentkeys-daemon/src/openviking_config.rs": "f46fab7ccaf01ec470a34967f42a19f182fce538230b00a804d256fa78efe745",
+    "crates/agentkeys-daemon/src/main.rs": "1d6e59ae8eedd12eb72af7d97ff4f51c00c940b8d875d16a1e6eba7004b2f584",
+    "crates/agentkeys-daemon/src/chat_loop.rs": "c429a5e07dc379737b46f1e120f5653e3270e8e77c03f1cc1c7d3f814c4adcd2",
+    "crates/agentkeys-daemon/src/checkpoint.rs": "08d7b6191ae82565cca5b6ce05f94c5eb23e54aece43abd3663816db34141936",
+    "scripts/tests/qualify_local_agents.py": "48f1d12a2e099217e88f62f55e8ea0204681d1f532965d59909ec58b4099e80d",
+    "packages/agent-terrier-runtime/Dockerfile": "f369f545816fc7d2cfdeba9b2f7470ccd5f6c7adb13179c51d852a59496281a8"
+  }
+}
