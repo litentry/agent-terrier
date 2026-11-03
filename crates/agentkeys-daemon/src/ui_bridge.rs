@@ -519,6 +519,10 @@ pub fn build_router(state: SharedUiBridgeState, allowed_origin: &str) -> Router 
             agentkeys_backend_client::protocol::sandbox_actions::SANDBOX_PROPOSE_ROUTE,
             post(sandbox_self_propose),
         )
+        .route(
+            agentkeys_protocol::sandbox_actions::SANDBOX_RECALL_ROUTE,
+            post(sandbox_self_recall),
+        )
         // #717 — the live rebind: the broker pushes new bound channels here.
         .route("/v1/sandbox/self/bindings", post(sandbox_self_bindings))
         .route("/v1/k11/enroll/begin", post(enroll_begin))
@@ -2418,6 +2422,7 @@ fn ct_bearer_eq(a: &str, b: &str) -> bool {
     a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
+/// Channel and configured memory names are hash candidates, never authority.
 /// The channel grants a SANDBOX can name without any registry: its own opchat
 /// feed (`AGENTKEYS_CHAT_CHANNEL_ID`) and every bound slot's channel
 /// (`AGENTKEYS_BOUND_CHANNELS`), as `keccak(channel-pub:<id>)` /
@@ -2426,9 +2431,7 @@ fn ct_bearer_eq(a: &str, b: &str) -> bool {
 /// grant held", and a view that left every channel hash unresolved denied the
 /// card to a chef holding five channel grants on chain (measured live). A name
 /// is recovered only when the chain scope actually holds that hash.
-fn sandbox_channel_service_candidates(
-    lookup: impl Fn(&str) -> Option<String>,
-) -> HashMap<String, String> {
+fn sandbox_service_candidates(lookup: impl Fn(&str) -> Option<String>) -> HashMap<String, String> {
     use agentkeys_backend_client::protocol::{
         sandbox_env, service_channel_pub, service_channel_sub,
     };
@@ -2439,15 +2442,32 @@ fn sandbox_channel_service_candidates(
     for bound in crate::app_runtime::AppRuntimeConfig::from_lookup(&lookup).bound_channels {
         ids.push(bound.channel_id);
     }
+    let mut names = ids
+        .into_iter()
+        .flat_map(|id| [service_channel_pub(&id), service_channel_sub(&id)])
+        .collect::<Vec<_>>();
+    let mut namespaces = lookup(sandbox_env::MEMORY_NAMESPACES)
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|namespace| !namespace.is_empty())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    if let Some(namespace) = lookup(sandbox_env::MEMORY_NS).filter(|value| !value.trim().is_empty())
+    {
+        namespaces.push(namespace.trim().to_owned());
+    }
+    for namespace in namespaces {
+        names.push(agentkeys_protocol::service_knowledge(&namespace));
+        names.push(agentkeys_protocol::service_proposal(&namespace));
+    }
     let mut map = HashMap::new();
-    for id in ids {
-        for name in [service_channel_pub(&id), service_channel_sub(&id)] {
-            let h = format!(
-                "0x{}",
-                hex::encode(agentkeys_core::device_crypto::keccak256(name.as_bytes()))
-            );
-            map.entry(h).or_insert(name);
-        }
+    for name in names {
+        let h = format!(
+            "0x{}",
+            hex::encode(agentkeys_core::device_crypto::keccak256(name.as_bytes()))
+        );
+        map.entry(h).or_insert(name);
     }
     map
 }
@@ -2455,7 +2475,7 @@ fn sandbox_channel_service_candidates(
 /// Pure name assembly for the self-grant view: memory/inbox names from the
 /// classified scope map, capability names (`tool:<class>`) recovered via the
 /// enumerable candidates, the sandbox's own channel grants via
-/// `extra_candidates` (see [`sandbox_channel_service_candidates`]), everything
+/// `extra_candidates` (see [`sandbox_service_candidates`]), everything
 /// else left as raw unresolved hashes (`cred:<x>` etc. — the delegate does not
 /// need their names to guard tools).
 fn assemble_self_grant_names(
@@ -2995,6 +3015,52 @@ async fn sandbox_self_propose(
     }
 }
 
+async fn sandbox_self_recall(
+    headers: HeaderMap,
+    Json(request): Json<agentkeys_protocol::sandbox_actions::SandboxRecallRequest>,
+) -> impl IntoResponse {
+    if let Err(response) = sandbox_self_gate(&headers) {
+        return response;
+    }
+    if let Err(error) = crate::knowledge_recall::validate_request(&request) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error":error})),
+        );
+    }
+    let backend = match crate::self_backend::acquire().await {
+        Ok(backend) => backend,
+        Err(_) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error":"Delegate authority is unavailable"})),
+            )
+        }
+    };
+    let configuration =
+        match crate::knowledge_recall::RecallConfig::from_lookup(&backend.cfg.broker_url, |name| {
+            std::env::var(name).ok()
+        }) {
+            Ok(configuration) => configuration,
+            Err(error) => {
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(serde_json::json!({"error":error})),
+                )
+            }
+        };
+    match crate::knowledge_recall::recall(&backend, &request, &configuration).await {
+        Ok(receipt) => (
+            StatusCode::OK,
+            Json(serde_json::to_value(receipt).expect("recall receipt")),
+        ),
+        Err(error) => (
+            error.status(),
+            Json(serde_json::json!({"error":error.to_string()})),
+        ),
+    }
+}
+
 async fn sandbox_self_grants(
     State(state): State<SharedUiBridgeState>,
     headers: HeaderMap,
@@ -3040,9 +3106,9 @@ async fn sandbox_self_grants(
     .await
     {
         Ok((scope, unknown_ids)) => {
-            let channel_candidates = sandbox_channel_service_candidates(|k| std::env::var(k).ok());
+            let service_candidates = sandbox_service_candidates(|k| std::env::var(k).ok());
             let (services, unresolved) =
-                assemble_self_grant_names(&scope, &unknown_ids, &channel_candidates);
+                assemble_self_grant_names(&scope, &unknown_ids, &service_candidates);
             (
                 StatusCode::OK,
                 Json(serde_json::json!({
@@ -12323,6 +12389,37 @@ mod tests {
     }
 
     #[test]
+    fn self_grant_view_names_custom_memory_only_when_its_hash_is_on_chain() {
+        use agentkeys_protocol::{sandbox_env, service_knowledge, service_proposal};
+        let lookup = |name: &str| match name {
+            sandbox_env::MEMORY_NS => Some("app-custom".into()),
+            sandbox_env::MEMORY_NAMESPACES => Some("app-custom,shared-custom".into()),
+            _ => None,
+        };
+        let candidates = sandbox_service_candidates(lookup);
+        let hash = |service: &str| {
+            format!(
+                "0x{}",
+                hex::encode(agentkeys_core::device_crypto::keccak256(service.as_bytes()))
+            )
+        };
+        assert_eq!(candidates.len(), 4);
+        let allowed = service_knowledge("app-custom");
+        let proposal = service_proposal("shared-custom");
+        let other = hash(&service_knowledge("other-owner"));
+        let (names, unresolved) = assemble_self_grant_names(
+            &None,
+            &[hash(&allowed), hash(&proposal), other.clone()],
+            &candidates,
+        );
+        assert_eq!(names, vec![allowed, proposal]);
+        assert_eq!(unresolved, vec![other]);
+        assert!(assemble_self_grant_names(&None, &[], &candidates)
+            .0
+            .is_empty());
+    }
+
+    #[test]
     fn self_grant_view_names_the_sandbox_own_channel_grants() {
         // 2026-09-17: chef held channel-pub:kitchen-screen on chain, yet the
         // view left every channel hash unresolved (no registry in a sandbox)
@@ -12346,7 +12443,7 @@ mod tests {
                 hex::encode(agentkeys_core::device_crypto::keccak256(s.as_bytes()))
             )
         };
-        let cands = sandbox_channel_service_candidates(env);
+        let cands = sandbox_service_candidates(env);
         assert_eq!(cands.len(), 6);
         assert_eq!(
             cands
@@ -12379,7 +12476,7 @@ mod tests {
             unresolved,
             vec![h("channel-pub:somewhere-else"), "0xdead".to_string()]
         );
-        assert!(sandbox_channel_service_candidates(|_| None).is_empty());
+        assert!(sandbox_service_candidates(|_| None).is_empty());
     }
 
     #[test]

@@ -67,6 +67,13 @@ def build_parser():
     channel_parser.add_argument("--text-stdin", action="store_true", help="Read exact UTF-8 text for publish")
     channel_parser.add_argument("--after", default="", help="Poll after this opaque cursor")
     channel_parser.add_argument("--wait-seconds", type=int, choices=range(26), default=0, help="Bounded long poll; 0 returns immediately")
+    memory_parser = commands.add_parser("memory", help="Plant and read persistent knowledge through the shared document client")
+    memory_parser.add_argument("action", choices=["plant", "read"])
+    memory_parser.add_argument("namespace")
+    memory_parser.add_argument("--name", required=True)
+    memory_parser.add_argument("--key", help="Stable entry key; required for plant")
+    memory_parser.add_argument("--title")
+    memory_parser.add_argument("--body-stdin", action="store_true", help="Read exact UTF-8 knowledge body for plant")
     credential_parser = commands.add_parser("cred", help="Use an existing local owner session for credentials")
     credential_parser.add_argument("action", choices=["store", "fetch"])
     credential_parser.add_argument("service")
@@ -170,6 +177,9 @@ def main(argv=None):
         if arguments.command == "channel":
             with local_state.exclusive_lock(state / "operation.lock"):
                 return data.channel(repository, state, arguments)
+        if arguments.command == "memory":
+            with local_state.exclusive_lock(state / "operation.lock"):
+                return data.memory(repository, state, arguments)
         if arguments.command == "cred":
             with local_state.exclusive_lock(state / "operation.lock"):
                 return data.credential(repository, state, arguments.action, arguments.name,

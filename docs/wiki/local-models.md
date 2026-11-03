@@ -50,6 +50,10 @@ Stop the preparation runner with Ctrl-C before starting the owned service group.
 
 The runner gets an isolated private home under the local state directory, the canonical recipe's loopback endpoint and resource settings, cloud features disabled, and pruning disabled. Host model/proxy/credential environment values are not inherited. The model files remain in the selected prepared directory; stop preserves them. The supervisor owns the runner's process group, including inference children, and includes model identity/availability in `doctor`. Readiness checks inventory; `models probe` separately proves inference capabilities. Without `--model-dir`, the backend-only mode remains available and does not claim model readiness. The cloud-disable setting is not an operating-system network firewall; the explicit offline qualifier below adds that boundary.
 
+## Persistent knowledge
+
+The default application retrieval path uses the existing canonical memory worker and this recipe's embedding model. [Plant and retrieve knowledge](./local-knowledge.md) through the CLI and the shared agent action. It needs no additional memory server or persistent vector index.
+
 ## Optional memory configuration
 
 When memory is explicitly configured, its embedding settings default to the same recipe used by the CLI and relay: local endpoint, model and measured vector dimension. There is no host credential discovery or alternate hosted endpoint. With no memory configuration, the daemon leaves the optional engine unconfigured.
@@ -65,7 +69,7 @@ When memory is explicitly configured, its embedding settings default to the same
 
 The renderer requests text embeddings with float encoding. These fields and keyless local compatibility endpoints are supported by the [upstream 0.4.16 configuration schema](https://github.com/volcengine/OpenViking/blob/v0.4.16/openviking_cli/utils/config/embedding_config.py). Diagnostics report whether a key is set without printing it. Invalid explicit settings never select another provider. Do not change an existing memory index's model or dimension without an explicit rebuild/migration.
 
-This config renderer is covered by deterministic tests. Actual OpenViking server startup, its distribution licensing and storage-backed agent recall remain release qualification work; the model capability evidence below does not establish those results.
+This config renderer is covered by deterministic tests. Actual OpenViking server startup, its distribution licensing and engine-specific recall remain separate integration work; the model capability evidence below does not establish those results.
 
 The daemon writes generated memory configuration as an owner-only file through the shared atomic writer. Keep one daemon per configuration path. Symlinks, hard links, permissive existing files and writable-by-others destination directories are refused. Invalid settings remove a validated owned stale config and stop startup; explicit `disabled` removes that config without starting memory. A write or cleanup failure also stops startup before the chat loop/listener. Correct the reported configuration or permissions, then restart; the daemon does not reuse an old config after reporting successful recovery.
 
@@ -108,11 +112,11 @@ This builds the explicit relay qualification without downloading dependencies, t
 
 The [relay qualification record](../../e2e/fixtures/model-qualification/macos-arm64-relay-2026-10-31.json) reports a 2.809-second relay probe on the same Mac/model recipe, including streamed chat, tool execution returning 42 and correct 768-dimensional embedding retrieval. The direct probe ran first, so this is a warm relay measurement, not a cold-start promise. Sampled model-runner RSS peaked at 1,965,792 KiB; relay memory is not included.
 
-The recall probe uses three synthetic in-memory documents. It proves inference and vector retrieval, not persistent authorized application memory. The managed application check below qualifies persisted conversation recall separately. Authorized application memory and complete release acceptance remain open; the tool/channel application run below has separate evidence.
+The recall probe uses three synthetic in-memory documents. It proves inference and vector retrieval, not persistent authorized application memory. The managed application check below qualifies persisted conversation recall separately. The persistent application path is documented in [local knowledge](./local-knowledge.md); historical probe reports are not evidence for it. Complete release acceptance remains open; the tool/channel application run below has separate evidence.
 
 ## Managed application qualification
 
-`--application` reuses the existing local-agent lifecycle qualifier with actual inference. It creates disposable contracts and protected owners, logs in, creates an agent through the broker, sends a chat through the authenticated relay, recreates the runtime and checks conversation recall. Foreign-owner chat must fail without increasing model usage. Archive, relay revocation and retained volume data are checked before owned resources are removed.
+`--application` reuses the existing local-agent lifecycle qualifier with actual inference. It creates disposable contracts and protected owners, logs in, creates an agent through the broker, sends a chat through the authenticated relay, plants persistent knowledge through the shared CLI, checks exact namespace grants and revocation, recreates the runtime and checks both conversation and fresh knowledge retrieval. Foreign-owner chat must fail without increasing model usage. Archive, relay revocation and retained volume data are checked before owned resources are removed.
 
 Prepare the complete [local agent image](./local-agent-image.md), cached Rust/contract dependencies, and the compiler pinned in `foundry.toml`. Stop the preparation model runner: this test starts its own isolated runner at the recipe's endpoint and refuses an occupied port. It neither adopts nor stops another runner. Select a trusted downloaded compiler explicitly; its version is checked by the same helper used for normal contract commands and deployment. No model, image, dependency or compiler is downloaded during this check.
 
@@ -163,3 +167,10 @@ The [2026-11-02 public-checkout report](../qualification/public-cli-macos-arm64.
 The initial attempt failed because its channel-reply deadline included knowledge startup. The qualifier now waits, with a separate bound, for the existing lifecycle report before publishing the owner message. It records the actual stage and startup wait, then requires a completed text reply correlated to that specific message within the unchanged 60-second reply bound. Partial output, document publication and another message's response cannot satisfy it. The channel prompt requests plain text; separate cases above still require real tool execution.
 
 This run reported knowledge as `degraded`, waited 49.677 additional seconds for that state and received the correlated reply in 4.54 seconds. It does not count degraded operation as working persistent memory. Persistent authorized memory, browser onboarding, image distribution and complete release acceptance remain open. Three deterministic checks cover lifecycle ordering, explicit degradation and false reply evidence; they run in the ordinary source lane without a model or browser.
+
+
+## Persistent knowledge qualification
+
+The [2026-11-03 report](../../e2e/fixtures/model-qualification/macos-arm64-knowledge-2026-11-03.json) records the full supervised application scenario on Apple M3 Pro with 18 GiB RAM, macOS arm64 and the same pinned model recipe. It passed in 129.410 seconds with external IP connections blocked and predownloaded inputs. The CLI planted four synthetic documents through the shared document client; the real model ranked the relevant railway document first, returned its stored booking code, and repeated retrieval in a fresh conversation after runtime recreation. Missing and removed namespace grants produced authority denials without disclosing the code or changing canonical data. A different owner could not read the documents.
+
+This run also covers actual publish tools, channel replies, persisted conversation recall, model-runner supervision, relay revocation and retained runtime data. Its image identity and source hashes are recorded. It qualifies the [canonical-store retrieval path](./local-knowledge.md), not an OpenViking server. The optional engine's legacy lifecycle indicator still reported `degraded`; the run waited 19.520 additional seconds before the channel check and received its reply in 2.389 seconds. Browser acceptance and an independent clean installation remain separate release work.

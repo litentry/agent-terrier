@@ -1,7 +1,7 @@
 /**
  * @module @agentkeys/dsh-suite/actions — the daemon-ADVERTISED verbs as tools
  * from `GET /v1/sandbox/self/actions`, which names the verbs this delegate
- * may call (`publish_to_slot`, `propose_to_owner`), worded by the daemon with
+ * may call (`publish_to_slot`, `propose_to_owner`, `recall_knowledge`), worded by the daemon with
  * the slots THIS install bound and the app's own namespace; this plugin
  * registers one tool per entry and runs each call as ONE bearer-gated
  * `POST <route>` through the daemon client. The daemon signs as the delegate

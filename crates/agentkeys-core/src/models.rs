@@ -4,6 +4,7 @@ use anyhow::{ensure, Context, Result};
 use reqwest::{Response, Url};
 use serde_json::Value;
 
+pub mod embedding;
 pub mod qualification;
 
 pub use agentkeys_protocol::model_config::{

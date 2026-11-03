@@ -1351,6 +1351,7 @@ enum AgentAction {
 
 #[derive(Subcommand)]
 enum LocalAction {
+    Memory(agentkeys_cli::local_memory::MemoryOptions),
     Browser(agentkeys_cli::local_browser::BrowserOptions),
     Channel(agentkeys_cli::local_channel::ChannelOptions),
     Credential(agentkeys_cli::local_data::CredentialOptions),
@@ -1797,6 +1798,11 @@ async fn main() {
         Commands::Local {
             action: LocalAction::Agent(options),
         } => agentkeys_cli::local_agent::execute(&ctx, options)
+            .await
+            .and_then(|result| serde_json::to_string(&result).map_err(Into::into)),
+        Commands::Local {
+            action: LocalAction::Memory(options),
+        } => agentkeys_cli::local_memory::execute(&ctx, options)
             .await
             .and_then(|result| serde_json::to_string(&result).map_err(Into::into)),
         Commands::K11 { action } => cmd_k11(&ctx, action).await,
