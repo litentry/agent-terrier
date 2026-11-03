@@ -81,9 +81,9 @@ impl CheckpointConfig {
     /// Build from the chat env. `None` = checkpoint disabled: kill switch,
     /// no #577 mgmt token (pre-#577 image / non-broker spawn), underivable
     /// namespace, or no memory-worker URL.
-    pub fn from_chat_env(chat: ChatLoopConfig) -> Option<Self> {
+    pub fn from_chat_env(chat: ChatLoopConfig, memory_engine_enabled: bool) -> Option<Self> {
         let read = |k: &str| std::env::var(k).ok().filter(|v| !v.trim().is_empty());
-        Self::from_lookup(&read, chat)
+        Self::from_lookup(&read, chat, memory_engine_enabled)
     }
 
     /// Pure construction from a lookup fn — the testable seam (the repo's
@@ -91,6 +91,7 @@ impl CheckpointConfig {
     pub fn from_lookup(
         read: &dyn Fn(&str) -> Option<String>,
         chat: ChatLoopConfig,
+        memory_engine_enabled: bool,
     ) -> Option<Self> {
         use agentkeys_backend_client::protocol::sandbox_env as env_names;
         if read("AGENTKEYS_CHECKPOINT").as_deref() == Some("0") {
@@ -152,7 +153,7 @@ impl CheckpointConfig {
         );
         let workspace = workspace_path
             .parent()
-            .filter(|p| p.is_dir())
+            .filter(|parent| memory_engine_enabled && parent.is_dir())
             .map(|_| workspace_path.clone());
         let marker =
             std::path::PathBuf::from(read("AGENTKEYS_OV_RESTORE_MARKER").unwrap_or_else(|| {
@@ -194,7 +195,9 @@ impl CheckpointConfig {
     /// Nothing will restore the workspace (the chat loop could not start): let
     /// the engine go at once.
     pub fn release_engine_now(&self) {
-        release_engine(&self.marker);
+        if self.workspace.is_some() {
+            release_engine(&self.marker);
+        }
     }
 
     fn backend_client(&self, credential: &DelegateCredential) -> BackendClient {
@@ -399,6 +402,9 @@ fn workspace_awaits_restore(workspace: Option<&std::path::Path>, marker: &std::p
 /// `<marker>.pending` when the restore would unpack into an empty workspace,
 /// else clear a stale one (a crashed run's). Returns whether the engine is held.
 fn hold_engine(cfg: &CheckpointConfig) -> bool {
+    if cfg.workspace.is_none() {
+        return false;
+    }
     if cfg.engine_hold_max.is_zero()
         || !workspace_awaits_restore(cfg.workspace.as_deref(), &cfg.marker)
     {
@@ -547,7 +553,7 @@ async fn attempt_pending(
             },
         };
         *workspace = settle("engine workspace", attempt, session);
-        if workspace.saves() {
+        if workspace.saves() && cfg.workspace.is_some() {
             touch_marker(&cfg.marker);
         }
     }
@@ -1308,7 +1314,8 @@ mod tests {
     #[test]
     fn config_derives_namespace_from_opchat_channel() {
         let read = lookup(&[("AGENTKEYS_SANDBOX_MGMT_TOKEN", "smt1_x")]);
-        let cfg = CheckpointConfig::from_lookup(&read, chat("opchat-watchdog")).expect("enabled");
+        let cfg =
+            CheckpointConfig::from_lookup(&read, chat("opchat-watchdog"), true).expect("enabled");
         assert_eq!(cfg.namespace, "watchdog");
         // The worker URL is DERIVED from the broker host (never pre-composed).
         assert_eq!(cfg.memory_worker_url, "https://memory.secondary.example");
@@ -1326,7 +1333,8 @@ mod tests {
             ("AGENTKEYS_CHECKPOINT_INTERVAL_SECS", "60"),
             ("AGENTKEYS_CHECKPOINT_MAX_BYTES", "65536"),
         ]);
-        let cfg = CheckpointConfig::from_lookup(&read, chat("opchat-newlabel")).expect("enabled");
+        let cfg =
+            CheckpointConfig::from_lookup(&read, chat("opchat-newlabel"), true).expect("enabled");
         assert_eq!(cfg.namespace, "inherited-ns");
         assert_eq!(cfg.interval.as_secs(), 60);
         assert_eq!(cfg.max_bytes, 65536);
@@ -1336,16 +1344,49 @@ mod tests {
     fn config_disabled_without_mgmt_token_kill_switch_or_derivable_ns() {
         // Pre-#577 image: no mgmt token → no export surface → disabled.
         let read = lookup(&[]);
-        assert!(CheckpointConfig::from_lookup(&read, chat("opchat-w")).is_none());
+        assert!(CheckpointConfig::from_lookup(&read, chat("opchat-w"), true).is_none());
         // Kill switch.
         let read = lookup(&[
             ("AGENTKEYS_SANDBOX_MGMT_TOKEN", "smt1_x"),
             ("AGENTKEYS_CHECKPOINT", "0"),
         ]);
-        assert!(CheckpointConfig::from_lookup(&read, chat("opchat-w")).is_none());
+        assert!(CheckpointConfig::from_lookup(&read, chat("opchat-w"), true).is_none());
         // Non-opchat channel id and no injected ns → underivable → disabled.
         let read = lookup(&[("AGENTKEYS_SANDBOX_MGMT_TOKEN", "smt1_x")]);
-        assert!(CheckpointConfig::from_lookup(&read, chat("custom-feed")).is_none());
+        assert!(CheckpointConfig::from_lookup(&read, chat("custom-feed"), true).is_none());
+    }
+
+    #[test]
+    fn disabled_engine_preserves_home_checkpoint_without_touching_engine_files() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = directory.path().join("workspace");
+        let marker = directory.path().join("restored");
+        let workspace_value = workspace.to_str().unwrap();
+        let marker_value = marker.to_str().unwrap();
+        let pairs = [
+            ("AGENTKEYS_SANDBOX_MGMT_TOKEN", "smt1_x"),
+            ("OPENVIKING_WORKSPACE", workspace_value),
+            ("AGENTKEYS_OV_RESTORE_MARKER", marker_value),
+        ];
+        let mut enabled =
+            CheckpointConfig::from_lookup(&lookup(&pairs), chat("opchat-test"), true).unwrap();
+        enabled.hold_engine_now();
+        let pending = pending_marker(&marker);
+        assert!(pending.is_file());
+        let existing = std::fs::read(&pending).unwrap();
+        let mut disabled =
+            CheckpointConfig::from_lookup(&lookup(&pairs), chat("opchat-test"), false).unwrap();
+        assert!(disabled.workspace.is_none());
+        assert_eq!(disabled.object_key, CHECKPOINT_OBJECT_KEY);
+        assert_eq!(disabled.namespace, "test");
+        disabled.hold_engine_now();
+        disabled.release_engine_now();
+        assert!(disabled.engine_held_since.is_none());
+        assert_eq!(std::fs::read(&pending).unwrap(), existing);
+        assert!(!workspace.exists());
+        assert!(!marker.exists());
+        enabled.release_engine_now();
+        assert!(!pending.exists());
     }
 
     #[test]
@@ -1355,7 +1396,7 @@ mod tests {
             ("AGENTKEYS_CHECKPOINT_INTERVAL_SECS", "5"),
             ("AGENTKEYS_CHECKPOINT_MAX_BYTES", "999999999999"),
         ]);
-        let cfg = CheckpointConfig::from_lookup(&read, chat("opchat-w")).expect("enabled");
+        let cfg = CheckpointConfig::from_lookup(&read, chat("opchat-w"), true).expect("enabled");
         assert_eq!(cfg.interval.as_secs(), 900);
         assert_eq!(cfg.max_bytes, 8 * 1024 * 1024);
     }
@@ -1370,7 +1411,7 @@ mod tests {
                 _ => None,
             }
         };
-        let cfg = CheckpointConfig::from_lookup(&base, chat("opchat-watchdog")).expect("cfg");
+        let cfg = CheckpointConfig::from_lookup(&base, chat("opchat-watchdog"), true).expect("cfg");
         assert_eq!(cfg.object_key, CHECKPOINT_OBJECT_KEY);
         assert_eq!(cfg.object_key, "checkpoint/dsh-home");
     }
@@ -1628,7 +1669,7 @@ mod tests {
             ("AGENTKEYS_OV_RESTORE_MARKER", marker_env.as_str()),
         ];
         let mut cfg =
-            CheckpointConfig::from_lookup(&lookup(&pairs), chat("opchat-chef")).expect("cfg");
+            CheckpointConfig::from_lookup(&lookup(&pairs), chat("opchat-chef"), true).expect("cfg");
         assert_eq!(cfg.engine_hold_max, Duration::from_secs(1800));
         assert!(cfg.engine_held_since.is_none());
 
@@ -1665,7 +1706,8 @@ mod tests {
             ("AGENTKEYS_OV_RESTORE_MARKER", marker_env.as_str()),
             ("AGENTKEYS_OV_RESTORE_PENDING_MAX_SECS", "0"),
         ];
-        let cfg = CheckpointConfig::from_lookup(&lookup(&off), chat("opchat-chef")).expect("cfg");
+        let cfg =
+            CheckpointConfig::from_lookup(&lookup(&off), chat("opchat-chef"), true).expect("cfg");
         assert!(!hold_engine(&cfg), "0 turns the hold off");
         assert!(!pending.exists());
     }

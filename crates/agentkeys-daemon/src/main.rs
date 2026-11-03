@@ -1426,9 +1426,9 @@ async fn run_ui_bridge_mode(args: Args) -> anyhow::Result<()> {
         // The OpenViking server config, rendered from the pod env BEFORE the
         // chat loop (its checkpoint restore touches the marker the engine's
         // start script waits for) — a host daemon with no engine env is a no-op.
-        openviking_config::render_at_boot()?;
+        let memory_engine_enabled = openviking_config::render_at_boot()?;
         // Start the delegate chat loop only when its explicit configuration exists.
-        chat_loop::spawn_if_configured();
+        chat_loop::spawn_if_configured(memory_engine_enabled);
     }
     let app = ui_bridge::build_router(state, &args.ui_bridge_origin);
 

@@ -217,7 +217,7 @@ impl ChatLoopConfig {
 }
 
 /// Spawn the loop as a background task when the sandbox env configures it.
-pub fn spawn_if_configured() {
+pub fn spawn_if_configured(memory_engine_enabled: bool) {
     let Some(cfg) = ChatLoopConfig::from_env() else {
         return;
     };
@@ -226,7 +226,7 @@ pub fn spawn_if_configured() {
         actor = %cfg.actor_omni,
         "#430 chat loop: starting (operator-owned duplex feed)"
     );
-    tokio::spawn(async move { run(cfg).await });
+    tokio::spawn(async move { run(cfg, memory_engine_enabled).await });
 }
 
 #[derive(Debug, Deserialize)]
@@ -550,11 +550,12 @@ pub(crate) struct LoopRuntime {
     pub sent_sessions: tokio::sync::Mutex<std::collections::HashSet<String>>,
 }
 
-async fn run(cfg: ChatLoopConfig) {
+async fn run(cfg: ChatLoopConfig, memory_engine_enabled: bool) {
     // #594 — the checkpoint config first: its engine hold (#694) goes up before
     // the credential bootstrap, which can stall on the signer while the
     // engine's start script only waits its own bound for a hold to appear.
-    let mut checkpoint_cfg = crate::checkpoint::CheckpointConfig::from_chat_env(cfg.clone());
+    let mut checkpoint_cfg =
+        crate::checkpoint::CheckpointConfig::from_chat_env(cfg.clone(), memory_engine_enabled);
     if let Some(c) = checkpoint_cfg.as_mut() {
         c.hold_engine_now();
     }
@@ -571,7 +572,10 @@ async fn run(cfg: ChatLoopConfig) {
     }));
     // #566 — the distribution mirror shares the credential but keeps its own
     // session + cadence, so neither loop can stall the other.
-    if let Some(mut mirror_cfg) = crate::memory_mirror::MirrorConfig::from_chat_env(cfg.clone()) {
+    let mirror_cfg = memory_engine_enabled
+        .then(|| crate::memory_mirror::MirrorConfig::from_chat_env(cfg.clone()))
+        .flatten();
+    if let Some(mut mirror_cfg) = mirror_cfg {
         mirror_cfg.hub = Some(hub.clone());
         crate::memory_mirror::spawn(mirror_cfg, credential.clone());
     } else {

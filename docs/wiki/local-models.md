@@ -56,7 +56,7 @@ The default application retrieval path uses the existing canonical memory worker
 
 ## Optional memory configuration
 
-When memory is explicitly configured, its embedding settings default to the same recipe used by the CLI and relay: local endpoint, model and measured vector dimension. There is no host credential discovery or alternate hosted endpoint. With no memory configuration, the daemon leaves the optional engine unconfigured.
+When memory is explicitly configured, its embedding settings default to the same recipe used by the CLI and relay: local endpoint, model and measured vector dimension. There is no host credential discovery or alternate hosted endpoint. With no memory configuration, the daemon leaves the optional engine unconfigured. The validated boot configuration also controls engine mirroring and workspace checkpoint work. When the engine is unconfigured or explicitly disabled, canonical knowledge retrieval and conversation checkpoint recovery continue; readiness does not wait for an absent engine. Explicit invalid configuration still refuses startup.
 
 | Setting | Behavior |
 |---|---|
@@ -174,3 +174,8 @@ This run reported knowledge as `degraded`, waited 49.677 additional seconds for 
 The [2026-11-03 report](../../e2e/fixtures/model-qualification/macos-arm64-knowledge-2026-11-03.json) records the full supervised application scenario on Apple M3 Pro with 18 GiB RAM, macOS arm64 and the same pinned model recipe. It passed in 129.410 seconds with external IP connections blocked and predownloaded inputs. The CLI planted four synthetic documents through the shared document client; the real model ranked the relevant railway document first, returned its stored booking code, and repeated retrieval in a fresh conversation after runtime recreation. Missing and removed namespace grants produced authority denials without disclosing the code or changing canonical data. A different owner could not read the documents.
 
 This run also covers actual publish tools, channel replies, persisted conversation recall, model-runner supervision, relay revocation and retained runtime data. Its image identity and source hashes are recorded. It qualifies the [canonical-store retrieval path](./local-knowledge.md), not an OpenViking server. The optional engine's legacy lifecycle indicator still reported `degraded`; the run waited 19.520 additional seconds before the channel check and received its reply in 2.389 seconds. Browser acceptance and an independent clean installation remain separate release work.
+
+
+## Ready-state qualification
+
+The [follow-up offline application run](../../e2e/fixtures/model-qualification/macos-arm64-ready-2026-11-03.json) passed in 109.125 seconds on the same declared macOS arm64 host. Its exact image reached `ready`; the remaining wait at the channel check was 0.144 seconds and the correlated reply took 3.096 seconds. Real model tools, namespace authorization/removal, unchanged canonical knowledge, runtime recreation, conversation recall and model-runner restart all passed. This is one cached-input application measurement, not a cold-build or general performance guarantee. The earlier degraded reports remain unchanged as historical evidence.
