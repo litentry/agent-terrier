@@ -3,7 +3,11 @@ use std::process::{Command, Output};
 
 use agentkeys_backend_client::protocol::hosted_signer::*;
 use agentkeys_core::device_crypto::{device_key_hash, eip191_sign, evm_address};
-use agentkeys_web_core::broker::BrokerClient;
+use agentkeys_web_core::{
+    broker::BrokerClient,
+    data::{DataClient, DataEndpoints, DataError, DataSession},
+    device::DeviceIdentity,
+};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use p256::ecdsa::{signature::Signer, Signature, SigningKey};
 use serde_json::{json, Value};
@@ -303,6 +307,78 @@ async fn local_browser_approval_denials_passkey_login_and_read_only_recovery() {
         .await
         .unwrap();
     assert!(status.active && status.device_active);
+    let endpoints = &started["services"]["services"];
+    let data = DataClient::with_client(
+        reqwest::Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap(),
+        DataEndpoints {
+            broker_url: broker_url.into(),
+            signer_url: endpoints["signer"]["url"].as_str().unwrap().into(),
+            credential_url: endpoints["credentials"]["url"].as_str().unwrap().into(),
+            config_url: String::new(),
+            memory_url: String::new(),
+            audit_url: None,
+            classify_url: None,
+        },
+    );
+    let browser_device = DeviceIdentity::from_random_bytes(&device.to_bytes()).unwrap();
+    let owner_omni = owner["operator_omni"].as_str().unwrap();
+    let authority = DataSession {
+        bearer: &browser_session.session_jwt,
+        operator_omni: owner_omni,
+        actor_omni: owner_omni,
+        device: &browser_device,
+        now_unix_seconds: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+    };
+    let synthetic = "browser-created synthetic credential\nsecond line";
+    data.credential_store(&authority, "browser-example", synthetic.as_bytes())
+        .await
+        .unwrap();
+    let snapshot = || {
+        let database = rusqlite::Connection::open_with_flags(
+            stack.state.join("services/credentials/objects.db"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let mut statement = database
+            .prepare("SELECT hex(value) FROM objects ORDER BY key")
+            .unwrap();
+        statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    };
+    let stored = snapshot();
+    assert!(!stored.is_empty());
+    assert!(stored
+        .iter()
+        .all(|bytes| !bytes.contains(&hex::encode_upper(synthetic))));
+    let fetched = stack.success(&["cred", "fetch", "browser-example", "--name", "alice"]);
+    assert!(fetched["secret"].as_str() == Some(synthetic));
+    let denied = stack.run(&["cred", "fetch", "browser-example", "--name", "bob"]);
+    assert!(!denied.status.success());
+    assert!(denied.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&denied.stderr).contains("HTTP 404"));
+    let invalid = DataSession {
+        bearer: "invalid-browser-session",
+        ..authority
+    };
+    assert!(matches!(
+        data.credential_fetch(&invalid, "browser-example").await,
+        Err(DataError::Http { status: 401, .. })
+    ));
+    assert!(snapshot() == stored);
+    stack.success(&["stack", "restart"]);
+    let retained = stack.success(&["cred", "fetch", "browser-example", "--name", "alice"]);
+    assert!(retained["secret"].as_str() == Some(synthetic));
+    assert!(snapshot() == stored);
     let recorded_height = rpc(chain_url, "eth_blockNumber", json!([])).await;
     let passkey = stack.state.join("owners/alice/passkey.pem");
     std::fs::rename(&passkey, passkey.with_extension("unavailable")).unwrap();

@@ -25,7 +25,8 @@ def credential(repository, state, action, name, service, secret_stdin):
         raise ValueError("Only credential store requires --secret-stdin")
     identity, running, environment = command_context(repository, state, name)
     arguments = [str(owner.executable(repository)), "local", "credential", action, service,
-                 *identity, "--cred-url", running["services"]["credentials"]["url"]]
+                 *identity, "--cred-url", running["services"]["credentials"]["url"],
+                 "--signer-url", running["services"]["signer"]["url"]]
     if secret_stdin:
         arguments.append("--secret-stdin")
     return subprocess.run(arguments, stdin=sys.stdin if secret_stdin else subprocess.DEVNULL,

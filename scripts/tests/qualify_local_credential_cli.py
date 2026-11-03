@@ -184,6 +184,7 @@ class LocalCredentialQualification(LocalOwnerFixture):
                     "--operator-omni", alice["operator_omni"], "--device-key-file", str(device_path),
                     "--session-file", str(session_path), "--broker-url", broker]
                 channel_native = [native[0], "local", "channel", "poll", "qualification", *native[5:]]
+                native.extend(["--signer-url", running["services"]["signer"]["url"]])
                 for remote in ("https://example.invalid", "http://192.0.2.1:9000"):
                     denied = subprocess.run([*native, "--cred-url", remote], env=native_environment,
                         capture_output=True, text=True, timeout=10)

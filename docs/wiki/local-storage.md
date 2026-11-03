@@ -1,4 +1,4 @@
-The local storage implementation serves credentials, configuration, memory and channel messages through independently verified capabilities. The real broker-login/credential journey and each worker's real-contract qualification have separate evidence. Browser enrollment, client-encrypted delegated credential decryption and full application acceptance remain release work; they are not implied by storage qualification.
+The local storage implementation serves credentials, configuration, memory and channel messages through independently verified capabilities. The real broker-login/credential journey and each worker's real-contract qualification have separate evidence. Client-encrypted delegated credential decryption and full application acceptance remain release work; they are not implied by storage qualification.
 
 ## Run locally
 
@@ -15,7 +15,7 @@ printf %s 'local-development-example' | ./terrier cred store example --name deve
 ./terrier cred fetch example --name developer
 ```
 
-The fetch command deliberately prints the decrypted credential. The protected session file and actor request key are loaded by the native client; no bearer or key value is passed in command arguments. Invalid sessions, missing original keys and unsafe file permissions fail. [Local services](./local-services.md) describes restart, configuration and recovery; [local owner](./local-owner.md) describes development-only signing.
+The fetch command deliberately prints the decrypted credential. Owner reads use the same data client as the browser: it accepts both the worker-encrypted development format and browser-created v3 envelopes. For v3, the configured local signer independently checks the owner session before deriving the encryption key. Missing signers, rejected sessions and malformed envelopes fail without returning ciphertext or raw service errors. The protected session file and actor request key are loaded by the native client; no bearer or key value is passed in command arguments. Invalid sessions, missing original keys and unsafe file permissions fail. [Local services](./local-services.md) describes restart, configuration and recovery; [local owner](./local-owner.md) describes development-only signing.
 
 ## Canonical owners
 
@@ -45,7 +45,7 @@ Each SQLite database records its application, schema and data class. Unrelated d
 
 Workers start with an explicit local profile, broker public key and loopback storage URL. The service launcher supplies these through the same public binary options. `--development-kek-file` names a fresh protected 32-byte hex key. Credential and configuration workers can instead accept client-encrypted v3 envelopes without a worker key. Memory and channel workers require their separate development key. Missing original keys are never silently regenerated over existing state.
 
-The credential/configuration v3 path keeps encryption in the client and requires its explicit key-derivation signer. Daemon/browser owner encryption is separate from the CLI's qualified worker-encrypted development path. Delegated v3 decryption and interactive browser signer enrollment remain unfinished. The memory worker encrypts its development records; client-encrypted v3 memory is not implemented. Existing envelopes are never silently re-keyed or switched between modes.
+The credential/configuration v3 path keeps encryption in the client and requires its explicit key-derivation signer. Daemon/browser owner encryption is separate from the CLI's qualified worker-encrypted development path. The local supervisor owns the signer and CLI-approved browser enrollment. Owner CLI reads reuse browser decryption; delegated v3 decryption remains unfinished and must not be inferred from a valid credential read grant. The memory worker encrypts its development records; client-encrypted v3 memory is not implemented. Existing envelopes are never silently re-keyed or switched between modes.
 
 The retained wire field `s3_key` is a compatibility name for an object key; these workers do not use cloud storage credentials. Shared native/browser clients send signed capabilities directly to workers. HTTP adapters disable inherited proxies and redirects, bound responses, verify content revisions and validate pagination scope/progress. The audit emitter is a separate interface; audit-service acceptance is outside this storage qualification.
 

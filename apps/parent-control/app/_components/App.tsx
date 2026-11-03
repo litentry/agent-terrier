@@ -637,7 +637,7 @@ function InteractiveApp({ hosted, onSessionEnd }: { hosted: boolean; onSessionEn
   };
 
   // #207 credentials: vault a master credential through the real chain (cap-mint →
-  // STS → cred worker → S3), then re-list. Real durable write or a loud error.
+  // credential worker → scoped storage), then re-list. Real durable write or a loud error.
   const storeCredential = async (service: string, secret: string) => {
     if (storingCred) return;
     setStoringCred(true);
