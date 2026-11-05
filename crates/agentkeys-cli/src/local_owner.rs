@@ -22,6 +22,7 @@ pub enum OwnerAction {
     Revoke,
     Bind,
     Unbind,
+    Audit,
 }
 
 #[derive(clap::Args)]
@@ -40,6 +41,10 @@ pub struct OwnerOptions {
     pub beneficiary: String,
     #[arg(long)]
     pub actor_omni: Option<String>,
+    #[arg(long)]
+    pub audit_hash: Option<String>,
+    #[arg(long)]
+    pub audit_kind: Option<u8>,
     #[arg(long)]
     pub enrollment_file: Option<String>,
     #[arg(long)]
@@ -359,8 +364,22 @@ pub async fn prepare(context: &CommandContext, options: &OwnerOptions) -> Result
             == options.enrollment_file.is_some(),
         "only bind/unbind require an enrollment file"
     );
+    ensure!(
+        matches!(options.action, OwnerAction::Audit)
+            == (options.audit_hash.is_some() && options.audit_kind.is_some()),
+        "only audit requires --audit-hash and --audit-kind"
+    );
+    ensure!(
+        matches!(options.action, OwnerAction::Audit)
+            || (options.audit_hash.is_none() && options.audit_kind.is_none()),
+        "audit arguments require audit action"
+    );
     let enrollment = enrollment(options, &operator)?;
     match options.action {
+        OwnerAction::Audit => ensure!(
+            actor.is_some() && options.service.is_empty() && !options.read_only,
+            "audit requires only an actor and envelope commitment"
+        ),
         OwnerAction::Register => ensure!(
             actor.is_none() && options.service.is_empty() && !options.read_only,
             "register does not accept grant arguments"
@@ -494,6 +513,34 @@ pub async fn prepare(context: &CommandContext, options: &OwnerOptions) -> Result
         period_seconds: 0,
     };
     let call_data = match options.action {
+        OwnerAction::Audit => {
+            let audit = chain.contract("CredentialAudit")?;
+            ensure!(
+                chain.code_exists(&audit).await?,
+                "audit contract has no code"
+            );
+            let hash = fixed::<32>(
+                options
+                    .audit_hash
+                    .as_deref()
+                    .context("missing audit hash")?,
+            )?;
+            let kind = options.audit_kind.context("missing audit kind")?;
+            ensure!(
+                agentkeys_core::audit::AuditOpKind::from_u8(kind).is_some(),
+                "unknown audit operation kind"
+            );
+            execute_batch_calldata(
+                &[audit],
+                &[0],
+                &[agentkeys_core::audit::calldata::append_v2_calldata(
+                    &operator,
+                    &actor.context("missing audit actor")?,
+                    kind,
+                    &hash,
+                )],
+            )
+        }
         OwnerAction::Register => register_batch_calldata(
             &registry,
             &RegisterFirstMaster {
@@ -674,4 +721,35 @@ pub async fn verify(context: &CommandContext, transaction: &str, plan: OwnerPlan
     Ok(
         json!({"verified":true,"development_only":true,"transaction_hash":transaction,"user_op_hash":build.user_op_hash,"account":hex_value(&operation.sender)}),
     )
+}
+
+pub async fn recover(context: &CommandContext, plan: OwnerPlan) -> Result<Value> {
+    let chain = LocalChain::connect(context).await?;
+    let build = plan.build.as_ref().context("owner plan has no operation")?;
+    chain.development.verify_build(
+        &build.user_op,
+        &build.user_op_hash,
+        &build.entry_point,
+        build.chain_id,
+    )?;
+    let operation = wire_to_packed(&build.user_op).map_err(anyhow::Error::msg)?;
+    let entry = chain.contract("EntryPoint")?;
+    let topics =
+        agentkeys_core::user_operation_receipt::operation_topics(&operation, &build.user_op_hash)
+            .map_err(anyhow::Error::msg)?;
+    let logs=chain.rpc("eth_getLogs",json!([{"address":hex_value(&entry),"fromBlock":"0x0","toBlock":"latest","topics":topics}])).await?;
+    let matches: Vec<_> = logs
+        .as_array()
+        .context("invalid operation log response")?
+        .iter()
+        .filter(|log| {
+            agentkeys_core::user_operation_receipt::matches_operation(log, &entry, &topics)
+        })
+        .collect();
+    ensure!(matches.len()==1,"owner operation is not uniquely confirmed; retain its record and retry confirmation without resubmitting");
+    let transaction = matches[0]["transactionHash"]
+        .as_str()
+        .context("confirmed operation has no transaction hash")?
+        .to_owned();
+    verify(context, &transaction, plan).await
 }

@@ -21,6 +21,7 @@ Use fresh development identities only. The development software signer is not pr
 - [Generated CLI reference](./cli-reference.md)
 - [Contributor guide](../../CONTRIBUTING.md)
 - [Local storage and authorization checks](./local-storage.md)
+- [Store, anchor and decode audit records](./local-audit.md)
 - [Publish and read channel messages](./local-channels.md)
 - [Plant and retrieve persistent knowledge](./local-knowledge.md)
 - [Fast and extended test lanes](./test-lanes.md)

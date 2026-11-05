@@ -142,6 +142,12 @@ impl BrokerClient {
         post_json_at(&self.http, &self.base_url, path, bearer, body).await
     }
 
+    pub async fn console_config(
+        &self,
+    ) -> Result<agentkeys_protocol::console_chain::ConsoleConfig, BrokerError> {
+        self.get_json("/v1/console/config", None).await
+    }
+
     pub(crate) async fn get_json<T: DeserializeOwned>(
         &self,
         path: &str,

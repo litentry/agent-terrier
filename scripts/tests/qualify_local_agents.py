@@ -402,6 +402,31 @@ visit(process.argv[1]); process.stdout.write(JSON.stringify(sessions));
                     self.assertLess(time.monotonic(), deadline, "owner channel message received no completed agent reply")
                     time.sleep(0.5)
                 channel_reply_seconds = round(time.monotonic() - reply_started, 3)
+
+                archived_tool_result = None
+                cursor = None
+                while archived_tool_result is None:
+                    selection = ["--cursor", cursor] if cursor else []
+                    indexed = subprocess.run([sys.executable, str(REPOSITORY / "terrier"), "audit", "list",
+                        "--name", "alice", "--limit", "100", *selection], env=environment,
+                        capture_output=True, text=True, timeout=45)
+                    self.assertEqual(indexed.returncode, 0, indexed.stderr)
+                    self.assertTrue(all(secret not in indexed.stdout + indexed.stderr for secret in secrets))
+                    page = json.loads(indexed.stdout)
+                    for envelope_hash in page["envelope_hashes"]:
+                        fetched = subprocess.run([sys.executable, str(REPOSITORY / "terrier"), "audit", "fetch",
+                            "--name", "alice", "--hash", envelope_hash], env=environment,
+                            capture_output=True, text=True, timeout=45)
+                        self.assertEqual(fetched.returncode, 0, fetched.stderr)
+                        self.assertTrue(all(secret not in fetched.stdout + fetched.stderr for secret in secrets))
+                        envelope = json.loads(fetched.stdout)["envelope"]
+                        if envelope["actor_omni"] == created["actor_omni"] and envelope["op_kind"] == 110:
+                            archived_tool_result = envelope
+                            break
+                    cursor = page["next_cursor"]
+                    if not cursor:
+                        break
+                self.assertIsNotNone(archived_tool_result, "real agent tool execution produced no authenticated durable audit envelope")
             operation_path = state / "owners/alice/operations" / (created["user_op_hash"] + ".json")
             operation = local_state.read_json(operation_path)
             self.assertEqual(operation_path.stat().st_mode & 0o777, 0o600)
@@ -545,7 +570,7 @@ visit(process.argv[1]); process.stdout.write(JSON.stringify(sessions));
                     "restart_recall": True, "foreign_chat_denied": True, "denied_chat_usage_unchanged": True,
                     "revocation": True, "retained_data": True, "model_runner_supervised": bool(model_options),
                     "model_runner_restart_verified": bool(model_options),
-                    "model_publish_tool": True, "ungranted_tool_denied": True, "chain_grant_enables_tool": True,
+                    "authenticated_runtime_audit_archived": True, "model_publish_tool": True, "ungranted_tool_denied": True, "chain_grant_enables_tool": True,
                     "chain_scope_removal_denies_tool": True, "denied_tool_channel_unchanged": True,
                     "owner_channel_to_agent_reply": True, "channel_reply_correlated": True,
                     "knowledge_stage_before_channel_reply": knowledge_stage,

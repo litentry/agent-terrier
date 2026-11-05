@@ -119,7 +119,7 @@ class LocalServicesQualification(LocalOwnerFixture):
                     self.assertEqual(runtime_configuration["image"], image)
                     self.assertEqual(runtime_configuration["socket"], docker_socket)
                 self.assertTrue(running["ready"])
-                self.assertEqual(len(running["services"]), 13)
+                self.assertEqual(len(running["services"]), 14)
                 self.assertEqual(self.services(state, "start"), running)
                 self.assertTrue(self.services(state, "doctor")["ready"])
                 broker = running["services"]["broker"]["url"]

@@ -196,3 +196,58 @@ pub fn replace_atomic(path: &std::path::Path, contents: &[u8]) -> Result<()> {
 pub fn replace_atomic(_path: &std::path::Path, _contents: &[u8]) -> Result<()> {
     anyhow::bail!("secret storage requires Unix file permissions")
 }
+
+use anyhow::Context as _;
+#[cfg(unix)]
+pub fn prepare_database(database: &std::path::Path) -> anyhow::Result<()> {
+    use std::{
+        fs::OpenOptions,
+        os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
+    };
+    anyhow::ensure!(database.is_absolute(), "database path must be absolute");
+    let directory = database
+        .parent()
+        .context("database requires a parent directory")?;
+    anyhow::ensure!(
+        directory.canonicalize()? == directory,
+        "database directory must not traverse symbolic links"
+    );
+    let directory_file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY)
+        .open(directory)?;
+    let metadata = directory_file.metadata()?;
+    anyhow::ensure!(
+        metadata.uid() == unsafe { libc::geteuid() } && metadata.permissions().mode() & 0o077 == 0,
+        "database directory must be owned by this user with mode 0700"
+    );
+    let database_string = database.to_str().context("database path must be UTF-8")?;
+    match crate::protected_file::open_read(database_string) {
+        Ok(_) => (),
+        Err(error)
+            if error
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) =>
+        {
+            crate::protected_file::write(database_string, &[], true)?;
+        }
+        Err(error) => return Err(error),
+    }
+    for suffix in ["-journal", "-wal", "-shm"] {
+        let companion = format!("{database_string}{suffix}");
+        match crate::protected_file::open_read(&companion) {
+            Ok(_) => (),
+            Err(error)
+                if error
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+pub fn prepare_database(_database: &std::path::Path) -> anyhow::Result<()> {
+    anyhow::bail!("local databases require Unix file permissions")
+}

@@ -13,7 +13,7 @@ import time
 
 from . import contracts, affected
 
-COMPONENTS = ("protocol", "runtime", "broker", "signer", "relay", "bundler", "daemon", "storage", "cli", "ui", "display", "dsh", "managed", "contracts", "provisioner", "chain", "services", "agents", "website", "security")
+COMPONENTS = ("protocol", "runtime", "broker", "signer", "relay", "bundler", "daemon", "storage", "cli", "ui", "display", "dsh", "managed", "contracts", "provisioner", "chain", "services", "agents", "website", "security", "audit")
 REGRESSION_TIMEOUT_SECONDS = 3600
 RUNTIME_SUITE = ("runtime", "agentkeys-runtime", "--lib", None, "")
 CORE = (
@@ -24,6 +24,7 @@ CORE = (
     RUNTIME_SUITE,
 )
 RUST_COMPONENTS = {
+    "audit": [("audit-archive", "agentkeys-worker-audit", "--lib", None, "")],
     "protocol": [CORE[0]],
     "runtime": [RUNTIME_SUITE],
     "bundler": [("bundler", "agentkeys-bundler", "--lib", None, "")],
@@ -41,6 +42,7 @@ RUST_COMPONENTS = {
             ("cli-agent-transport", "agentkeys-cli", "--test", "local_agent_transport", "")],
 }
 QUALIFICATIONS = {
+    "audit": ("qualify_local_audit.py",),
     "security": (),
     "contracts": (),
     "provisioner": (),
@@ -56,6 +58,7 @@ QUALIFICATIONS = {
     ),
 }
 QUALIFICATION_RUST = {
+    "audit": RUST_COMPONENTS["audit"],
     "security": [],
     "contracts": [], "provisioner": [], "chain": [], "services": [], "agents": [],
     "website": [("browser-approval", "agentkeys-cli", "--test", "local_browser_qualification", "--ignored")],

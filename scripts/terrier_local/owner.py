@@ -68,10 +68,10 @@ def device_identity(repository, state, name, operator, label, kind):
     return {"development_only":True, "enrollment_file":str(enrollment_path), "enrollment":enrollment}
 
 
-def execute(repository, state, action, name, actor=None, services=None, read_only=False, enrollment_file=None, broker_url=None):
+def execute(repository, state, action, name, actor=None, services=None, read_only=False, enrollment_file=None, broker_url=None, audit_hash=None, audit_kind=None):
     validate_name(name)
     services = services or []
-    if action not in ("register", "grant", "revoke", "bind", "unbind", "login"):
+    if action not in ("register", "grant", "revoke", "bind", "unbind", "login", "audit"):
         raise ValueError("Unsupported owner operation")
     if (action == "login") != bool(broker_url):
         raise ValueError("Only owner login requires --broker-url")
@@ -124,6 +124,27 @@ def execute(repository, state, action, name, actor=None, services=None, read_onl
         arguments.extend(["--service", service])
     if read_only:
         arguments.append("--read-only")
+    if action == "audit":
+        if not actor or not re.fullmatch(r"0x[0-9a-fA-F]{64}", audit_hash or "") or type(audit_kind) is not int:
+            raise ValueError("Audit anchoring requires a verified envelope commitment")
+        arguments.extend(["--audit-hash", audit_hash, "--audit-kind", str(audit_kind)])
+    journal_path = None
+    journal = None
+    if action == "audit":
+        journal_path = local_state.private_directory(directory / "audit-anchors") / (audit_hash.lower() + ".json")
+        if journal_path.exists() or journal_path.is_symlink():
+            journal = local_state.read_json(journal_path)
+            if (journal.get("profile_identity") != fingerprint or journal.get("operator_omni") != identity["operator_omni"]
+                    or journal.get("envelope_hash") != audit_hash.lower()):
+                raise ValueError("Audit anchor record belongs to another owner or deployment")
+            recovery = ["verify-owner"]
+            if journal.get("transaction_hash"):
+                recovery.extend(["--transaction", journal["transaction_hash"]])
+            verified = run_cli(repository, profile_path, recovery, json.dumps(journal["plan"]))
+            journal["transaction_hash"] = verified["transaction_hash"]
+            local_state.write_json(journal_path, journal)
+            verified.update(operator_omni=identity["operator_omni"], action=action, recovered=True)
+            return verified
     plan = run_cli(repository, profile_path, arguments)
     if action == "register" and plan["already_registered"]:
         return {"registered":False, "verified":True, "development_only":True, "operator_omni":identity["operator_omni"],
@@ -140,12 +161,23 @@ def execute(repository, state, action, name, actor=None, services=None, read_onl
     command = [contracts.foundry_binary("cast"), "send", plan["build"]["entry_point"],
                "--data", plan["transaction_data"], "--rpc-url", endpoint, "--gas-limit", str(gas_limit),
                "--keystore", str(keystore), "--password-file", str(password_file), "--json"]
+    if journal_path is not None:
+        recovery_plan = json.loads(json.dumps(plan))
+        recovery_plan["transaction_data"] = None
+        recovery_plan["rpc_user_op"] = None
+        recovery_plan["build"]["user_op"]["signature"] = "0x"
+        journal = {"profile_identity":fingerprint,"operator_omni":identity["operator_omni"],
+                   "envelope_hash":audit_hash.lower(),"plan":recovery_plan,"transaction_hash":None}
+        local_state.write_json(journal_path,journal)
     result = subprocess.run(command, env=contracts.tool_environment(), stdin=subprocess.DEVNULL,
                             capture_output=True, text=True, timeout=90, umask=0o077)
     if result.returncode:
         raise RuntimeError("Owner operation submission failed; retry the same command to inspect current chain state")
     receipt = json.loads(result.stdout)
     verified = run_cli(repository, profile_path, ["verify-owner", "--transaction", receipt["transactionHash"]], json.dumps(plan))
+    if journal_path is not None:
+        journal["transaction_hash"] = verified["transaction_hash"]
+        local_state.write_json(journal_path,journal)
     verified.update(operator_omni=identity["operator_omni"], device_key_hash=plan["device_key_hash"], action=action)
     if action == "register":
         verified["registered"] = True

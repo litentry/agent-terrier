@@ -1,5 +1,5 @@
 FROM public.ecr.aws/docker/library/rust@sha256:a41f7740f8b45d45795624eec13a8b42263cc700f19f7e4e86e04d3dda08a479 AS daemon-build
-RUN apk add --no-cache make=4.4.1-r4 perl=5.42.2-r1
+RUN apk add --no-cache make=4.4.1-r4 perl=5.42.3-r0
 WORKDIR /opt/terrier
 COPY rust-toolchain.toml ./
 RUN rustup toolchain install --no-self-update

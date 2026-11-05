@@ -1,16 +1,5 @@
-//! HTTP surface for the audit-service worker.
-//!
-//! Endpoints (V1 — legacy 5-field shape, retained):
-//!   POST /v1/audit/append              — queue a single event
-//!   POST /v1/audit/flush/:operator     — flush one operator's queue → Merkle root
-//!   POST /v1/audit/flush-all           — flush every queue
-//!   GET  /v1/audit/queue-size/:operator — diagnostics
-//!
-//! Endpoints (V2 — canonical `AuditEnvelope`, issue #97 phase B):
-//!   POST /v1/audit/append/v2           — store an envelope + return its `envelope_hash`
-//!   GET  /v1/audit/envelope/:hash      — fetch the canonical CBOR for an envelope hash
-//!
-//! Per arch.md §15.3a, V1 + V2 coexist for one migration cycle.
+//! Legacy in-memory fixture handlers and canonical envelope conversion.
+//! The local executable serves the authenticated durable archive router.
 
 use axum::{
     body::Body,
@@ -117,91 +106,15 @@ pub async fn queue_size(
 /// JSON shape accepted by `POST /v1/audit/append/v2`. The envelope is sent
 /// as JSON (each `op_body` is a freeform JSON object); the worker
 /// converts it to a `ciborium::Value` for canonical CBOR encoding.
-#[derive(Deserialize)]
-pub struct AppendV2Request {
-    /// Envelope-level version. Must equal
-    /// `agentkeys_core::audit::ENVELOPE_VERSION`.
-    pub version: u8,
-    /// Server-side fills this if 0; caller may pass an explicit timestamp.
-    #[serde(default)]
-    pub ts_unix: u64,
-    /// 0x-prefixed 64-hex (32 raw bytes).
-    pub actor_omni: String,
-    pub operator_omni: String,
-    pub op_kind: u8,
-    /// Op-kind-specific body. Opaque JSON — gets converted to CBOR.
-    pub op_body: serde_json::Value,
-    /// 0=Success, 1=Failure, 2=NotPermitted.
-    pub result: u8,
-    pub intent_text: Option<String>,
-    /// 0x-prefixed 64-hex (32 raw bytes) or null.
-    pub intent_commitment: Option<String>,
-}
+pub use agentkeys_protocol::AuditAppendV2 as AppendV2Request;
 
-#[derive(Serialize)]
-pub struct AppendV2Response {
-    pub ok: bool,
-    /// 0x-prefixed 64-hex (32 raw bytes). Use this in the on-chain
-    /// `CredentialAudit.appendV2(operator_omni, actor_omni, op_kind,
-    /// envelope_hash)` call.
-    pub envelope_hash: String,
-}
+pub use agentkeys_protocol::AuditAppendV2Resp as AppendV2Response;
 
 pub async fn append_v2(
     State(state): State<SharedState>,
     Json(req): Json<AppendV2Request>,
 ) -> Result<Json<AppendV2Response>, (StatusCode, String)> {
-    use agentkeys_core::audit::{AuditEnvelope, AuditResult, ENVELOPE_VERSION};
-
-    if req.version != ENVELOPE_VERSION {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            format!(
-                "unsupported envelope version: {} (this worker supports {})",
-                req.version, ENVELOPE_VERSION
-            ),
-        ));
-    }
-
-    let actor_omni = decode_hex_32(&req.actor_omni, "actor_omni")?;
-    let operator_omni = decode_hex_32(&req.operator_omni, "operator_omni")?;
-    let intent_commitment = match &req.intent_commitment {
-        Some(s) => Some(decode_hex_32(s, "intent_commitment")?),
-        None => None,
-    };
-    let result = match req.result {
-        0 => AuditResult::Success,
-        1 => AuditResult::Failure,
-        2 => AuditResult::NotPermitted,
-        other => {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                format!("unknown result byte: {other}"),
-            ))
-        }
-    };
-    let ts_unix = if req.ts_unix == 0 {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0)
-    } else {
-        req.ts_unix
-    };
-
-    let envelope = AuditEnvelope {
-        version: req.version,
-        ts_unix,
-        actor_omni,
-        operator_omni,
-        op_kind: req.op_kind,
-        op_body: json_to_ciborium(req.op_body)
-            .map_err(|e| (StatusCode::BAD_REQUEST, format!("op_body: {e}")))?,
-        result,
-        intent_text: req.intent_text,
-        intent_commitment,
-    };
-
+    let envelope = canonical_envelope(req)?;
     let cbor = envelope
         .to_canonical_cbor()
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("encode: {e}")))?;
@@ -215,11 +128,11 @@ pub async fn append_v2(
     // `appendRootV2` Merkle batch alongside the by-hash store above.
     state
         .queue_v2(
-            format!("0x{}", hex::encode(operator_omni)),
+            format!("0x{}", hex::encode(envelope.operator_omni)),
             V2QueueEntry {
                 envelope_hash: hash_hex.clone(),
-                op_kind: req.op_kind,
-                actor_omni: format!("0x{}", hex::encode(actor_omni)),
+                op_kind: envelope.op_kind,
+                actor_omni: format!("0x{}", hex::encode(envelope.actor_omni)),
                 ts_unix: envelope.ts_unix,
             },
         )
@@ -310,4 +223,61 @@ fn json_to_ciborium(v: serde_json::Value) -> Result<ciborium::Value, String> {
             CV::Map(entries)
         }
     })
+}
+
+pub fn canonical_envelope(
+    req: AppendV2Request,
+) -> Result<agentkeys_core::audit::AuditEnvelope, (StatusCode, String)> {
+    use agentkeys_core::audit::{AuditEnvelope, AuditResult, ENVELOPE_VERSION};
+
+    if req.version != ENVELOPE_VERSION {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!(
+                "unsupported envelope version: {} (this worker supports {})",
+                req.version, ENVELOPE_VERSION
+            ),
+        ));
+    }
+
+    let actor_omni = decode_hex_32(&req.actor_omni, "actor_omni")?;
+    let operator_omni = decode_hex_32(&req.operator_omni, "operator_omni")?;
+    let intent_commitment = match &req.intent_commitment {
+        Some(s) => Some(decode_hex_32(s, "intent_commitment")?),
+        None => None,
+    };
+    let result = match req.result {
+        0 => AuditResult::Success,
+        1 => AuditResult::Failure,
+        2 => AuditResult::NotPermitted,
+        other => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!("unknown result byte: {other}"),
+            ))
+        }
+    };
+    let ts_unix = if req.ts_unix == 0 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+    } else {
+        req.ts_unix
+    };
+
+    let envelope = AuditEnvelope {
+        version: req.version,
+        ts_unix,
+        actor_omni,
+        operator_omni,
+        op_kind: req.op_kind,
+        op_body: json_to_ciborium(req.op_body)
+            .map_err(|e| (StatusCode::BAD_REQUEST, format!("op_body: {e}")))?,
+        result,
+        intent_text: req.intent_text,
+        intent_commitment,
+    };
+
+    Ok(envelope)
 }

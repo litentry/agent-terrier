@@ -1775,3 +1775,5 @@ mod sign_audit_tests {
         }
     }
 }
+
+pub mod local_audit;

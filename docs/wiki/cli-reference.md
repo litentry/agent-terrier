@@ -9,7 +9,7 @@ Agent Terrier local development tools
 | Argument | Required | Choices | Description |
 | --- | --- | --- | --- |
 | -h, --help | no |  | show this help message and exit |
-| subcommand | yes | manage, stack, test, models, contracts, chain, services, channel, memory, cred, agent, browser, owner, device | Select a command below. |
+| subcommand | yes | manage, stack, test, models, contracts, chain, services, channel, memory, audit, cred, agent, browser, owner, device | Select a command below. |
 
 ## terrier manage
 
@@ -42,7 +42,7 @@ Agent Terrier local development tools
 | --- | --- | --- | --- |
 | -h, --help | no |  | show this help message and exit |
 | lane | yes | source, core, focused, affected, regression, qualification |  |
-| --component | no | protocol, runtime, broker, signer, relay, bundler, daemon, storage, cli, ui, display, dsh, managed, contracts, provisioner, chain, services, agents, website, security |  |
+| --component | no | protocol, runtime, broker, signer, relay, bundler, daemon, storage, cli, ui, display, dsh, managed, contracts, provisioner, chain, services, agents, website, security, audit |  |
 | --changed-file | no |  | Changed repository-relative path; include old and new paths for renames |
 | --changed-files-json | no |  | JSON array of changed repository-relative paths |
 | --revision | no |  | Exact reviewed public commit for isolated security qualification |
@@ -119,6 +119,20 @@ Agent Terrier local development tools
 | --key | no |  | Stable entry key; required for plant |
 | --title | no |  |  |
 | --body-stdin | no |  | Read exact UTF-8 knowledge body for plant |
+
+## terrier audit
+
+| Argument | Required | Choices | Description |
+| --- | --- | --- | --- |
+| -h, --help | no |  | show this help message and exit |
+| action | yes | append, fetch, anchor, list, recent, decode |  |
+| --name | yes |  |  |
+| --hash | no |  |  |
+| --id | no |  |  |
+| --cursor | no |  |  |
+| --limit | no |  |  |
+| --op-kind | no |  |  |
+| --body-stdin | no |  |  |
 
 ## terrier cred
 

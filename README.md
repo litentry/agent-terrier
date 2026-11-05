@@ -2,7 +2,7 @@
 
 Agent Terrier is an open-source agent platform with on-chain authorization, a shared Rust core, a command-line client and a web console.
 
-Run the [local development quickstart](docs/wiki/quickstart.md) for contracts, owner login, scoped storage, Docker agents, local models and the website. Real-model tools, channel replies, authorized persistent knowledge and stateful restart have offline qualification. Browser checks cover CLI-approved sign-in, agent creation, chat, notes and interrupted-operation recovery using a virtual authenticator. The [qualification record](docs/wiki/qualification.md) pins the independently built source, image and measured scope. Physical authenticators and the remaining release gate are listed there.
+Run the [local development quickstart](docs/wiki/quickstart.md) for contracts, owner login, scoped storage, Docker agents, local models and the website. The [audit CLI walkthrough](docs/wiki/local-audit.md) covers durable receipts, owner-signed commitments and shared decoding without a browser or model. Real-model tools, channel replies, authorized persistent knowledge and stateful restart have offline qualification. Browser checks cover CLI-approved sign-in, agent creation, chat, notes and interrupted-operation recovery using a virtual authenticator. The [qualification record](docs/wiki/qualification.md) pins the independently built source, image and measured scope. Physical authenticators and the remaining release gate are listed there.
 
 ## Development
 

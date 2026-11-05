@@ -180,6 +180,14 @@ class LocalServicesTests(unittest.TestCase):
                         services.prepare(root, root, root, None)
                     self.assertFalse(relay_file.exists())
                     local_state.write_private(relay_file, original_relay)
+                for name in ("service.key", "archive.db"):
+                    archive_file = directory / "audit" / name
+                    original_archive = archive_file.read_bytes()
+                    archive_file.unlink()
+                    with self.assertRaisesRegex(ValueError, "audit archive state is missing"):
+                        services.prepare(root, root, root, None)
+                    self.assertFalse(archive_file.exists())
+                    local_state.write_private(archive_file, original_archive)
                 secret.unlink()
                 with self.assertRaisesRegex(ValueError, "signer key is missing"):
                     services.prepare(root, root, root, None)

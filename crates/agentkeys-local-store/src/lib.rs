@@ -8,7 +8,7 @@ use agentkeys_protocol::{
     capability::{CapOp, DataClass},
     object_store::{self, ObjectAction, ObjectRequest, ObjectResponse},
 };
-use anyhow::{ensure, Context, Result};
+use anyhow::{ensure, Result};
 use axum::{
     extract::{DefaultBodyLimit, State},
     http::StatusCode,
@@ -84,7 +84,7 @@ impl LocalStore {
             "speech is not an object data class"
         );
         verify::validate_broker_public_key(&authority.broker_public_key)?;
-        prepare_database(database)?;
+        agentkeys_core::protected_file::prepare_database(database)?;
         let empty = database.metadata()?.len() == 0;
         let mut connection = Connection::open_with_flags(
             database,
@@ -341,60 +341,6 @@ pub fn router(store: Arc<LocalStore>) -> Router {
         }))
         .layer(DefaultBodyLimit::max(object_store::MAX_OBJECT_BYTES * 2))
         .with_state(store)
-}
-
-#[cfg(unix)]
-fn prepare_database(database: &Path) -> Result<()> {
-    use std::{
-        fs::OpenOptions,
-        os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
-    };
-    ensure!(database.is_absolute(), "database path must be absolute");
-    let directory = database
-        .parent()
-        .context("database requires a parent directory")?;
-    ensure!(
-        directory.canonicalize()? == directory,
-        "database directory must not traverse symbolic links"
-    );
-    let directory_file = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY)
-        .open(directory)?;
-    let metadata = directory_file.metadata()?;
-    ensure!(
-        metadata.uid() == unsafe { libc::geteuid() } && metadata.permissions().mode() & 0o077 == 0,
-        "database directory must be owned by this user with mode 0700"
-    );
-    let database_string = database.to_str().context("database path must be UTF-8")?;
-    match agentkeys_core::protected_file::open_read(database_string) {
-        Ok(_) => (),
-        Err(error)
-            if error
-                .downcast_ref::<std::io::Error>()
-                .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) =>
-        {
-            agentkeys_core::protected_file::write(database_string, &[], true)?;
-        }
-        Err(error) => return Err(error),
-    }
-    for suffix in ["-journal", "-wal", "-shm"] {
-        let companion = format!("{database_string}{suffix}");
-        match agentkeys_core::protected_file::open_read(&companion) {
-            Ok(_) => (),
-            Err(error)
-                if error
-                    .downcast_ref::<std::io::Error>()
-                    .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) => {}
-            Err(error) => return Err(error),
-        }
-    }
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn prepare_database(_database: &Path) -> Result<()> {
-    anyhow::bail!("local object storage requires Unix file permissions")
 }
 
 #[cfg(test)]

@@ -50,7 +50,7 @@ The final console static output (15 files), display output (15 files) and WASM p
 - Local software signing trusts the host administrator and provides no production wallet custody or TEE guarantee. Use fresh development identities only.
 - Browser acceptance uses a virtual authenticator. Physical PRF-capable devices, display enrollment and unlisted browser workflows require separate checks.
 - Owner-encrypted v3 credentials are readable through the owner CLI; delegated decryption of that format is unavailable. The development CLI's worker-encrypted path has separate delegated-read tests.
-- Optional audit archive, speech and OpenViking engine integrations are unavailable or unqualified. Canonical persistent knowledge works without OpenViking. Individual capability-ID revocation is unavailable; chain scope/device revocation and expiry remain enforced.
+- The November 3 evidence below predates the durable audit archive; its CLI qualification is documented in [local audit](./local-audit.md). Speech and OpenViking engine integrations remain unavailable or unqualified. Canonical persistent knowledge works without OpenViking. Individual capability-ID revocation is unavailable; chain scope/device revocation and expiry remain enforced.
 - Browser pending transactions are in memory. Keep the tab open until completion; reload or sign-out loses the recovery record.
 - Disk controls detect low space and excess usage; they are not hard per-agent filesystem quotas.
 - Same-version restart, retained data and bounded port-manifest migration have evidence. Arbitrary old-state upgrades, production data migration and bit-identical builds are not promised.

@@ -13,6 +13,7 @@ test('runtime persists turns, rejects wrong proofs and denies ungranted tool eff
   const bridgeToken = randomBytes(32).toString('hex');
   const modelToken = randomBytes(32).toString('hex');
   const modelRequests = [];
+  const auditRows = [];
   let effects = 0;
   let granted = false;
   const daemon = await listener(async (request, response) => {
@@ -23,6 +24,11 @@ test('runtime persists turns, rejects wrong proofs and denies ungranted tool eff
         route: '/record', requires_grant_prefix: 'record:', parameters: [], receipt_fields: ['recorded'] }] }));
     } else if (request.url === '/v1/sandbox/self/grants') {
       response.end(JSON.stringify({ services: granted ? ['record:example'] : [] }));
+    } else if (request.url === '/v1/sandbox/self/audit' && request.method === 'POST') {
+      const chunks = [];
+      for await (const chunk of request) chunks.push(chunk);
+      auditRows.push(JSON.parse(Buffer.concat(chunks)));
+      response.end(JSON.stringify({ ok: true }));
     } else if (request.url === '/record' && request.method === 'POST') {
       effects++;
       response.end(JSON.stringify({ recorded: true }));
@@ -44,6 +50,19 @@ test('runtime persists turns, rejects wrong proofs and denies ungranted tool eff
       function: { name: 'record_value', arguments: '{}' } }] } : { content: 'Local fixture reply.' };
     streamCompletion(response, body.model, delta, invoke ? 'tool_calls' : 'stop');
   });
+  async function requireAudit(isError) {
+    const deadline = Date.now() + 3_000;
+    while (!auditRows.some((row) => row.op_kind === 110 && row.op_body.tool === 'record_value'
+      && row.op_body.is_error === isError)) {
+      assert.ok(Date.now() < deadline, 'Tool result did not reach the authenticated audit sink');
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    const row = auditRows.find((row) => row.op_kind === 110 && row.op_body.is_error === isError);
+    assert.equal(row.result, isError ? 1 : 0);
+    assert.deepEqual(Object.keys(row.op_body).sort(), ['call_id', 'is_error', 'tool']);
+    assert.equal(JSON.stringify(auditRows).includes(bridgeToken), false);
+    assert.equal(JSON.stringify(auditRows).includes(modelToken), false);
+  }
   const values = environment(state, model.origin, modelToken, bridgeToken);
   const port = await freePort();
   let runtime;
@@ -59,6 +78,7 @@ test('runtime persists turns, rejects wrong proofs and denies ungranted tool eff
     const denied = await chat(port, bridgeToken, 'invoke action');
     assert.equal(denied.status, 200, JSON.stringify(denied.body));
     assert.equal(effects, 0);
+    await requireAudit(true);
     const deniedResult = modelRequests.at(-1).messages.at(-1);
     assert.equal(deniedResult.role, 'tool');
     assert.match(JSON.stringify(deniedResult.content), /needs a record:.*grant and this delegate holds none/);
@@ -74,6 +94,7 @@ test('runtime persists turns, rejects wrong proofs and denies ungranted tool eff
     const resumed = await chat(port, bridgeToken, 'invoke action');
     assert.equal(resumed.status, 200, JSON.stringify(resumed.body));
     assert.equal(effects, 1, 'The same advertised action must execute with its grant');
+    await requireAudit(false);
     assert.ok(JSON.stringify(modelRequests.at(-1).messages).includes(marker), 'A restarted runtime must restore prior conversation');
     assert.equal((await lstat(path.join(state, 'state'))).mode & 0o077, 0);
     assert.equal(runtime.output().includes(modelToken), false);

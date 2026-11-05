@@ -64,3 +64,29 @@ def memory(repository, state, options):
         arguments.extend(["--title", options.title])
     return subprocess.run(arguments, stdin=sys.stdin if planting else subprocess.DEVNULL,
         env=environment, timeout=90, umask=0o077).returncode
+
+
+def audit(repository, state, options):
+    identity, running, environment = command_context(repository, state, options.name)
+    action = "fetch" if options.action == "anchor" else options.action
+    arguments = [str(owner.executable(repository)), "local", "audit", action, *identity]
+    for option in ("hash", "id", "op_kind", "cursor", "limit"):
+        value = getattr(options, option, None)
+        if value is not None:
+            arguments.extend(["--" + option.replace("_", "-"), str(value)])
+    if options.body_stdin:
+        arguments.append("--body-stdin")
+    if options.action != "anchor":
+        return subprocess.run(arguments, stdin=sys.stdin if options.body_stdin else subprocess.DEVNULL,
+            env=environment, timeout=60, umask=0o077).returncode
+    import json
+    result = subprocess.run(arguments, env=environment, capture_output=True, text=True, timeout=60)
+    if result.returncode:
+        raise RuntimeError("Audit anchoring requires an accessible verified envelope")
+    record = json.loads(result.stdout)
+    envelope = record["envelope"]
+    receipt = owner.execute(repository,state,"audit",options.name,
+        actor=envelope["actor_omni"],audit_hash=record["envelope_hash"],audit_kind=envelope["op_kind"])
+    receipt.update(anchored=True,envelope_hash=record["envelope_hash"])
+    print(json.dumps(receipt))
+    return 0

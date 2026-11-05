@@ -4778,7 +4778,14 @@ async fn decode_audit_event(
             .as_ref()
             .filter(|h| !h.is_empty()),
     ) {
-        let client = agentkeys_core::audit::AuditClient::new(worker_url.as_str());
+        let bearer = state
+            .onboarding_session
+            .read()
+            .await
+            .as_ref()
+            .map(|session| session.j1.clone())
+            .unwrap_or_default();
+        let client = agentkeys_core::audit::AuditClient::with_bearer(worker_url.as_str(), bearer);
         let mut real = Vec::new();
         for h in hashes {
             match client.get_envelope(h).await {
