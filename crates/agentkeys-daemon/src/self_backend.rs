@@ -124,14 +124,17 @@ impl SelfBackend {
         intent_text: Option<String>,
     ) -> Result<String, String> {
         self.client()
-            .audit_append(AuditAppendInput {
-                operator_omni: normalize_omni_0x(&self.cfg.operator_omni),
-                actor_omni: normalize_omni_0x(&self.cfg.actor_omni),
-                op_kind,
-                op_body,
-                result,
-                intent_text,
-            })
+            .audit_append_authenticated(
+                AuditAppendInput {
+                    operator_omni: normalize_omni_0x(&self.cfg.operator_omni),
+                    actor_omni: normalize_omni_0x(&self.cfg.actor_omni),
+                    op_kind,
+                    op_body,
+                    result,
+                    intent_text,
+                },
+                Some(&self.bearer),
+            )
             .await
             .map(|appended| appended.envelope_hash)
             .map_err(|e| format!("audit append: {e}"))

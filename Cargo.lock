@@ -505,15 +505,18 @@ dependencies = [
  "hex",
  "http-body-util",
  "reqwest",
+ "rusqlite",
  "serde",
  "serde_json",
  "sha3",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tower 0.4.13",
  "tower-http 0.5.2",
  "tracing",
  "tracing-subscriber",
+ "zeroize",
 ]
 
 [[package]]

@@ -8,8 +8,33 @@
 
 /// `https://<worker><stack-suffix>.<zone>` for the broker at `broker_url`, or
 /// `None` when the host is not a recognised broker name (a bare IP, a
-/// loopback dev broker, a host without a zone).
+/// loopback dev broker, a host without a zone). Local audit requests instead
+/// use the validated loopback broker origin for its authenticated gateway.
 pub fn derive_worker_url(broker_url: &str, worker: &str) -> Option<String> {
+    if worker == "audit" {
+        if let Ok(url) = url::Url::parse(broker_url) {
+            let host = url
+                .host_str()
+                .unwrap_or("")
+                .trim_start_matches('[')
+                .trim_end_matches(']');
+            let local = host == "localhost"
+                || host
+                    .parse::<std::net::IpAddr>()
+                    .is_ok_and(|ip| ip.is_loopback());
+            if url.scheme() == "http"
+                && local
+                && url.username().is_empty()
+                && url.password().is_none()
+                && url.query().is_none()
+                && url.fragment().is_none()
+                && url.path() == "/"
+            {
+                return Some(broker_url.trim_end_matches('/').to_owned());
+            }
+        }
+    }
+
     let host = broker_url
         .rsplit("://")
         .next()

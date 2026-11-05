@@ -128,6 +128,14 @@ fn worker_url(
     name: &str,
     configured: Option<String>,
 ) -> Result<Option<String>, BrokerError> {
+    if name == "audit"
+        && configured
+            .as_deref()
+            .is_none_or(|value| value.trim().is_empty())
+        && agentkeys_core::chain_profile::is_loopback_http_endpoint(broker)
+    {
+        return Ok(None);
+    }
     match configured.filter(|value| !value.trim().is_empty()) {
         Some(value) if agentkeys_protocol::worker_override_matches_broker(&value, broker) => {
             Ok(Some(value))

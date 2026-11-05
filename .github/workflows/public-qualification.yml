@@ -47,6 +47,8 @@ jobs:
           cargo clippy --workspace --all-targets -- -D warnings
       - name: Shared component checks
         run: python3 terrier test focused --component ui --component display --component dsh --component managed --component contracts --component provisioner --online --report "${RUNNER_TEMP}/component-checks.json"
+      - name: Build the public website required by CLI acceptance
+        run: npm --prefix apps/parent-control run build
       - name: Build the public service executables
         run: cargo build --offline --locked --workspace --bins
       - name: Prepare synthetic browser fixtures
@@ -58,7 +60,7 @@ jobs:
       - name: Qualify managed Docker isolation and disk policy
         run: cargo test --offline --locked -p agentkeys-runtime --test docker_managed -- --ignored --nocapture
       - name: Qualify actual local services and Docker lifecycle
-        run: python3 terrier test qualification --component chain --component services --component storage --component agents --component ui --component provisioner --component website --report "${RUNNER_TEMP}/service-qualification.json"
+        run: python3 terrier test qualification --component audit --component chain --component services --component storage --component agents --component ui --component provisioner --component website --report "${RUNNER_TEMP}/service-qualification.json"
       - name: Summarize available reports and exact image
         if: always()
         run: |

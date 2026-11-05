@@ -74,6 +74,15 @@ def build_parser():
     memory_parser.add_argument("--key", help="Stable entry key; required for plant")
     memory_parser.add_argument("--title")
     memory_parser.add_argument("--body-stdin", action="store_true", help="Read exact UTF-8 knowledge body for plant")
+    audit_parser = commands.add_parser("audit", help="Append, anchor and inspect durable local audit records")
+    audit_parser.add_argument("action", choices=["append", "fetch", "anchor", "list", "recent", "decode"])
+    audit_parser.add_argument("--name", required=True)
+    audit_parser.add_argument("--hash")
+    audit_parser.add_argument("--id")
+    audit_parser.add_argument("--cursor")
+    audit_parser.add_argument("--limit", type=int, default=20)
+    audit_parser.add_argument("--op-kind", type=int)
+    audit_parser.add_argument("--body-stdin", action="store_true")
     credential_parser = commands.add_parser("cred", help="Use an existing local owner session for credentials")
     credential_parser.add_argument("action", choices=["store", "fetch"])
     credential_parser.add_argument("service")
@@ -180,6 +189,9 @@ def main(argv=None):
         if arguments.command == "memory":
             with local_state.exclusive_lock(state / "operation.lock"):
                 return data.memory(repository, state, arguments)
+        if arguments.command == "audit":
+            with local_state.exclusive_lock(state / "operation.lock"):
+                return data.audit(repository, state, arguments)
         if arguments.command == "cred":
             with local_state.exclusive_lock(state / "operation.lock"):
                 return data.credential(repository, state, arguments.action, arguments.name,

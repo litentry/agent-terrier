@@ -15,6 +15,7 @@ import SystemPrompt from '@deepseek-ai/dsh-system-prompt';
 import ToolRuntime from '@deepseek-ai/dsh-tools';
 import Credentials from '@agentkeys/dsh-suite/credentials';
 import * as Actions from '@agentkeys/dsh-suite/actions';
+import * as Audit from '@agentkeys/dsh-suite/audit';
 import * as Guard from '@agentkeys/dsh-suite/guard';
 import * as Presets from '@agentkeys/dsh-suite/presets';
 import * as Sessions from '@agentkeys/dsh-suite/sessions';
@@ -119,6 +120,7 @@ async function main() {
     await context.plugin(Guard, { bridgeToken, grantsUrl });
     await context.plugin(Presets, { bridgeToken, grantsUrl });
     await context.plugin(Actions, { bridgeToken, daemonUrl: daemonURL.toString() });
+    await context.plugin(Audit, { bridgeToken, auditUrl: new URL('/v1/sandbox/self/audit', daemonURL).toString() });
     await context.plugin(AgentLoop, { agents: [] });
     await context.plugin(Sessions, { homeDir: values['state-dir'] });
     await context.plugin(WebServer, { host: '127.0.0.1', port });

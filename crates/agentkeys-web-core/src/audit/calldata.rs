@@ -528,6 +528,22 @@ pub fn word_to_usize(word: &[u8; 32]) -> Option<usize> {
     usize::try_from(u64::from_be_bytes(low)).ok()
 }
 
+pub fn append_v2_calldata(
+    operator: &[u8; 32],
+    actor: &[u8; 32],
+    kind: u8,
+    hash: &[u8; 32],
+) -> Vec<u8> {
+    let mut encoded = selector("appendV2(bytes32,bytes32,uint8,bytes32)").to_vec();
+    encoded.extend_from_slice(operator);
+    encoded.extend_from_slice(actor);
+    let mut word = [0u8; 32];
+    word[31] = kind;
+    encoded.extend_from_slice(&word);
+    encoded.extend_from_slice(hash);
+    encoded
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -11,6 +11,7 @@ This document owns the public component inventory and trust boundaries. Start wi
 | Native service client | `crates/agentkeys-backend-client` | CLI and daemon |
 | Browser service client | `crates/agentkeys-web-core` | Web console and browser display |
 | Authorization and request coordination | `crates/agentkeys-broker-server` | Product clients and workers |
+| Durable local audit archive | `agentkeys-worker-audit::archive`, existing protocol/envelope helpers and protected file owner | Trusted local emitters; owner-authorized broker gateway, CLI and shared website audit reader |
 | Independent worker verification | `crates/agentkeys-core::capability_verify` | Storage and compute workers |
 | Smart contracts and contract tests | `crates/agentkeys-chain` | Local deployment and chain clients |
 | Headless product operations | `crates/agentkeys-cli`, `crates/agentkeys-daemon` | Developers, tests and the local manager |
@@ -93,7 +94,7 @@ Channel records bind encrypted content to object keys. Publish is create-only; s
 
 The console and display share `design-system`, a root npm workspace/lockfile and one WASM build owner. Card and web API types come from `agentkeys-protocol` and generated bindings; do not add handwritten copies. Runtime backend configuration has one validated owner. Managed bridge calls require the broker/session/binding and never fall back to an anonymous direct proxy. Worker/signer CORS permits only the selected exact website origin and does not bypass authorization.
 
-An optional unconfigured audit archive is represented as null; append/fetch fails explicitly before transport. On-chain audit reads retain their protected route. Browser authentication is in memory, and pending records are lost on reload/sign-out. Physical passkeys, display enrollment and auxiliary services have separate acceptance limits. See [website behavior](wiki/local-website.md) and the current [qualification scope](wiki/qualification.md).
+The local supervisor configures a protected durable audit archive behind the broker. Owner reads verify the current chain binding; scoped runtime emitters can append only their own allowed event kinds. Existing storage emitters use a generated stack credential. The archive retains canonical CBOR off-chain, and explicit owner signing anchors its hash; neither the broker nor archive signs chain writes. See [local audit](wiki/local-audit.md). A standalone unconfigured archive is represented as null; append/fetch fails explicitly before transport. On-chain audit reads retain their protected route. Browser authentication is in memory, and pending records are lost on reload/sign-out. Physical passkeys, display enrollment and auxiliary services have separate acceptance limits. See [website behavior](wiki/local-website.md) and the current [qualification scope](wiki/qualification.md).
 
 ## Migration gates
 

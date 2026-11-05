@@ -741,7 +741,7 @@ enum ChainAction {
     )]
     VerifyOwner {
         #[arg(long)]
-        transaction: String,
+        transaction: Option<String>,
     },
     #[command(about = "List built-in chain profile names")]
     List,
@@ -1351,6 +1351,7 @@ enum AgentAction {
 
 #[derive(Subcommand)]
 enum LocalAction {
+    Audit(agentkeys_cli::local_audit::AuditOptions),
     Memory(agentkeys_cli::local_memory::MemoryOptions),
     Browser(agentkeys_cli::local_browser::BrowserOptions),
     Channel(agentkeys_cli::local_channel::ChannelOptions),
@@ -1394,9 +1395,12 @@ async fn cmd_chain(ctx: &CommandContext, action: &ChainAction) -> anyhow::Result
                 "owner plan exceeds input size limit"
             );
             let plan = serde_json::from_str(&input)?;
-            Ok(serde_json::to_string(
-                &agentkeys_cli::local_owner::verify(ctx, transaction, plan).await?,
-            )?)
+            Ok(serde_json::to_string(&match transaction {
+                Some(transaction) => {
+                    agentkeys_cli::local_owner::verify(ctx, transaction, plan).await?
+                }
+                None => agentkeys_cli::local_owner::recover(ctx, plan).await?,
+            })?)
         }
         ChainAction::List => Ok(ChainProfile::list_builtin_names().join("\n")),
         ChainAction::Show { name } => {
@@ -1798,6 +1802,11 @@ async fn main() {
         Commands::Local {
             action: LocalAction::Agent(options),
         } => agentkeys_cli::local_agent::execute(&ctx, options)
+            .await
+            .and_then(|result| serde_json::to_string(&result).map_err(Into::into)),
+        Commands::Local {
+            action: LocalAction::Audit(options),
+        } => agentkeys_cli::local_audit::execute(&ctx, options)
             .await
             .and_then(|result| serde_json::to_string(&result).map_err(Into::into)),
         Commands::Local {

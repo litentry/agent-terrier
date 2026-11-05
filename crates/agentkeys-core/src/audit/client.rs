@@ -1,106 +1,212 @@
-//! HTTP client for emitting `AuditEnvelope v1` to the audit-service worker
-//! (`agentkeys-worker-audit`). Used by future emit sites in
-//! credentials-service / memory-service / signer / broker / payment-service
-//! / email-service / SidecarRegistry / K3EpochCounter.
-//!
-//! ## Why a client lives in core, not next to the worker
-//!
-//! Multiple emit sites in different crates need the same wire shape. Putting
-//! the client in `agentkeys-core` makes the wire-level contract testable in
-//! one place and shared by every emitter.
-//!
-//! ## Emit-and-forget semantics
-//!
-//! Audit emits are best-effort from the emitter's perspective — the chain
-//! commitment is the durability mechanism, not the worker's in-memory map.
-//! Emitters that need guaranteed delivery should either retry on transient
-//! failure or fall back to direct on-chain `CredentialAudit.append`.
-
-use serde::Deserialize;
-
 use super::{AuditEnvelope, AuditError};
+pub use agentkeys_protocol::AuditAppendV2Resp as AppendV2Response;
 pub use agentkeys_web_core::audit::client::envelope_for;
 use agentkeys_web_core::audit::client::envelope_to_json;
+use std::time::Duration;
 
-/// Response from `POST /v1/audit/append/v2`.
-#[derive(Debug, Clone, Deserialize)]
-pub struct AppendV2Response {
-    pub ok: bool,
-    pub envelope_hash: String,
-}
-
-/// Client for the audit-service worker's V2 surface.
+pub const MAX_ARCHIVE_RESPONSE_BYTES: usize = 32 * 1024;
 pub struct AuditClient {
     base_url: String,
     http: reqwest::Client,
+    bearer: Result<Option<zeroize::Zeroizing<String>>, String>,
+    service_credential: bool,
 }
-
 impl AuditClient {
-    /// Construct with a worker base URL (no trailing slash). Defaults to
-    /// `$AGENTKEYS_AUDIT_WORKER_URL` then `https://audit.example.invalid`
-    /// — operators override per deployment.
     pub fn new(base_url: impl Into<String>) -> Self {
+        let bearer = std::env::var_os("AGENTKEYS_AUDIT_TOKEN_FILE")
+            .map(|path| {
+                crate::protected_file::read_token(std::path::Path::new(&path))
+                    .map_err(|_| "audit service credential is unavailable".to_owned())
+            })
+            .transpose();
         Self {
-            base_url: base_url.into().trim_end_matches('/').to_string(),
-            http: reqwest::Client::new(),
+            base_url: base_url.into().trim_end_matches('/').to_owned(),
+            http: reqwest::Client::builder()
+                .no_proxy()
+                .redirect(reqwest::redirect::Policy::none())
+                .timeout(Duration::from_secs(10))
+                .build()
+                .expect("audit HTTP client"),
+            bearer,
+            service_credential: std::env::var_os("AGENTKEYS_AUDIT_TOKEN_FILE").is_some(),
         }
     }
-
     pub fn from_env() -> Self {
-        let url = std::env::var("AGENTKEYS_AUDIT_WORKER_URL")
-            .unwrap_or_else(|_| "https://audit.example.invalid".to_string());
-        Self::new(url)
+        Self::new(std::env::var("AGENTKEYS_AUDIT_WORKER_URL").unwrap_or_default())
     }
-
-    /// Emit a fully-constructed envelope. Returns the `envelope_hash` the
-    /// worker computed (which the caller can verify locally via
-    /// `envelope.envelope_hash()`).
-    pub async fn append(&self, envelope: &AuditEnvelope) -> Result<AppendV2Response, AuditError> {
-        let url = format!("{}/v1/audit/append/v2", self.base_url);
-        let body = envelope_to_json(envelope)?;
-        let resp = self
-            .http
-            .post(&url)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| AuditError::Invalid(format!("POST {url}: {e}")))?;
-        let status = resp.status();
-        if !status.is_success() {
-            let text = resp.text().await.unwrap_or_default();
-            return Err(AuditError::Invalid(format!(
-                "audit worker returned {status}: {text}"
-            )));
+    pub fn with_bearer(base_url: impl Into<String>, bearer: String) -> Self {
+        let mut client = Self::new(base_url);
+        client.bearer = Ok(Some(zeroize::Zeroizing::new(bearer)));
+        client.service_credential = false;
+        client
+    }
+    fn request(
+        &self,
+        method: reqwest::Method,
+        route: &str,
+    ) -> Result<reqwest::RequestBuilder, AuditError> {
+        if self.base_url.is_empty() {
+            return Err(AuditError::Invalid(
+                "audit archive is not configured".into(),
+            ));
         }
-        resp.json::<AppendV2Response>()
-            .await
-            .map_err(|e| AuditError::Invalid(format!("parse append response: {e}")))
-    }
-
-    /// Fetch an envelope by its `envelope_hash` (0x-prefixed hex). Returns
-    /// `None` if the worker doesn't have it (404).
-    pub async fn get_envelope(&self, envelope_hash: &str) -> Result<Option<Vec<u8>>, AuditError> {
-        let url = format!("{}/v1/audit/envelope/{}", self.base_url, envelope_hash);
-        let resp = self
+        if self.service_credential
+            && !crate::chain_profile::is_loopback_http_endpoint(&self.base_url)
+        {
+            return Err(AuditError::Invalid(
+                "audit service credential requires loopback transport".into(),
+            ));
+        }
+        let mut request = self
             .http
-            .get(&url)
+            .request(method, format!("{}{route}", self.base_url));
+        if let Some(token) = self
+            .bearer
+            .as_ref()
+            .map_err(|message| AuditError::Invalid(message.clone()))?
+        {
+            request = request.bearer_auth(token.as_str());
+        }
+        Ok(request)
+    }
+    async fn response(
+        &self,
+        request: reqwest::RequestBuilder,
+    ) -> Result<Option<Vec<u8>>, AuditError> {
+        let mut response = request
             .send()
             .await
-            .map_err(|e| AuditError::Invalid(format!("GET {url}: {e}")))?;
-        let status = resp.status();
-        if status == reqwest::StatusCode::NOT_FOUND {
+            .map_err(|_| AuditError::Invalid("audit archive transport failed".into()))?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
             return Ok(None);
         }
-        if !status.is_success() {
-            let text = resp.text().await.unwrap_or_default();
+        if !response.status().is_success() {
             return Err(AuditError::Invalid(format!(
-                "audit worker returned {status}: {text}"
+                "audit archive HTTP {}",
+                response.status().as_u16()
             )));
         }
-        let bytes = resp
-            .bytes()
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
             .await
-            .map_err(|e| AuditError::Invalid(format!("read body: {e}")))?;
-        Ok(Some(bytes.to_vec()))
+            .map_err(|_| AuditError::Invalid("audit response failed".into()))?
+        {
+            if bytes.len() + chunk.len() > MAX_ARCHIVE_RESPONSE_BYTES {
+                return Err(AuditError::Invalid("audit response exceeds limit".into()));
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        Ok(Some(bytes))
+    }
+    pub async fn append_json(
+        &self,
+        envelope: &agentkeys_protocol::AuditAppendV2,
+    ) -> Result<AppendV2Response, AuditError> {
+        let request = self
+            .request(reqwest::Method::POST, "/v1/audit/append/v2")?
+            .json(envelope);
+        let bytes = self
+            .response(request)
+            .await?
+            .ok_or_else(|| AuditError::Invalid("audit append was not accepted".into()))?;
+        let receipt: AppendV2Response = serde_json::from_slice(&bytes)
+            .map_err(|_| AuditError::Invalid("invalid audit receipt".into()))?;
+        if !receipt.ok || !valid_hash(&receipt.envelope_hash) {
+            return Err(AuditError::Invalid("invalid audit receipt".into()));
+        }
+        Ok(receipt)
+    }
+    pub async fn append(&self, envelope: &AuditEnvelope) -> Result<AppendV2Response, AuditError> {
+        let body = serde_json::from_value(envelope_to_json(envelope)?)
+            .map_err(|_| AuditError::Invalid("invalid audit envelope".into()))?;
+        self.append_json(&body).await
+    }
+    pub async fn list_envelopes(
+        &self,
+        operator: Option<&str>,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<agentkeys_protocol::AuditArchivePage, AuditError> {
+        if limit == 0 || limit > 100 || cursor.is_some_and(|value| !valid_hash(value)) {
+            return Err(AuditError::Invalid("invalid audit page selection".into()));
+        }
+        let mut request = self
+            .request(reqwest::Method::GET, "/v1/audit/envelopes")?
+            .query(&[("limit", limit)]);
+        if let Some(operator) = operator {
+            request = request.query(&[("operator_omni", operator)]);
+        }
+        if let Some(cursor) = cursor {
+            request = request.query(&[("cursor", cursor)]);
+        }
+        let bytes = self
+            .response(request)
+            .await?
+            .ok_or_else(|| AuditError::Invalid("audit index unavailable".into()))?;
+        serde_json::from_slice(&bytes)
+            .map_err(|_| AuditError::Invalid("invalid audit index".into()))
+    }
+    pub async fn get_envelope(&self, hash: &str) -> Result<Option<Vec<u8>>, AuditError> {
+        self.get_envelope_for_operator(hash, None).await
+    }
+    pub async fn get_envelope_for_operator(
+        &self,
+        hash: &str,
+        operator: Option<&str>,
+    ) -> Result<Option<Vec<u8>>, AuditError> {
+        if !valid_hash(hash) {
+            return Err(AuditError::Invalid("invalid audit hash".into()));
+        }
+        let mut request =
+            self.request(reqwest::Method::GET, &format!("/v1/audit/envelope/{hash}"))?;
+        if let Some(operator) = operator {
+            request = request.query(&[("operator_omni", operator)]);
+        }
+        let bytes = self.response(request).await?;
+        if let Some(bytes) = &bytes {
+            let envelope = AuditEnvelope::from_canonical_cbor(bytes)?;
+            if format!("0x{}", hex::encode(envelope.envelope_hash()?)) != hash.to_ascii_lowercase()
+            {
+                return Err(AuditError::Invalid("audit envelope hash mismatch".into()));
+            }
+        }
+        Ok(bytes)
+    }
+}
+fn valid_hash(value: &str) -> bool {
+    value.len() == 66
+        && value.starts_with("0x")
+        && value[2..].bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stack_credential_cannot_be_sent_to_a_remote_or_credentialed_endpoint() {
+        let credential = format!("{:064x}", 7);
+        let mut client = AuditClient::with_bearer("http://127.0.0.1:12345", credential.clone());
+        client.service_credential = true;
+        let request = client
+            .request(reqwest::Method::GET, "/v1/audit/envelopes")
+            .unwrap()
+            .build()
+            .unwrap();
+        assert_eq!(
+            request.headers()["authorization"],
+            format!("Bearer {credential}")
+        );
+        for endpoint in [
+            "https://archive.example",
+            "http://user:password@127.0.0.1:12345",
+            "http://192.0.2.1",
+        ] {
+            client.base_url = endpoint.into();
+            assert!(client
+                .request(reqwest::Method::GET, "/v1/audit/envelopes")
+                .is_err());
+        }
     }
 }

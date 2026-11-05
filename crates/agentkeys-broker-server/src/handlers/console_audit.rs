@@ -88,21 +88,7 @@ pub async fn recent(
     headers: HeaderMap,
     Query(query): Query<ConsoleAuditQuery>,
 ) -> Result<Json<ConsoleAuditPage>, BrokerError> {
-    let claims = super::wallet::require_master_session(&headers, &state)?;
-    if !matches!(claims.agentkeys.identity_type.as_str(), "evm" | "passkey") {
-        return Err(BrokerError::Unauthorized(
-            "verified master session required".into(),
-        ));
-    }
-    state
-        .config
-        .login_access
-        .require_omni(&state, &claims.agentkeys.omni_account)
-        .await?;
-    let operator = format!(
-        "0x{}",
-        hex::encode(decode_word(&claims.agentkeys.omni_account).map_err(invalid)?)
-    );
+    let operator = super::audit_archive::operator(&state, &headers).await?;
     let (url, registry) = super::accept::load_chain_read_config().map_err(upstream)?;
     let contract = super::anchor::audit_contract_for_registry(&registry)
         .map(|address| format!("0x{}", hex::encode(address)))

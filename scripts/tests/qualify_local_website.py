@@ -70,7 +70,7 @@ class LocalWebsiteQualification(LocalOwnerFixture):
             started = self.stack(state, "start")
             group = started["services"]
             self.assertTrue(started["ready"])
-            self.assertEqual(len(group["services"]), 14)
+            self.assertEqual(len(group["services"]), 15)
             address = group["services"]["website"]["url"]
             broker = group["services"]["broker"]["url"]
             self.assertEqual(address, f"http://localhost:{web_port}")
@@ -147,7 +147,8 @@ class LocalWebsiteQualification(LocalOwnerFixture):
             config_status, config_body, config_headers = request(broker + "/v1/console/config", origin=address)
             self.assertEqual(config_status, 200, config_body)
             configuration = json.loads(config_body)
-            self.assertIsNone(configuration["audit_url"])
+            self.assertEqual(configuration["audit_url"], broker)
+            self.assertEqual(request(broker + "/v1/audit/envelopes", origin=address)[0], 401)
             self.assertEqual(config_headers.get("Access-Control-Allow-Origin"), address)
             for field, service_name in (("signer_url", "signer"), ("config_url", "config"),
                     ("memory_url", "memory"), ("credential_url", "credentials"), ("channel_url", "channel"),

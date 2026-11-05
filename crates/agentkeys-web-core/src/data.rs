@@ -513,17 +513,23 @@ impl DataClient {
 
     pub async fn audit_append(
         &self,
+        session: &DataSession<'_>,
         envelope: &AuditAppendV2,
     ) -> Result<AuditAppendV2Resp, DataError> {
         self.send(
             self.http
                 .post(endpoint(self.audit_endpoint()?, "/v1/audit/append/v2"))
+                .bearer_auth(session.bearer)
                 .json(envelope),
         )
         .await
     }
 
-    pub async fn audit_fetch(&self, hash: &str) -> Result<Vec<u8>, DataError> {
+    pub async fn audit_fetch(
+        &self,
+        session: &DataSession<'_>,
+        hash: &str,
+    ) -> Result<Vec<u8>, DataError> {
         if hash.len() != 66
             || !hash.starts_with("0x")
             || !hash[2..].bytes().all(|byte| byte.is_ascii_hexdigit())
@@ -536,6 +542,7 @@ impl DataClient {
                 self.audit_endpoint()?,
                 &format!("/v1/audit/envelope/{hash}"),
             ))
+            .bearer_auth(session.bearer)
             .send()
             .await
             .map_err(|error| DataError::Transport(error.to_string()))?;
@@ -834,6 +841,14 @@ mod tests {
     #[tokio::test]
     async fn optional_audit_archive_refuses_reads_and_writes_without_transport() {
         use std::sync::atomic::{AtomicUsize, Ordering};
+        let device = DeviceIdentity::from_random_bytes(&[1; 32]).unwrap();
+        let session = DataSession {
+            bearer: "synthetic-session",
+            operator_omni: "owner",
+            actor_omni: "owner",
+            device: &device,
+            now_unix_seconds: 1234,
+        };
         let requests = Arc::new(AtomicUsize::new(0));
         let content = b"synthetic-audit-envelope".to_vec();
         let hash = format!(
@@ -879,17 +894,21 @@ mod tests {
             intent_text: None,
             intent_commitment: None,
         };
-        assert_eq!(client.audit_fetch(&hash).await.unwrap(), content);
+        assert_eq!(client.audit_fetch(&session, &hash).await.unwrap(), content);
         assert_eq!(
-            client.audit_append(&envelope).await.unwrap().envelope_hash,
+            client
+                .audit_append(&session, &envelope)
+                .await
+                .unwrap()
+                .envelope_hash,
             hash
         );
         assert_eq!(requests.load(Ordering::SeqCst), 2);
         for endpoint in [None, Some(String::new())] {
             client.endpoints.audit_url = endpoint;
             for error in [
-                client.audit_fetch(&hash).await.unwrap_err(),
-                client.audit_append(&envelope).await.unwrap_err(),
+                client.audit_fetch(&session, &hash).await.unwrap_err(),
+                client.audit_append(&session, &envelope).await.unwrap_err(),
             ] {
                 assert!(
                     matches!(error, DataError::Invalid(ref message) if message == "Audit archive is not configured")

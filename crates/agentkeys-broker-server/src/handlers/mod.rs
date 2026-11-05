@@ -63,3 +63,5 @@ pub mod console_audit;
 pub mod hosted_signer_pending;
 
 pub mod accept_receipt;
+
+pub mod audit_archive;

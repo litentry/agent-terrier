@@ -33,9 +33,10 @@ STORE_BINARY = "agentkeys-local-store"
 SIGNER_BINARY = "agentkeys-local-signer"
 RELAY_BINARY = "agentkeys-gate"
 BUNDLER_BINARY = "agentkeys-bundler"
-BINARIES = (BROKER_BINARY, STORE_BINARY, SIGNER_BINARY, RELAY_BINARY, BUNDLER_BINARY, *WORKERS.values(), *COMPUTE_WORKERS.values())
+AUDIT_BINARY = "agentkeys-worker-audit"
+BINARIES = (BROKER_BINARY, STORE_BINARY, SIGNER_BINARY, RELAY_BINARY, BUNDLER_BINARY, AUDIT_BINARY, *WORKERS.values(), *COMPUTE_WORKERS.values())
 BROWSER_PORTS_VERSION = 10
-MANIFEST_VERSION = BROWSER_PORTS_VERSION
+MANIFEST_VERSION = 11
 BROWSER_SERVICES = ("signer", *WORKERS, *COMPUTE_WORKERS)
 
 
@@ -81,7 +82,7 @@ def available_port():
 
 
 def validate_manifest(manifest, fingerprint):
-    if (not isinstance(manifest, dict) or manifest.get("version") not in (1, 2, 3, 4, 5, 6, 7, 8, 9, MANIFEST_VERSION) or manifest.get("development_only") is not True
+    if (not isinstance(manifest, dict) or manifest.get("version") not in tuple(range(1, MANIFEST_VERSION + 1)) or manifest.get("development_only") is not True
             or manifest.get("profile_identity") != fingerprint
             or type(manifest.get("initialized")) is not bool
             or type(manifest.get("broker_port")) is not int
@@ -184,6 +185,15 @@ def prepare(repository, state, binaries, port, runtime_image=None, docker_socket
             local_state.write_private(path, secrets.token_hex(32).encode())
         else:
             local_state.write_json(path, {})
+    audit_directory = local_state.private_directory(directory / "audit")
+    for name in ("service.key", "archive.db"):
+        path = audit_directory / name
+        if path.exists() or path.is_symlink():
+            os.close(local_state.open_private(path))
+        elif manifest["initialized"] and manifest["version"] >= MANIFEST_VERSION:
+            raise ValueError("Existing audit archive state is missing; restore the original file")
+        else:
+            local_state.write_private(path, secrets.token_hex(32).encode() if name == "service.key" else b"")
     prepare_submitter(state, binaries, manifest, running_chain, profile)
     manifest["runtime"] = runtime
     manifest["model_runner"] = model_runner
@@ -483,8 +493,15 @@ def serve(repository, state, configured):
                 ["--development", "--profile", profile_path, "--bind", "127.0.0.1:0",
                  "--signer-key-file", directory / "bundler/submitter.key"],
                 contracts.tool_environment(), directory / "bundler.log", children)
+            components["audit"] = launch(binaries / AUDIT_BINARY,
+                ["--development", "--profile", profile_path, "--database", directory / "audit/archive.db",
+                 "--token-file", directory / "audit/service.key"],
+                contracts.tool_environment(), directory / "audit.log", children)
             environment = broker_environment(broker_directory, profile_path, manifest["broker_port"])
             environment["BROKER_BROWSER_ORIGINS"] = browser_origin
+            environment.update(AGENTKEYS_AUDIT_WORKER_URL=components["audit"][1],
+                AGENTKEYS_AUDIT_TOKEN_FILE=str(directory / "audit/service.key"),
+                AGENTKEYS_WORKER_AUDIT_URL=f'http://127.0.0.1:{manifest["broker_port"]}')
             environment.update(AGENTKEYS_GATE_ADMIN_URL=components["model_relay"][1],
                 AGENTKEYS_GATE_ADMIN_TOKEN_FILE=str(relay_directory / "admin.key"),
                 AGENTKEYS_GATE_TURN_URL=components["model_relay"][1] + "/v1", AGENTKEYS_BUNDLER_URL=components["bundler"][1],
@@ -512,10 +529,13 @@ def serve(repository, state, configured):
                     [*common, "--database", worker_directory / "objects.db", "--data-class", data_class],
                     contracts.tool_environment(), directory / f"{data_class}-store.log", children)
                 components[data_class + "_store"] = store
+                worker_environment = contracts.tool_environment()
+                worker_environment.update(AGENTKEYS_AUDIT_WORKER_URL=components["audit"][1],
+                    AGENTKEYS_AUDIT_TOKEN_FILE=str(directory / "audit/service.key"), AGENTKEYS_WORKER_REQUIRE_AUDIT="1")
                 components[data_class] = launch_reserved(data_class, binaries / worker_binary,
                     [*common, "--storage-url", store[1], "--development-kek-file", worker_directory / "development.key",
                      "--browser-origins", browser_origin],
-                    contracts.tool_environment())
+                    worker_environment)
 
             for name, worker_binary in COMPUTE_WORKERS.items():
                 components[name] = launch_reserved(name, binaries / worker_binary,

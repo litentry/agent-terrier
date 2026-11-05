@@ -2213,11 +2213,11 @@ pub struct CredStoreResp {
 /// integration smoke test.
 pub const ENVELOPE_VERSION: u8 = 1;
 
-/// Audit-worker `/v1/audit/append/v2` request body. Mirrors
-/// `agentkeys_worker_audit::handlers::AppendV2Request`.
+/// Shared audit-worker `/v1/audit/append/v2` request body.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuditAppendV2 {
     pub version: u8,
+    #[serde(default)]
     pub ts_unix: u64,
     pub actor_omni: String,
     pub operator_omni: String,
@@ -2228,10 +2228,16 @@ pub struct AuditAppendV2 {
     pub intent_commitment: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuditAppendV2Resp {
     pub ok: bool,
     pub envelope_hash: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuditArchivePage {
+    pub envelope_hashes: Vec<String>,
+    pub next_cursor: Option<String>,
 }
 
 // ── high-level inputs / results (what the trait/callers pass + get back) ─────

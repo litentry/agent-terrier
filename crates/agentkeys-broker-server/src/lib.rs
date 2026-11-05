@@ -61,6 +61,16 @@ pub fn create_router(state: SharedState) -> Router {
         )
         .route("/v1/console/fleet", get(handlers::console::fleet))
         .route("/v1/console/audit", get(handlers::console_audit::recent))
+        .route("/v1/audit/envelopes", get(handlers::audit_archive::list))
+        .route(
+            "/v1/audit/append/v2",
+            post(handlers::audit_archive::append)
+                .layer(axum::extract::DefaultBodyLimit::max(32 * 1024)),
+        )
+        .route(
+            "/v1/audit/envelope/:hash",
+            get(handlers::audit_archive::fetch),
+        )
         .route(
             "/v1/hosted/signer/start",
             post(handlers::hosted_signer::start),

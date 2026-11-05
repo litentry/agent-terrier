@@ -296,7 +296,7 @@ impl ConsoleAudit {
             .ok_or_else(|| invalid("audit event not found"))?;
         let mut envelope = None;
         if let Some(hash) = &record.envelope_hash {
-            let bytes = self.data.audit_fetch(hash).await?;
+            let bytes = self.data.audit_fetch(session, hash).await?;
             envelope = Some(decode_committed_envelope(
                 &record,
                 session.operator_omni,

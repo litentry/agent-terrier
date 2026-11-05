@@ -122,10 +122,7 @@ impl ConsoleService {
     }
 
     pub async fn configuration(broker: &BrokerClient) -> Result<ConsoleConfig, DataError> {
-        broker
-            .get_json("/v1/console/config", None)
-            .await
-            .map_err(broker_error)
+        broker.console_config().await.map_err(broker_error)
     }
     pub async fn fleet(&self, session: &DataSession<'_>) -> Result<ConsoleFleet, DataError> {
         self.broker

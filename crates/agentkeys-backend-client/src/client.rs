@@ -572,6 +572,14 @@ impl BackendClient {
         &self,
         input: AuditAppendInput,
     ) -> Result<AuditAppendResult, BackendError> {
+        self.audit_append_authenticated(input, None).await
+    }
+
+    pub async fn audit_append_authenticated(
+        &self,
+        input: AuditAppendInput,
+        bearer: Option<&str>,
+    ) -> Result<AuditAppendResult, BackendError> {
         let url = format!("{}/v1/audit/append/v2", self.audit()?);
         let ts = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -590,10 +598,13 @@ impl BackendClient {
             intent_commitment: None,
         };
 
-        let resp = self
-            .client
-            .post(&url)
-            .json(&body)
+        let request = self.client.post(&url).json(&body);
+        let request = if let Some(bearer) = bearer {
+            request.bearer_auth(bearer)
+        } else {
+            request
+        };
+        let resp = request
             .send()
             .await
             .map_err(|e| BackendError::Transport(e.to_string()))?;
