@@ -56,8 +56,10 @@ class LocalStateTests(unittest.TestCase):
                     local_state.state_directory(repository)
             insecure = Path(directory) / "insecure"
             insecure.mkdir(mode=0o755)
+            insecure.chmod(0o755)
             with self.assertRaisesRegex(ValueError, "owner-only"):
                 local_state.private_directory(insecure)
+            self.assertEqual(insecure.stat().st_mode & 0o777, 0o755)
 
 
 class ChainBoundaryTests(unittest.TestCase):
